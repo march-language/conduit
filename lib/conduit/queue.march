@@ -1,97 +1,121 @@
 doc """
-Conduit.Queue — database-level queue operations.
+Conduit.Queue — database-level queue operations and performer registry.
 
-Handles the translation between typed job definitions and database rows.
-All queue operations go through the configured Storage backend.
+Handles translation between typed job definitions and database rows.
 
-Conduit.Queue also maintains the job performer registry — a Vault-backed map
-from `job_type` string to a performer closure. The performer captures the
-deserialization and dispatch logic for a specific job module.
+The performer registry maps job_type strings to (performer_fn, JobConfig) pairs,
+stored in a Vault-backed in-process map. The worker looks up both the performer
+and the config at execution time — this gives it access to the backoff strategy
+(including Custom functions that can't be serialized to the DB).
 
 Serialization note (Phase 1):
-  Args are serialized via `show(args)` — a human-readable string representation.
-  Phase 2 will replace this with proper JSON encode/decode derived from the Args type.
+  Args are serialised via `show(args)`. Phase 2 will replace this with proper
+  JSON encode/decode derived from each job's Args type.
 """
 
 mod Conduit.Queue do
-  -- Performer: fn (payload_string) -> Result((), ConduitError)
-  -- Registered per job_type when enqueue is first called.
-  ptype Performer = Performer(fn String -> Result((), ConduitError))
+  -- Registry entry: performer function + job config.
+  ptype Entry = Entry({
+    performer : fn String -> Result((), ConduitError),
+    config    : Conduit.JobConfig
+  })
 
   doc """
   Enqueue a job for immediate execution. Returns the job id on success.
-
-  `job_type` is the string name of the job module (e.g. "SendWelcomeEmail").
-  `payload`  is the serialised args (JSON string).
-  `config`   is the job's JobConfig.
-  `storage`  is the storage backend instance.
   """
   fn enqueue(storage, job_type : String, payload : String, config : Conduit.JobConfig) : Result(String, String) do
     let id  = uuid_v4()
     let now = DateTime.now()
     let row = {
-      id           = id,
-      queue        = config.queue,
-      job_type     = job_type,
-      payload      = payload,
-      status       = "pending",
-      attempt      = 0,
-      max_attempts = config.max_attempts,
-      priority     = config.priority,
-      inserted_at  = now,
-      scheduled_at = now,
-      run_at       = now,
-      started_at   = None,
-      completed_at = None,
-      heartbeat_at = None,
-      worker_id    = None,
-      errors       = Nil,
-      tags         = config.tags
+      id                = id,
+      queue             = config.queue,
+      job_type          = job_type,
+      payload           = payload,
+      status            = "pending",
+      attempt           = 0,
+      max_attempts      = config.max_attempts,
+      priority          = config.priority,
+      backoff           = pbackoff_name(config.backoff),
+      dead_letter_queue = config.dead_letter_queue,
+      inserted_at       = now,
+      scheduled_at      = now,
+      run_at            = now,
+      started_at        = None,
+      completed_at      = None,
+      heartbeat_at      = None,
+      worker_id         = None,
+      errors            = Nil,
+      tags              = config.tags
     }
     Conduit.Storage.enqueue(storage, row)
   end
 
   doc """
-  Enqueue a job to run after `delay` has elapsed. Returns the job id.
+  Enqueue a job to run after `delay`. Returns the job id on success.
   """
   fn enqueue_in(storage, job_type : String, payload : String, delay : Duration, config : Conduit.JobConfig) : Result(String, String) do
     let id     = uuid_v4()
     let now    = DateTime.now()
     let run_at = DateTime.add(now, delay)
     let row = {
-      id           = id,
-      queue        = config.queue,
-      job_type     = job_type,
-      payload      = payload,
-      status       = "pending",
-      attempt      = 0,
-      max_attempts = config.max_attempts,
-      priority     = config.priority,
-      inserted_at  = now,
-      scheduled_at = now,
-      run_at       = run_at,
-      started_at   = None,
-      completed_at = None,
-      heartbeat_at = None,
-      worker_id    = None,
-      errors       = Nil,
-      tags         = config.tags
+      id                = id,
+      queue             = config.queue,
+      job_type          = job_type,
+      payload           = payload,
+      status            = "pending",
+      attempt           = 0,
+      max_attempts      = config.max_attempts,
+      priority          = config.priority,
+      backoff           = pbackoff_name(config.backoff),
+      dead_letter_queue = config.dead_letter_queue,
+      inserted_at       = now,
+      scheduled_at      = now,
+      run_at            = run_at,
+      started_at        = None,
+      completed_at      = None,
+      heartbeat_at      = None,
+      worker_id         = None,
+      errors            = Nil,
+      tags              = config.tags
     }
     Conduit.Storage.enqueue(storage, row)
   end
 
-  doc "Register a performer function for a job type. Called at enqueue time."
-  fn register_performer(job_type : String, performer : fn String -> Result((), ConduitError)) : () do
-    Vault.set(registry_key(), job_type, Performer(performer))
+  doc """
+  Register a performer and its config for a job type. Must be called before any
+  worker can execute jobs of that type. Safe to call multiple times (idempotent).
+  """
+  fn register_performer(job_type : String, performer : fn String -> Result((), ConduitError), config : Conduit.JobConfig) : () do
+    Vault.set(registry_key(), job_type, Entry({ performer = performer, config = config }))
   end
 
-  doc "Dispatch a job to its registered performer. Called by the worker."
+  doc "Dispatch a job payload to its registered performer."
   fn dispatch(job_type : String, payload : String) : Result((), ConduitError) do
     match Vault.get(registry_key(), job_type) do
       None ->
         Err(ConduitError.Discard("No performer registered for job type: " ++ job_type))
-      Some(Performer(f)) ->
-        f(payload)
+      Some(Entry(e)) ->
+        e.performer(payload)
+    end
+  end
+
+  doc "Look up the JobConfig for a registered job type."
+  fn lookup_config(job_type : String) : Option(Conduit.JobConfig) do
+    match Vault.get(registry_key(), job_type) do
+      None           -> None
+      Some(Entry(e)) -> Some(e.config)
+    end
+  end
+
+  -- Serialise a Backoff variant to its string name for DB storage.
+  -- Custom functions can't be serialised; they fall back to "exponential" in the
+  -- DB but the actual strategy is still available via lookup_config at runtime.
+  pfn pbackoff_name(b : Conduit.Backoff) : String do
+    match b do
+      Conduit.Backoff.Linear      -> "linear"
+      Conduit.Backoff.Exponential -> "exponential"
+      Conduit.Backoff.Fibonacci   -> "fibonacci"
+      Conduit.Backoff.Custom(_)   -> "custom"
     end
   end
 

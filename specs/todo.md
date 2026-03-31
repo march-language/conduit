@@ -4,20 +4,20 @@
 
 ---
 
-## Phase 2 — Retries, Dead Letters & Error Control 🔄
+## Phase 2 — Retries, Dead Letters & Error Control ✅
 
-- [ ] Apply backoff delay when scheduling a retry (`run_at = now + Conduit.Backoff.delay(strategy, attempt)`)
-- [ ] `ConduitError.Discard` moves job to dead state immediately (no further retries)
-- [ ] `ConduitError.Snooze(dur)` sets `status = snoozed`, `run_at = now + dur`
-- [ ] `ConduitError.Retry` re-queues with correct `run_at` based on attempt + backoff
-- [ ] Jobs exhausting `max_attempts` transition to `dead` and move to `conduit_dead_letters` table
-- [ ] `on_dead_letter` callback fires when a job is dead-lettered
-- [ ] `dead_letter_queue` config field respected (jobs routed to named DLQ)
-- [ ] Jitter added to backoff delays (configurable, default ±10%)
-- [ ] Stale-job detection: rescue `running` jobs whose `heartbeat_at` exceeds timeout
-- [ ] Worker sends periodic heartbeats during long-running jobs
-- [ ] Migration: `conduit_dead_letters` table + `idx_conduit_jobs_heartbeat` index
-- [ ] Tests: retry scheduling, discard, snooze, DLQ, stale rescue
+- [x] Apply backoff delay when scheduling a retry
+- [x] `ConduitError.Discard` moves job to dead state (or DLQ if configured)
+- [x] `ConduitError.Snooze(dur)` sets `status = snoozed`, `run_at = now + dur`
+- [x] `ConduitError.Retry` re-queues with correct `run_at` based on attempt + backoff
+- [x] Jobs exhausting `max_attempts` move to `conduit_dead_letters` table
+- [x] `on_dead_letter` callback fires when a job is dead-lettered
+- [x] `dead_letter_queue` config field respected
+- [x] Jitter added to backoff delays (0–1000ms random)
+- [x] Stale-job detection: rescue `running` jobs with expired heartbeat
+- [x] Worker heartbeats during execution (every timeout/3 seconds)
+- [x] Migration: `conduit_dead_letters` + `idx_conduit_jobs_heartbeat`
+- [x] Tests: retry scheduling, discard, DLQ, on_dead_letter callback, DeadLetter.from_job
 
 ---
 

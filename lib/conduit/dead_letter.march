@@ -1,0 +1,67 @@
+doc """
+Conduit.DeadLetter — represents a job that has exhausted all retry attempts
+or was permanently discarded.
+
+Dead-lettered jobs are moved to the `conduit_dead_letters` table. From there
+they can be reviewed, retried manually, or deleted via the dashboard (Phase 6).
+
+A job ends up here in two ways:
+  1. Exhausted retries — `attempt` reached `max_attempts` with a retriable error
+  2. Explicit discard — `perform` returned `Err(ConduitError.Discard(...))`
+"""
+
+mod Conduit do
+  doc "A job that has been permanently failed or discarded."
+  type DeadLetter = {
+    id                 : String,
+    job_id             : String,
+    queue              : String,
+    job_type           : String,
+    payload            : String,
+    errors             : List(String),
+    attempts           : Int,
+    first_attempted_at : Option(DateTime),
+    last_attempted_at  : Option(DateTime),
+    discarded_at       : DateTime,
+    reviewed           : Bool,
+    reviewed_by        : Option(String),
+    reviewed_at        : Option(DateTime),
+    retry_count        : Int
+  }
+end
+
+mod Conduit.DeadLetter do
+  doc "Build a DeadLetter record from a failed JobRow and the final error message."
+  fn from_job(job : Conduit.JobRow, final_error : String) : Conduit.DeadLetter do
+    {
+      id                 = uuid_v4(),
+      job_id             = job.id,
+      queue              = job.queue,
+      job_type           = job.job_type,
+      payload            = job.payload,
+      errors             = List.append(job.errors, Cons(final_error, Nil)),
+      attempts           = job.attempt,
+      first_attempted_at = job.started_at,
+      last_attempted_at  = Some(DateTime.now()),
+      discarded_at       = DateTime.now(),
+      reviewed           = false,
+      reviewed_by        = None,
+      reviewed_at        = None,
+      retry_count        = 0
+    }
+  end
+
+  doc "Build a JobInfo snapshot from a JobRow (used for on_dead_letter callbacks)."
+  fn to_job_info(job : Conduit.JobRow) : Conduit.JobInfo do
+    {
+      id           = job.id,
+      queue        = job.queue,
+      job_type     = job.job_type,
+      attempt      = job.attempt,
+      max_attempts = job.max_attempts,
+      tags         = job.tags,
+      inserted_at  = job.inserted_at,
+      errors       = job.errors
+    }
+  end
+end

@@ -2,32 +2,39 @@ doc """
 Conduit.Worker — polls the queue and executes jobs.
 
 Each worker is a long-lived task that loops:
-  1. Fetch the next available job from its assigned queue (SKIP LOCKED)
-  2. Mark it as running
-  3. Validate args (if a schema is configured)
+  1. Fetch the next available job (SKIP LOCKED)
+  2. Claim it (mark_running — increments attempt counter)
+  3. Spawn a heartbeat task that ticks every timeout/3 seconds
   4. Dispatch to the registered performer
-  5. Mark completed or failed based on the result
-  6. Handle ConduitError variants (retry scheduling, discard, snooze)
-  7. Sleep briefly and repeat
+  5. Cancel the heartbeat
+  6. Handle the result:
+       Ok(())                   → mark_completed
+       Err(Retry)               → schedule_retry with backoff delay + jitter
+       Err(Discard)             → discard (or move_to_dead_letter if DLQ configured)
+       Err(Snooze(dur))         → mark_snoozed until now+dur
+       Err(WorkerError)         → treated as Retry
+  7. If attempt >= max_attempts on Retry/WorkerError → dead-letter instead
+  8. Loop
 
-Workers are supervised by Conduit.start/1. If a worker task crashes, the
-supervisor restarts it. Jobs left in 'running' state by a crashed worker are
-rescued by the stale-job detector (Phase 2).
-
-Concurrency: `workers_per_queue` independent tasks run per queue. They race for
-jobs via SKIP LOCKED — no additional coordination needed.
+Stale-job rescue runs as a separate background task: every `stale_check_interval_ms`
+it scans for jobs stuck in 'running' with an expired heartbeat and returns them
+to 'pending'.
 """
 
 mod Conduit.Worker do
   doc """
-  Start `count` worker tasks for the given queue.
-  Returns a list of task handles (fire-and-forget; they loop indefinitely).
+  Start `count` worker tasks for the given queue, plus one stale-rescue task.
+  Returns all task handles.
   """
   fn start_workers(storage, queue : String, count : Int, poll_interval_ms : Int) : List(Task) do
-    List.range(0, count - 1)
-    |> List.map(fn _ ->
-      task_spawn(fn () -> worker_loop(storage, queue, poll_interval_ms))
+    let workers = List.range(0, count - 1)
+      |> List.map(fn _ ->
+        task_spawn(fn () -> worker_loop(storage, queue, poll_interval_ms))
+      end)
+    let rescuer = task_spawn(fn () ->
+      rescue_loop(storage, poll_interval_ms * 10)
     end)
+    List.append(workers, Cons(rescuer, Nil))
   end
 
   pfn worker_loop(storage, queue : String, poll_interval_ms : Int) : () do
@@ -37,8 +44,6 @@ mod Conduit.Worker do
         psleep_ms(poll_interval_ms)
         worker_loop(storage, queue, poll_interval_ms)
       Ok(None) ->
-        -- No jobs ready; yield and wait before polling again.
-        -- Phase 2: replace with LISTEN/NOTIFY for immediate pickup.
         psleep_ms(poll_interval_ms)
         worker_loop(storage, queue, poll_interval_ms)
       Ok(Some(job)) ->
@@ -49,18 +54,35 @@ mod Conduit.Worker do
 
   pfn execute(storage, job : Conduit.JobRow) : () do
     let worker_id = uuid_v4()
-
-    -- Claim the job
     match Conduit.Storage.mark_running(storage, job.id, worker_id) do
       Err(e) ->
-        Logger.warn("conduit: could not mark job running " ++ job.id ++ ": " ++ e)
+        Logger.warn("conduit: could not claim job " ++ job.id ++ ": " ++ e)
       Ok(()) ->
+        -- next_attempt is the attempt number that is now executing (post-increment).
+        let next_attempt = job.attempt + 1
+        let config = Conduit.Queue.lookup_config(job.job_type)
+          |> Option.unwrap_or(Conduit.JobConfig.default())
+
+        -- Heartbeat interval: one third of the job timeout, minimum 5s.
+        let heartbeat_interval_ms = int_div(
+          Duration.to_seconds(config.timeout) * 1000,
+          3
+        ) |> pmax_int(5000)
+
+        let hb_task = task_spawn(fn () ->
+          heartbeat_loop(storage, job.id, heartbeat_interval_ms)
+        end)
+
         let result = Conduit.Queue.dispatch(job.job_type, job.payload)
-        handle_result(storage, job, result)
+
+        -- Cancel the heartbeat task now that the job has finished.
+        kill(task_await_unwrap(hb_task))
+
+        handle_result(storage, job, next_attempt, config, result)
     end
   end
 
-  pfn handle_result(storage, job : Conduit.JobRow, result : Result((), ConduitError)) : () do
+  pfn handle_result(storage, job : Conduit.JobRow, attempt : Int, config : Conduit.JobConfig, result : Result((), ConduitError)) : () do
     match result do
       Ok(()) ->
         match Conduit.Storage.mark_completed(storage, job.id) do
@@ -69,14 +91,15 @@ mod Conduit.Worker do
         end
 
       Err(ConduitError.Retry(msg)) ->
-        pschedule_retry(storage, job, msg)
+        phandle_retry(storage, job, attempt, config, msg)
+
+      Err(ConduitError.WorkerError(msg)) ->
+        Logger.error("conduit: worker error on " ++ job.id ++ ": " ++ msg)
+        phandle_retry(storage, job, attempt, config, "worker error: " ++ msg)
 
       Err(ConduitError.Discard(msg)) ->
-        Logger.info("conduit: discarding job " ++ job.id ++ " (" ++ job.job_type ++ "): " ++ msg)
-        match Conduit.Storage.mark_failed(storage, job.id, "discarded: " ++ msg) do
-          Ok(())  -> ()
-          Err(e)  -> Logger.error("conduit: mark_failed (discard) error for " ++ job.id ++ ": " ++ e)
-        end
+        Logger.info("conduit: discarding " ++ job.id ++ " (" ++ job.job_type ++ "): " ++ msg)
+        phandle_discard(storage, job, config, msg)
 
       Err(ConduitError.Snooze(dur)) ->
         let wake_at = DateTime.add(DateTime.now(), dur)
@@ -84,31 +107,87 @@ mod Conduit.Worker do
           Ok(())  -> ()
           Err(e)  -> Logger.error("conduit: mark_snoozed error for " ++ job.id ++ ": " ++ e)
         end
-
-      Err(ConduitError.WorkerError(msg)) ->
-        Logger.error("conduit: worker error on job " ++ job.id ++ ": " ++ msg)
-        pschedule_retry(storage, job, "worker error: " ++ msg)
     end
   end
 
-  pfn pschedule_retry(storage, job : Conduit.JobRow, error_msg : String) : () do
-    match Conduit.Storage.mark_failed(storage, job.id, error_msg) do
+  -- Retry path: check if we have attempts left; if so reschedule, else dead-letter.
+  pfn phandle_retry(storage, job : Conduit.JobRow, attempt : Int, config : Conduit.JobConfig, error_msg : String) : () do
+    if attempt >= config.max_attempts do
+      -- Exhausted — move to dead letter.
+      Logger.info("conduit: job " ++ job.id ++ " exhausted " ++ int_to_string(attempt) ++ " attempts, dead-lettering")
+      phandle_dead(storage, job, config, error_msg)
+    else
+      -- Compute run_at: base backoff delay + jitter.
+      let base_delay  = Conduit.Backoff.delay(config.backoff, attempt)
+      let jitter_ms   = Random.int(0, 1000)
+      let run_at      = DateTime.add(
+                          DateTime.add(DateTime.now(), base_delay),
+                          Duration.milliseconds(jitter_ms)
+                        )
+      Logger.debug("conduit: scheduling retry for " ++ job.id ++ " at attempt " ++ int_to_string(attempt + 1))
+      match Conduit.Storage.schedule_retry(storage, job.id, error_msg, run_at) do
+        Ok(())  -> ()
+        Err(e)  -> Logger.error("conduit: schedule_retry error for " ++ job.id ++ ": " ++ e)
+      end
+    end
+  end
+
+  -- Discard path: no retries, but may still go to DLQ.
+  pfn phandle_discard(storage, job : Conduit.JobRow, config : Conduit.JobConfig, reason : String) : () do
+    match config.dead_letter_queue do
+      None ->
+        -- No DLQ configured: just mark the job dead in-place.
+        match Conduit.Storage.discard(storage, job.id, "discarded: " ++ reason) do
+          Ok(())  -> ()
+          Err(e)  -> Logger.error("conduit: discard error for " ++ job.id ++ ": " ++ e)
+        end
+      Some(_) ->
+        -- Route to the dead-letter table.
+        phandle_dead(storage, job, config, "discarded: " ++ reason)
+    end
+  end
+
+  -- Dead-letter path: insert into conduit_dead_letters, fire callback.
+  pfn phandle_dead(storage, job : Conduit.JobRow, config : Conduit.JobConfig, error_msg : String) : () do
+    let dl = Conduit.DeadLetter.from_job(job, error_msg)
+    match Conduit.Storage.move_to_dead_letter(storage, dl) do
+      Err(e)  -> Logger.error("conduit: move_to_dead_letter error for " ++ job.id ++ ": " ++ e)
+      Ok(())  ->
+        -- Fire the on_dead_letter callback if configured.
+        match config.on_dead_letter do
+          None         -> ()
+          Some(cb)     -> cb(Conduit.DeadLetter.to_job_info(job))
+        end
+    end
+  end
+
+  -- Heartbeat task: updates the DB every `interval_ms`, keeps running until killed.
+  pfn heartbeat_loop(storage, job_id : String, interval_ms : Int) : () do
+    psleep_ms(interval_ms)
+    match Conduit.Storage.heartbeat(storage, job_id) do
+      Ok(())  -> ()
+      Err(e)  -> Logger.warn("conduit: heartbeat error for " ++ job_id ++ ": " ++ e)
+    end
+    heartbeat_loop(storage, job_id, interval_ms)
+  end
+
+  -- Stale-rescue loop: periodically finds crashed workers' jobs and requeues them.
+  -- Runs every `interval_ms`. Timeout: 2× the default job timeout (60s default).
+  pfn rescue_loop(storage, interval_ms : Int) : () do
+    psleep_ms(interval_ms)
+    match Conduit.Storage.rescue_stale(storage, 60) do
+      Ok(ids) ->
+        if not (is_nil(ids)) do
+          Logger.info("conduit: rescued " ++ int_to_string(length(ids)) ++ " stale job(s)")
+        end
       Err(e) ->
-        Logger.error("conduit: mark_failed error for " ++ job.id ++ ": " ++ e)
-      Ok(()) ->
-        -- If there are attempts remaining, reschedule with backoff.
-        -- The storage's mark_failed transitions to 'dead' when attempt >= max_attempts.
-        -- Workers re-pick up 'failed' jobs on the next poll (run_at scheduling
-        -- based on backoff is applied via a separate UPDATE in Phase 2).
-        ()
+        Logger.error("conduit: rescue_stale error: " ++ e)
     end
+    rescue_loop(storage, interval_ms)
   end
 
-  -- Portable millisecond sleep via task_yield loop.
-  -- Phase 2: replace with a proper timer/sleep primitive.
   pfn psleep_ms(ms : Int) : () do
-    let iterations = int_div(ms, 10)
-    psleep_loop(iterations)
+    psleep_loop(int_div(ms, 10))
   end
 
   pfn psleep_loop(n : Int) : () do
@@ -118,5 +197,9 @@ mod Conduit.Worker do
       task_yield()
       psleep_loop(n - 1)
     end
+  end
+
+  pfn pmax_int(a : Int, b : Int) : Int do
+    if a > b do a else b end
   end
 end

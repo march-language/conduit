@@ -12,57 +12,61 @@ directly to the `conduit_jobs` table.
 mod Conduit do
   doc "Internal representation of a job in persistent storage."
   type JobRow = {
-    id           : String,
-    queue        : String,
-    job_type     : String,
-    payload      : String,          -- JSON-encoded args
-    status       : String,          -- pending | running | completed | failed | dead | snoozed
-    attempt      : Int,
-    max_attempts : Int,
-    priority     : Int,
-    inserted_at  : DateTime,
-    scheduled_at : DateTime,
-    run_at       : DateTime,
-    started_at   : Option(DateTime),
-    completed_at : Option(DateTime),
-    heartbeat_at : Option(DateTime),
-    worker_id    : Option(String),
-    errors       : List(String),
-    tags         : List(String)
+    id                : String,
+    queue             : String,
+    job_type          : String,
+    payload           : String,          -- JSON-encoded args
+    status            : String,          -- pending | running | completed | failed | dead | snoozed
+    attempt           : Int,
+    max_attempts      : Int,
+    priority          : Int,
+    backoff           : String,          -- "linear" | "exponential" | "fibonacci"
+    dead_letter_queue : Option(String),
+    inserted_at       : DateTime,
+    scheduled_at      : DateTime,
+    run_at            : DateTime,
+    started_at        : Option(DateTime),
+    completed_at      : Option(DateTime),
+    heartbeat_at      : Option(DateTime),
+    worker_id         : Option(String),
+    errors            : List(String),
+    tags              : List(String)
   }
 end
 
 doc """
 Conduit.Storage interface. Implement to provide a custom storage backend.
 
-Methods:
-  enqueue     — persist a new job row, return its id on success
-  fetch_next  — atomically claim the next pending job in a queue (SKIP LOCKED)
-  mark_running    — record that a worker has started executing a job
-  mark_completed  — transition job to completed status
-  mark_failed     — record an error and increment attempt count
-  mark_snoozed    — reschedule job to run after a duration
-  heartbeat       — update heartbeat timestamp for stale-job detection
+Phase 1 methods:
+  enqueue          — persist a new job row, return its id
+  fetch_next       — atomically claim the next available job (SKIP LOCKED)
+  mark_running     — record that a worker has claimed a job; increments attempt
+  mark_completed   — transition job to completed
+  heartbeat        — refresh heartbeat timestamp for stale-job detection
+
+Phase 2 additions:
+  schedule_retry   — record error and reschedule with a future run_at (status → pending)
+  discard          — record error and permanently fail a job (status → dead), no DLQ
+  move_to_dead_letter — insert into dead_letters table, mark job dead
+  rescue_stale     — return stale running jobs (heartbeat expired) to pending
 """
 interface Conduit.Storage(s) do
-  fn enqueue       : s -> Conduit.JobRow -> Result(String, String)
-  fn fetch_next    : s -> String -> Result(Option(Conduit.JobRow), String)
-  fn mark_running  : s -> String -> String -> Result((), String)
-  fn mark_completed: s -> String -> Result((), String)
-  fn mark_failed   : s -> String -> String -> Result((), String)
-  fn mark_snoozed  : s -> String -> DateTime -> Result((), String)
-  fn heartbeat     : s -> String -> Result((), String)
+  fn enqueue            : s -> Conduit.JobRow -> Result(String, String)
+  fn fetch_next         : s -> String -> Result(Option(Conduit.JobRow), String)
+  fn mark_running       : s -> String -> String -> Result((), String)
+  fn mark_completed     : s -> String -> Result((), String)
+  fn heartbeat          : s -> String -> Result((), String)
+  fn schedule_retry     : s -> String -> String -> DateTime -> Result((), String)
+  fn discard            : s -> String -> String -> Result((), String)
+  fn move_to_dead_letter: s -> Conduit.DeadLetter -> Result((), String)
+  fn rescue_stale       : s -> Int -> Result(List(String), String)
 end
 
 doc """
 Postgres storage backend for Conduit.
 
-Requires the `conduit_jobs` table (see specs/conduit.md § Phase 1 migration).
+Requires the migrations from specs/conduit.md (Phase 1 + Phase 2).
 Uses SKIP LOCKED for lock-free concurrent job claiming across multiple workers.
-Uses LISTEN/NOTIFY for near-instant job pickup.
-
-Configuration:
-  { repo: MyApp.Repo }
 """
 mod Conduit.Storage.Postgres do
   type Config = { repo : Depot.Repo }
@@ -72,8 +76,8 @@ mod Conduit.Storage.Postgres do
       let sql = "
         INSERT INTO conduit_jobs
           (id, queue, job_type, payload, status, attempt, max_attempts,
-           priority, inserted_at, scheduled_at, run_at, tags)
-        VALUES ($1, $2, $3, $4, 'pending', 0, $5, $6, NOW(), NOW(), $7, $8)
+           priority, backoff, dead_letter_queue, inserted_at, scheduled_at, run_at, tags)
+        VALUES ($1, $2, $3, $4, 'pending', 0, $5, $6, $7, $8, NOW(), NOW(), $9, $10)
       "
       let params = Cons(job.id,
                    Cons(job.queue,
@@ -81,9 +85,11 @@ mod Conduit.Storage.Postgres do
                    Cons(job.payload,
                    Cons(int_to_string(job.max_attempts),
                    Cons(int_to_string(job.priority),
+                   Cons(job.backoff,
+                   Cons(Option.unwrap_or(job.dead_letter_queue, ""),
                    Cons(job.run_at |> DateTime.format("%Y-%m-%dT%H:%M:%SZ"),
                    Cons(string_join(job.tags, ","),
-                   Nil))))))))
+                   Nil))))))))))
       match Depot.Repo.query(sql, params) do
         Ok(_)  -> Ok(job.id)
         Err(e) -> Err(e)
@@ -93,7 +99,10 @@ mod Conduit.Storage.Postgres do
     fn fetch_next(_self, queue : String) : Result(Option(Conduit.JobRow), String) do
       let sql = "
         SELECT id, queue, job_type, payload, status, attempt, max_attempts,
-               priority, inserted_at, scheduled_at, run_at, errors, tags
+               priority, backoff, dead_letter_queue,
+               inserted_at, scheduled_at, run_at,
+               started_at, completed_at, heartbeat_at, worker_id,
+               errors, tags
         FROM conduit_jobs
         WHERE queue = $1
           AND status IN ('pending', 'snoozed')
@@ -115,8 +124,11 @@ mod Conduit.Storage.Postgres do
     fn mark_running(_self, job_id : String, worker_id : String) : Result((), String) do
       let sql = "
         UPDATE conduit_jobs
-        SET status = 'running', started_at = NOW(), heartbeat_at = NOW(),
-            worker_id = $2, attempt = attempt + 1
+        SET status = 'running',
+            started_at   = COALESCE(started_at, NOW()),
+            heartbeat_at = NOW(),
+            worker_id    = $2,
+            attempt      = attempt + 1
         WHERE id = $1
       "
       match Depot.Repo.query(sql, Cons(job_id, Cons(worker_id, Nil))) do
@@ -137,33 +149,6 @@ mod Conduit.Storage.Postgres do
       end
     end
 
-    fn mark_failed(_self, job_id : String, error_msg : String) : Result((), String) do
-      let sql = "
-        UPDATE conduit_jobs
-        SET status = CASE WHEN attempt >= max_attempts THEN 'dead' ELSE 'failed' END,
-            errors = errors || $2::jsonb
-        WHERE id = $1
-      "
-      let error_json = "{\"error\": \"" ++ error_msg ++ "\", \"at\": \"now\"}"
-      match Depot.Repo.query(sql, Cons(job_id, Cons(error_json, Nil))) do
-        Ok(_)  -> Ok(())
-        Err(e) -> Err(e)
-      end
-    end
-
-    fn mark_snoozed(_self, job_id : String, run_at : DateTime) : Result((), String) do
-      let sql = "
-        UPDATE conduit_jobs
-        SET status = 'snoozed', run_at = $2
-        WHERE id = $1
-      "
-      let ts = DateTime.format(run_at, "%Y-%m-%dT%H:%M:%SZ")
-      match Depot.Repo.query(sql, Cons(job_id, Cons(ts, Nil))) do
-        Ok(_)  -> Ok(())
-        Err(e) -> Err(e)
-      end
-    end
-
     fn heartbeat(_self, job_id : String) : Result((), String) do
       let sql = "UPDATE conduit_jobs SET heartbeat_at = NOW() WHERE id = $1"
       match Depot.Repo.query(sql, Cons(job_id, Nil)) do
@@ -171,32 +156,128 @@ mod Conduit.Storage.Postgres do
         Err(e) -> Err(e)
       end
     end
+
+    -- Record an error and reschedule: status → pending, run_at → future.
+    -- Called when a job fails but still has attempts remaining.
+    fn schedule_retry(_self, job_id : String, error_msg : String, run_at : DateTime) : Result((), String) do
+      let sql = "
+        UPDATE conduit_jobs
+        SET status = 'pending',
+            run_at = $3,
+            errors = errors || $2::jsonb
+        WHERE id = $1
+      "
+      let error_json = perror_json(error_msg)
+      let ts         = DateTime.format(run_at, "%Y-%m-%dT%H:%M:%SZ")
+      match Depot.Repo.query(sql, Cons(job_id, Cons(error_json, Cons(ts, Nil)))) do
+        Ok(_)  -> Ok(())
+        Err(e) -> Err(e)
+      end
+    end
+
+    -- Permanently discard a job without moving to a dead-letter table.
+    -- Used for Discard errors when no dead_letter_queue is configured.
+    fn discard(_self, job_id : String, error_msg : String) : Result((), String) do
+      let sql = "
+        UPDATE conduit_jobs
+        SET status = 'dead',
+            completed_at = NOW(),
+            errors = errors || $2::jsonb
+        WHERE id = $1
+      "
+      let error_json = perror_json(error_msg)
+      match Depot.Repo.query(sql, Cons(job_id, Cons(error_json, Nil))) do
+        Ok(_)  -> Ok(())
+        Err(e) -> Err(e)
+      end
+    end
+
+    -- Insert a DeadLetter row and mark the source job as dead.
+    fn move_to_dead_letter(_self, dl : Conduit.DeadLetter) : Result((), String) do
+      let insert_sql = "
+        INSERT INTO conduit_dead_letters
+          (id, job_id, queue, job_type, payload, errors, attempts,
+           first_attempted_at, last_attempted_at, discarded_at)
+        VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9, $10)
+        ON CONFLICT (job_id) DO NOTHING
+      "
+      let errors_json  = "[" ++ string_join(List.map(dl.errors, fn e -> "\"" ++ e ++ "\""), ", ") ++ "]"
+      let first_at     = Option.map(dl.first_attempted_at, fn d -> DateTime.format(d, "%Y-%m-%dT%H:%M:%SZ")) |> Option.unwrap_or("")
+      let last_at      = Option.map(dl.last_attempted_at,  fn d -> DateTime.format(d, "%Y-%m-%dT%H:%M:%SZ")) |> Option.unwrap_or("")
+      let discarded_at = DateTime.format(dl.discarded_at, "%Y-%m-%dT%H:%M:%SZ")
+      let insert_params = Cons(dl.id,
+                          Cons(dl.job_id,
+                          Cons(dl.queue,
+                          Cons(dl.job_type,
+                          Cons(dl.payload,
+                          Cons(errors_json,
+                          Cons(int_to_string(dl.attempts),
+                          Cons(first_at,
+                          Cons(last_at,
+                          Cons(discarded_at,
+                          Nil))))))))))
+      match Depot.Repo.query(insert_sql, insert_params) do
+        Err(e) -> Err(e)
+        Ok(_)  ->
+          let mark_sql = "UPDATE conduit_jobs SET status = 'dead', completed_at = NOW() WHERE id = $1"
+          match Depot.Repo.query(mark_sql, Cons(dl.job_id, Nil)) do
+            Ok(_)  -> Ok(())
+            Err(e) -> Err(e)
+          end
+      end
+    end
+
+    -- Find jobs stuck in 'running' whose heartbeat is older than `timeout_seconds`.
+    -- Returns them to 'pending' so workers can re-pick them up.
+    -- Returns the list of rescued job ids.
+    fn rescue_stale(_self, timeout_seconds : Int) : Result(List(String), String) do
+      let sql = "
+        UPDATE conduit_jobs
+        SET status = 'pending', worker_id = NULL, run_at = NOW()
+        WHERE status = 'running'
+          AND heartbeat_at < NOW() - ($1 || ' seconds')::INTERVAL
+        RETURNING id
+      "
+      match Depot.Repo.query(sql, Cons(int_to_string(timeout_seconds), Nil)) do
+        Ok(rows) ->
+          let ids = List.map(rows, fn r -> Map.get(r, "id") |> unwrap_or("") end)
+          Ok(ids)
+        Err(e) -> Err(e)
+      end
+    end
   end
 
-  -- Convert a raw database row map to a Conduit.JobRow.
   pfn prow_to_job(row : Map) : Conduit.JobRow do
     {
-      id           = Map.get(row, "id") |> unwrap,
-      queue        = Map.get(row, "queue") |> unwrap,
-      job_type     = Map.get(row, "job_type") |> unwrap,
-      payload      = Map.get(row, "payload") |> unwrap,
-      status       = Map.get(row, "status") |> unwrap,
-      attempt      = Map.get(row, "attempt") |> unwrap |> string_to_int |> unwrap_or(0),
-      max_attempts = Map.get(row, "max_attempts") |> unwrap |> string_to_int |> unwrap_or(3),
-      priority     = Map.get(row, "priority") |> unwrap |> string_to_int |> unwrap_or(0),
-      inserted_at  = Map.get(row, "inserted_at") |> unwrap |> DateTime.parse("%Y-%m-%dT%H:%M:%SZ") |> unwrap,
-      scheduled_at = Map.get(row, "scheduled_at") |> unwrap |> DateTime.parse("%Y-%m-%dT%H:%M:%SZ") |> unwrap,
-      run_at       = Map.get(row, "run_at") |> unwrap |> DateTime.parse("%Y-%m-%dT%H:%M:%SZ") |> unwrap,
-      started_at   = None,
-      completed_at = None,
-      heartbeat_at = None,
-      worker_id    = None,
-      errors       = Nil,
-      tags         = Nil
+      id                = Map.get(row, "id")           |> unwrap,
+      queue             = Map.get(row, "queue")        |> unwrap,
+      job_type          = Map.get(row, "job_type")     |> unwrap,
+      payload           = Map.get(row, "payload")      |> unwrap,
+      status            = Map.get(row, "status")       |> unwrap,
+      attempt           = Map.get(row, "attempt")      |> unwrap |> String.to_int |> unwrap_or(0),
+      max_attempts      = Map.get(row, "max_attempts") |> unwrap |> String.to_int |> unwrap_or(3),
+      priority          = Map.get(row, "priority")     |> unwrap |> String.to_int |> unwrap_or(0),
+      backoff           = Map.get(row, "backoff")      |> unwrap_or("exponential"),
+      dead_letter_queue = Map.get(row, "dead_letter_queue") |> Option.flat_map(fn s ->
+        if String.is_empty(s) do None else Some(s) end
+      end),
+      inserted_at  = Map.get(row, "inserted_at")  |> unwrap |> pparse_dt,
+      scheduled_at = Map.get(row, "scheduled_at") |> unwrap |> pparse_dt,
+      run_at       = Map.get(row, "run_at")        |> unwrap |> pparse_dt,
+      started_at   = Map.get(row, "started_at")   |> Option.map(pparse_dt),
+      completed_at = Map.get(row, "completed_at") |> Option.map(pparse_dt),
+      heartbeat_at = Map.get(row, "heartbeat_at") |> Option.map(pparse_dt),
+      worker_id    = Map.get(row, "worker_id"),
+      errors       = Nil,   -- Phase 3: parse errors JSONB array
+      tags         = Nil    -- Phase 3: parse tags array
     }
   end
 
-  pfn string_to_int(s : String) : Option(Int) do
-    String.to_int(s)
+  pfn pparse_dt(s : String) : DateTime do
+    DateTime.parse(s, "%Y-%m-%dT%H:%M:%SZ") |> unwrap
+  end
+
+  pfn perror_json(msg : String) : String do
+    "[{\"error\": \"" ++ msg ++ "\", \"at\": \"" ++ DateTime.format(DateTime.now(), "%Y-%m-%dT%H:%M:%SZ") ++ "\"}]"
   end
 end

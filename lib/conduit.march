@@ -24,10 +24,10 @@ Enqueue from anywhere:
   Conduit.enqueue(SendWelcomeEmail, "SendWelcomeEmail", show(args))
   Conduit.enqueue_in(SendWelcomeEmail, "SendWelcomeEmail", show(args), Duration.minutes(5))
 
-## Serialization (Phase 1)
+## Serialization (Phase 1/2)
 
-Args are currently serialised via `show/1` (a human-readable string). Phase 2
-will replace this with derived JSON encode/decode based on the Args type,
+Args are currently serialised via `show/1` (a human-readable string). A future
+phase will replace this with derived JSON encode/decode based on the Args type,
 matching the typed-payload guarantee described in the design spec.
 
 ## Storage
@@ -104,21 +104,32 @@ mod Conduit do
   end
 
   doc """
-  Register a job performer in the in-process registry. Must be called before
-  any worker can execute jobs of that type.
+  Register a job performer and its config in the in-process registry.
+  Must be called before any worker can execute jobs of that type.
 
-  `job_type`  — string name of the job module
+  `job_type`  — string name of the job module (e.g. "SendWelcomeEmail")
   `performer` — fn (payload_string) -> Result((), ConduitError)
+  `config`    — the job's JobConfig (used for backoff, DLQ, callbacks at runtime)
 
-  In Phase 2, this will be automated via the `impl Conduit.Job` macro.
-  For Phase 1, call this at startup for each job type:
+  Call this at application startup for each job type:
 
-    Conduit.register("SendWelcomeEmail", fn payload ->
-      let args = todo("deserialise payload into SendWelcomeEmail.Args")
-      SendWelcomeEmail.perform(SendWelcomeEmail, args)
-    end)
+    Conduit.register("SendWelcomeEmail",
+      fn payload ->
+        let args = todo("deserialise payload into SendWelcomeEmail.Args")
+        SendWelcomeEmail.perform(SendWelcomeEmail, args)
+      end,
+      SendWelcomeEmail.config(SendWelcomeEmail)
+    )
   """
-  fn register(job_type : String, performer : fn String -> Result((), ConduitError)) : () do
-    Conduit.Queue.register_performer(job_type, performer)
+  fn register(job_type : String, performer : fn String -> Result((), ConduitError), config : Conduit.JobConfig) : () do
+    Conduit.Queue.register_performer(job_type, performer, config)
+  end
+
+  doc """
+  Register a job performer using default config. Convenience wrapper for jobs
+  that don't override fn config.
+  """
+  fn register_default(job_type : String, performer : fn String -> Result((), ConduitError)) : () do
+    Conduit.Queue.register_performer(job_type, performer, Conduit.JobConfig.default())
   end
 end
