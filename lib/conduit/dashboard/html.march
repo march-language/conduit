@@ -1,12 +1,40 @@
 mod Conduit.Dashboard.Html do
   doc "Renders a full HTML page with the shared nav injected."
   fn page(title : String, base_path : String, content : String) : String do
-    "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>" ++ Html.escape(title) ++ " — Conduit</title><style>" ++ pcss() ++ "</style></head><body>" ++ nav(base_path, "") ++ "<main class=\"main-content\">" ++ content ++ "</main></body></html>"
+    ~H"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>#{Html.escape(title)} — Conduit</title>
+      <style>#{pcss()}</style>
+    </head>
+    <body>
+      #{nav(base_path, "")}
+      <main class="main-content">#{content}</main>
+    </body>
+    </html>
+    """
   end
 
   doc "Renders a full HTML page with the shared nav injected, with active tab."
   fn page_with_nav(title : String, base_path : String, current : String, content : String) : String do
-    "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>" ++ Html.escape(title) ++ " — Conduit</title><style>" ++ pcss() ++ "</style></head><body>" ++ nav(base_path, current) ++ "<main class=\"main-content\">" ++ content ++ "</main></body></html>"
+    ~H"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <title>#{Html.escape(title)} — Conduit</title>
+      <style>#{pcss()}</style>
+    </head>
+    <body>
+      #{nav(base_path, current)}
+      <main class="main-content">#{content}</main>
+    </body>
+    </html>
+    """
   end
 
   doc "Renders the top navigation bar."
@@ -33,19 +61,29 @@ mod Conduit.Dashboard.Html do
     let link_html = String.join(List.map(links, fn item ->
       let (key, label, href) = item
       let active_class = if key == current do " active" else "" end
-      "<a href=\"" ++ href ++ "\" class=\"nav-link" ++ active_class ++ "\">" ++ label ++ "</a>"
+      ~H"""<a href="#{href}" class="nav-link#{active_class}">#{label}</a>"""
     ), "")
-    "<nav class=\"top-nav\"><div class=\"nav-brand\">⚡ Conduit</div><div class=\"nav-links\">" ++ link_html ++ "</div></nav>"
+    ~H"""
+    <nav class="top-nav">
+      <div class="nav-brand">⚡ Conduit</div>
+      <div class="nav-links">#{link_html}</div>
+    </nav>
+    """
   end
 
   doc "Renders a <table> with a header row and data rows."
   fn table(headers : List(String), rows : List(List(String))) : String do
-    let header_html = String.join(List.map(headers, fn h -> "<th>" ++ h ++ "</th>"), "")
+    let header_html = String.join(List.map(headers, fn h -> ~H"""<th>#{h}</th>"""), "")
     let rows_html = String.join(List.map(rows, fn row ->
-      let cells = String.join(List.map(row, fn cell -> "<td>" ++ cell ++ "</td>"), "")
-      "<tr>" ++ cells ++ "</tr>"
+      let cells = String.join(List.map(row, fn cell -> ~H"""<td>#{cell}</td>"""), "")
+      ~H"""<tr>#{cells}</tr>"""
     ), "")
-    "<table class=\"data-table\"><thead><tr>" ++ header_html ++ "</tr></thead><tbody>" ++ rows_html ++ "</tbody></table>"
+    ~H"""
+    <table class="data-table">
+      <thead><tr>#{header_html}</tr></thead>
+      <tbody>#{rows_html}</tbody>
+    </table>
+    """
   end
 
   doc "Badge for job/workflow status."
@@ -64,7 +102,7 @@ mod Conduit.Dashboard.Html do
       "stopping"  -> "badge-pending"
       _           -> "badge-default"
     end
-    "<span class=\"badge " ++ cls ++ "\">" ++ Html.escape(status) ++ "</span>"
+    ~H"""<span class="badge #{cls}">#{Html.escape(status)}</span>"""
   end
 
   doc "Pagination links."
@@ -73,16 +111,16 @@ mod Conduit.Dashboard.Html do
       ""
     else
       let prev_link = if current_page > 1 do
-        "<a href=\"" ++ base_url ++ "?page=" ++ int_to_string(current_page - 1) ++ "\" class=\"page-link\">&laquo; Prev</a>"
+        ~H"""<a href="#{base_url}?page=#{int_to_string(current_page - 1)}" class="page-link">&laquo; Prev</a>"""
       else
-        "<span class=\"page-link disabled\">&laquo; Prev</span>"
+        ~H"""<span class="page-link disabled">&laquo; Prev</span>"""
       end
       let next_link = if current_page < total_pages do
-        "<a href=\"" ++ base_url ++ "?page=" ++ int_to_string(current_page + 1) ++ "\" class=\"page-link\">Next &raquo;</a>"
+        ~H"""<a href="#{base_url}?page=#{int_to_string(current_page + 1)}" class="page-link">Next &raquo;</a>"""
       else
-        "<span class=\"page-link disabled\">Next &raquo;</span>"
+        ~H"""<span class="page-link disabled">Next &raquo;</span>"""
       end
-      "<div class=\"pagination\">" ++ prev_link ++ "<span class=\"page-info\">Page " ++ int_to_string(current_page) ++ " of " ++ int_to_string(total_pages) ++ "</span>" ++ next_link ++ "</div>"
+      ~H"""<div class="pagination">#{prev_link}<span class="page-info">Page #{int_to_string(current_page)} of #{int_to_string(total_pages)}</span>#{next_link}</div>"""
     end
   end
 
@@ -93,7 +131,7 @@ mod Conduit.Dashboard.Html do
       "error"   -> "flash-error"
       _         -> "flash-info"
     end
-    "<div class=\"flash " ++ cls ++ "\">" ++ Html.escape(message) ++ "</div>"
+    ~H"""<div class="flash #{cls}">#{Html.escape(message)}</div>"""
   end
 
   doc "Admin action button (POST form button)."
@@ -101,7 +139,7 @@ mod Conduit.Dashboard.Html do
     let on_submit = if confirm == "" do
       "true"
     else
-      "confirm('" ++ Html.escape(confirm) ++ "')"
+      ~H"""confirm('#{Html.escape(confirm)}')"""
     end
     let btn_class = match label do
       "Retry"  -> "btn-retry"
@@ -109,7 +147,7 @@ mod Conduit.Dashboard.Html do
       "Cancel" -> "btn-cancel"
       _        -> "btn-default"
     end
-    "<form method=\"post\" action=\"" ++ action_url ++ "\" style=\"display:inline\" onsubmit=\"return " ++ on_submit ++ "\"><button type=\"submit\" class=\"btn " ++ btn_class ++ "\">" ++ Html.escape(label) ++ "</button></form>"
+    ~H"""<form method="post" action="#{action_url}" style="display:inline" onsubmit="return #{on_submit}"><button type="submit" class="btn #{btn_class}">#{Html.escape(label)}</button></form>"""
   end
 
   pfn pcss() : String do
