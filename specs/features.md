@@ -355,3 +355,55 @@
 - Pluggable rate limiter backend (in-process for single-node) — Postgres-only for now
 - Unique scope per-queue vs global — currently global only
 - `unique_for.duration` not enforced as a TTL on the constraint (the partial index keeps it active until complete/dead)
+
+---
+
+## Phase 8 — Deterministic Replay (Opt-In) ✅
+
+**Merged:** 2026-03-31
+
+### New types
+- `Conduit.WorkflowEvent` — `{ id, workflow_id, sequence, event_type, payload, recorded_at }` — immutable event log row
+
+### New modules
+- `Conduit.EventStore` — append-only event log for deterministic replay:
+  - `append/5` — append an event (workflow_id, sequence, event_type, payload)
+  - `load_all/2` — load all events for a workflow in sequence order
+  - `load_up_to/3` — load events up to a given sequence (point-in-time replay)
+  - `count/2` — count events for a workflow
+  - `warm_replay/2` — load events into Vault and set deterministic replay mode
+  - `warm_replay_to/3` — point-in-time variant: load events up to sequence N
+  - `replay_key/1` — returns the Vault namespace key for replay state
+  - `checkpoint_payload/3` — build JSON event payload for a checkpoint
+  - `extract_value/1` — extract the `"value"` field from an event payload
+
+### Architecture: Vault-based replay state
+- Replay state stored in Vault namespace `"conduit_wf_replay_" ++ workflow_id`:
+  - `"mode"` → `"deterministic_replay"` (absent = normal checkpoint mode)
+  - `"event_count"` → Int (number of events loaded from DB)
+  - `"cursor"` → Int (current position; starts at 0)
+  - `"next_seq"` → Int (next sequence number for appending)
+  - `"event:N"` → String (cached event payload at sequence N)
+- The `WorkflowContext` record type is **unchanged** — replay is entirely Vault-driven
+
+### Modified modules
+- `Conduit.WorkflowContext.checkpoint` — new top-level branch: checks Vault for `"mode" == "deterministic_replay"`, then dispatches to `preplay_checkpoint` (replay from events or execute + append) vs `pnormal_checkpoint` (Phase 4 path)
+- `Conduit.WorkflowRunner.prun` — after warm_cache, checks `execution_mode` from `WorkflowRegistry.lookup`; if `DeterministicReplay`, calls `EventStore.warm_replay` before running the workflow
+
+### Storage additions (interface + Postgres impl)
+- `event_append/5` — INSERT into `conduit_workflow_events` with RETURNING id
+- `event_load_all/2` — SELECT ORDER BY sequence ASC
+- `event_load_up_to/3` — SELECT WHERE sequence <= $2 ORDER BY sequence ASC
+- `event_count/2` — SELECT COUNT(*)
+
+### Public API (`lib/conduit.march`)
+- `Conduit.replay_workflow/2` — re-run a workflow using recorded events
+- `Conduit.replay_workflow_to/3` — point-in-time replay up to sequence N
+- `Conduit.workflow_events/2` — query all events for a workflow
+
+### Migration
+- `priv/migrations/20260401000008_conduit_event_store.march` — Depot DSL migration: `conduit_workflow_events` table with (workflow_id, sequence) unique constraint + index
+
+### Known gaps
+- Deterministic time/randomness interception — deferred (would require wrapping `DateTime.now()` and `Random.int()`)
+- Workflow event history in dashboard — deferred (events queryable via `Conduit.workflow_events/2` API)

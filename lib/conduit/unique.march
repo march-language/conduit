@@ -1,34 +1,17 @@
-doc """
-Conduit.Unique — unique job fingerprinting and conflict resolution.
-
-When a job has `unique_for` configured, a deterministic fingerprint is computed
-from (job_type, selected payload fields). This fingerprint is stored in the
-`unique_key` column of `conduit_jobs`. A partial unique index ensures only one
-active (non-completed, non-dead) job exists per fingerprint at a time.
-
-The fingerprint is released (set to NULL) when the job completes or is
-dead-lettered, allowing a new job with the same key to be enqueued.
-"""
-
 mod Conduit.Unique do
   doc """
   Compute a unique fingerprint for a job based on its type and the configured
-  `by` fields extracted from the payload string.
+  fields extracted from the payload string.
 
   The fingerprint is: SHA-256 hex of (job_type ++ ":" ++ field1=val1 ++ "," ++ ...).
 
-  If `by` is empty, the entire payload is included.
+  If `fields` is empty, the entire payload is included.
   """
-  fn fingerprint(job_type : String, payload : String, by : List(String)) : String do
-    let extracted = if is_nil(by) do
+  fn fingerprint(job_type : String, payload : String, fields : List(String)) : String do
+    let extracted = if is_nil(fields) do
       payload
     else
-      -- Extract specific fields from the JSON payload.
-      -- Simple approach: parse JSON, extract named keys, join sorted values.
-      let pairs = List.map(by, fn field ->
-        let value = pextract_json_field(payload, field)
-        field ++ "=" ++ value
-      end)
+      let pairs = List.map(fields, fn field -> field ++ "=" ++ pextract_json_field(payload, field))
       String.join(pairs, ",")
     end
     let input = job_type ++ ":" ++ extracted
@@ -51,8 +34,6 @@ mod Conduit.Unique do
     Conduit.Storage.unique_release(storage, job_id)
   end
 
-  -- Extract a field value from a JSON string.
-  -- Simple approach: use JSON.parse then JSON.get.
   pfn pextract_json_field(payload : String, field : String) : String do
     match JSON.parse(payload) do
       Err(_) -> ""

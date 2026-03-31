@@ -122,15 +122,21 @@
 
 ---
 
-## Phase 8 — Deterministic Replay (Opt-In)
+## Phase 8 — Deterministic Replay (Opt-In) ✅
 
-- [ ] `execution_mode: DeterministicReplay` workflow config option
-- [ ] Event store: all workflow decisions logged as immutable events
-- [ ] Replay: re-run workflow from event store, skip side effects
-- [ ] Deterministic time, randomness, and external calls on replay
-- [ ] Point-in-time replay
-- [ ] Workflow history in dashboard
-- [ ] Migration: `conduit_workflow_events` table
+- [x] `execution_mode: DeterministicReplay` workflow config option
+- [x] Event store: all checkpoint decisions logged as immutable events in `conduit_workflow_events`
+- [x] Replay: re-run workflow from event store, skip side-effect functions
+- [x] Point-in-time replay: `replay_workflow_to(wf_id, max_sequence, storage)`
+- [x] Workflow event history: `workflow_events(wf_id, storage)` returns `List(WorkflowEvent)`
+- [x] `Conduit.EventStore` module: append, load_all, load_up_to, count, warm_replay, warm_replay_to
+- [x] `WorkflowContext.checkpoint` gains replay branch: Vault-based cursor consumes recorded events, then executes fn for new checkpoints
+- [x] `WorkflowRunner.prun` auto-warms replay cache when `execution_mode = DeterministicReplay`
+- [x] Depot-style migration: `conduit_workflow_events` table with unique (workflow_id, sequence) constraint
+- [x] Tests: WorkflowEvent type, EventStore append/load/count, replay checkpoint (first run/replay/mixed), cursor advances, order preserved, point-in-time, parallel branches
+- [x] End-to-end test app: `test/test_deterministic_app.march` — 3-step payment workflow with first run, replay, point-in-time, and history query
+- [ ] Deterministic time/randomness interception (wrapping DateTime.now() / Random.int()) — deferred
+- [ ] Workflow event history visible in dashboard — deferred (events queryable via API)
 
 ---
 

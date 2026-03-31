@@ -1,26 +1,3 @@
-doc """
-Conduit.Worker — polls the queue and executes jobs.
-
-Each worker is a long-lived task that loops:
-  1. Fetch the next available job (SKIP LOCKED)
-  2. Claim it (mark_running — increments attempt counter)
-  3. Spawn a heartbeat task that ticks every timeout/3 seconds
-  4. Dispatch to the registered performer
-  5. Cancel the heartbeat
-  6. Handle the result:
-       Ok(())                   → mark_completed
-       Err(Retry)               → schedule_retry with backoff delay + jitter
-       Err(Discard)             → discard (or move_to_dead_letter if DLQ configured)
-       Err(Snooze(dur))         → mark_snoozed until now+dur
-       Err(WorkerError)         → treated as Retry
-  7. If attempt >= max_attempts on Retry/WorkerError → dead-letter instead
-  8. Loop
-
-Stale-job rescue runs as a separate background task: every `stale_check_interval_ms`
-it scans for jobs stuck in 'running' with an expired heartbeat and returns them
-to 'pending'.
-"""
-
 mod Conduit.Worker do
   doc """
   Start `count` worker tasks for the given queue, plus one stale-rescue task.
@@ -29,11 +6,9 @@ mod Conduit.Worker do
   fn start_workers(storage, queue : String, count : Int, poll_interval_ms : Int) : List(Task) do
     let workers = List.range(0, count - 1)
       |> List.map(fn _ ->
-        task_spawn(fn () -> worker_loop(storage, queue, poll_interval_ms))
-      end)
+        task_spawn(fn () -> worker_loop(storage, queue, poll_interval_ms)))
     let rescuer = task_spawn(fn () ->
-      rescue_loop(storage, poll_interval_ms * 10)
-    end)
+      rescue_loop(storage, poll_interval_ms * 10))
     List.append(workers, Cons(rescuer, Nil))
   end
 
@@ -57,7 +32,7 @@ mod Conduit.Worker do
     match Conduit.Storage.mark_running(storage, job.id, worker_id) do
       Err(e) ->
         Logger.warn("conduit: could not claim job " ++ job.id ++ ": " ++ e)
-      Ok(()) ->
+      Ok(_) ->
         -- next_attempt is the attempt number that is now executing (post-increment).
         let next_attempt = job.attempt + 1
         let config = Conduit.Queue.lookup_config(job.job_type)
@@ -70,8 +45,7 @@ mod Conduit.Worker do
         ) |> pmax_int(5000)
 
         let hb_task = task_spawn(fn () ->
-          heartbeat_loop(storage, job.id, heartbeat_interval_ms)
-        end)
+          heartbeat_loop(storage, job.id, heartbeat_interval_ms))
 
         -- Rate limit check: if configured, try to acquire a token.
         let rate_ok = match config.rate_limit do
@@ -105,9 +79,9 @@ mod Conduit.Worker do
 
   pfn handle_result(storage, job : Conduit.JobRow, attempt : Int, config : Conduit.JobConfig, result : Result((), ConduitError)) : () do
     match result do
-      Ok(()) ->
+      Ok(_) ->
         match Conduit.Storage.mark_completed(storage, job.id) do
-          Ok(())  ->
+          Ok(_)  ->
             -- Release unique key on successful completion.
             prelease_unique(storage, job)
           Err(e)  -> Logger.error("conduit: mark_completed failed for " ++ job.id ++ ": " ++ e)
@@ -127,7 +101,7 @@ mod Conduit.Worker do
       Err(ConduitError.Snooze(dur)) ->
         let wake_at = DateTime.add(DateTime.now(), dur)
         match Conduit.Storage.mark_snoozed(storage, job.id, wake_at) do
-          Ok(())  -> ()
+          Ok(_)  -> ()
           Err(e)  -> Logger.error("conduit: mark_snoozed error for " ++ job.id ++ ": " ++ e)
         end
     end
@@ -149,7 +123,7 @@ mod Conduit.Worker do
                         )
       Logger.debug("conduit: scheduling retry for " ++ job.id ++ " at attempt " ++ int_to_string(attempt + 1))
       match Conduit.Storage.schedule_retry(storage, job.id, error_msg, run_at) do
-        Ok(())  -> ()
+        Ok(_)  -> ()
         Err(e)  -> Logger.error("conduit: schedule_retry error for " ++ job.id ++ ": " ++ e)
       end
     end
@@ -161,7 +135,7 @@ mod Conduit.Worker do
       None ->
         -- No DLQ configured: just mark the job dead in-place.
         match Conduit.Storage.discard(storage, job.id, "discarded: " ++ reason) do
-          Ok(())  -> prelease_unique(storage, job)
+          Ok(_)  -> prelease_unique(storage, job)
           Err(e)  -> Logger.error("conduit: discard error for " ++ job.id ++ ": " ++ e)
         end
       Some(_) ->
@@ -175,7 +149,7 @@ mod Conduit.Worker do
     let dl = Conduit.DeadLetter.from_job(job, error_msg)
     match Conduit.Storage.move_to_dead_letter(storage, dl) do
       Err(e)  -> Logger.error("conduit: move_to_dead_letter error for " ++ job.id ++ ": " ++ e)
-      Ok(())  ->
+      Ok(_)  ->
         -- Release the unique constraint so the same job can be re-enqueued.
         prelease_unique(storage, job)
         -- Fire the on_dead_letter callback if configured.
@@ -190,7 +164,7 @@ mod Conduit.Worker do
   pfn heartbeat_loop(storage, job_id : String, interval_ms : Int) : () do
     psleep_ms(interval_ms)
     match Conduit.Storage.heartbeat(storage, job_id) do
-      Ok(())  -> ()
+      Ok(_)  -> ()
       Err(e)  -> Logger.warn("conduit: heartbeat error for " ++ job_id ++ ": " ++ e)
     end
     heartbeat_loop(storage, job_id, interval_ms)
@@ -230,7 +204,7 @@ mod Conduit.Worker do
       None    -> ()
       Some(_) ->
         match Conduit.Unique.release(storage, job.id) do
-          Ok(())  -> ()
+          Ok(_)  -> ()
           Err(e)  -> Logger.warn("conduit: unique_release error for " ++ job.id ++ ": " ++ e)
         end
     end

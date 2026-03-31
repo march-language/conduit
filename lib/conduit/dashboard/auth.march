@@ -1,36 +1,11 @@
-mod Conduit.Dashboard do
-  doc """
-  Pluggable authentication adapter for the Conduit Dashboard.
-
-  Three modes:
-    - `None`        — no auth (development only)
-    - `Token(t)`    — check Authorization header for "Bearer <t>"
-    - `Fn(f)`       — call f with the full Authorization header value;
-                      return true to allow, false to deny
-
-  Example:
-    Conduit.Dashboard.Auth.Token("my-secret")
-    Conduit.Dashboard.Auth.Fn(fn header -> header == "Bearer " ++ admin_token end)
-  """
-  type Auth =
-    None
-    | Token(String)
-    | Fn(fn String -> Bool)
-end
-
 mod Conduit.Dashboard.Auth do
-  doc """
-  Check whether `conn` is authorised to access the dashboard.
-
-  Returns true if access is allowed.
-  """
-  fn check(auth : Conduit.Dashboard.Auth, conn) : Bool do
+  fn check(auth : Conduit.Auth, conn) : Bool do
     match auth do
-      Conduit.Dashboard.Auth.None    -> true
-      Conduit.Dashboard.Auth.Token(t) ->
+      None      -> true
+      Token(t)  ->
         let header = HttpServer.get_req_header(conn, "authorization") |> unwrap_or("")
         header == "Bearer " ++ t
-      Conduit.Dashboard.Auth.Fn(f) ->
+      Fn(f)     ->
         let header = HttpServer.get_req_header(conn, "authorization") |> unwrap_or("")
         f(header)
     end

@@ -99,7 +99,7 @@ mod Conduit.Dashboard.Router do
       -- Job delete
       (:post, Cons("jobs", Cons(job_id, Cons("delete", Nil)))) ->
         match Conduit.Dashboard.Actions.delete_job(storage, job_id) do
-          Ok(()) ->
+          Ok(_) ->
             let queue = pextract_queue_from_referer(conn)
             conn |> HttpServer.redirect(base_path ++ "/queues/" ++ queue)
           Err(e) -> conn |> HttpServer.text(500, "Error: " ++ e)
@@ -226,8 +226,7 @@ mod Conduit.Dashboard.Router do
         match parts do
           Cons(k, _) -> k == key
           Nil        -> false
-        end
-      end)
+        end)
       match found do
         None      -> ""
         Some(pair) ->
@@ -267,8 +266,7 @@ mod Conduit.Dashboard.Router do
       ++ ",\"failed\":"     ++ int_to_string(s.failed)
       ++ ",\"dead\":"       ++ int_to_string(s.dead)
       ++ ",\"throughput\":" ++ int_to_string(s.throughput)
-      ++ "}"
-    end)
+      ++ "}")
     "[" ++ String.join(items, ",") ++ "]"
   end
 end

@@ -1361,6 +1361,38 @@ mod ConduitTest do
       Vault.set(self.vault_key, "events", Cons("unique_release:" ++ job_id, evs))
       Ok(())
     end
+
+    -- Event store stubs (Phase 8 — Deterministic Replay).
+    fn event_append(self : FakeWorkflowStorage, workflow_id : String, sequence : Int, event_type : String, payload : String) : Result(Int, String) do
+      let key = "events:" ++ workflow_id
+      let events = Vault.get(self.vault_key, key) |> unwrap_or(Nil)
+      let evt : Conduit.WorkflowEvent = {
+        id          = List.length(events) + 1,
+        workflow_id = workflow_id,
+        sequence    = sequence,
+        event_type  = event_type,
+        payload     = payload,
+        recorded_at = DateTime.now()
+      }
+      Vault.set(self.vault_key, key, List.append(events, Cons(evt, Nil)))
+      Ok(evt.id)
+    end
+
+    fn event_load_all(self : FakeWorkflowStorage, workflow_id : String) : Result(List(Conduit.WorkflowEvent), String) do
+      let key = "events:" ++ workflow_id
+      Ok(Vault.get(self.vault_key, key) |> unwrap_or(Nil))
+    end
+
+    fn event_load_up_to(self : FakeWorkflowStorage, workflow_id : String, max_seq : Int) : Result(List(Conduit.WorkflowEvent), String) do
+      let key = "events:" ++ workflow_id
+      let all = Vault.get(self.vault_key, key) |> unwrap_or(Nil)
+      Ok(List.filter(all, fn e -> e.sequence <= max_seq))
+    end
+
+    fn event_count(self : FakeWorkflowStorage, workflow_id : String) : Result(Int, String) do
+      let key = "events:" ++ workflow_id
+      Ok(List.length(Vault.get(self.vault_key, key) |> unwrap_or(Nil)))
+    end
   end
 
   -- ─────────────────────────────────────────────────────────────
@@ -1897,6 +1929,293 @@ mod ConduitTest do
         }
         f(dummy_info)
         assert_eq_bool(Vault.get(fired_key, "fired") |> unwrap_or(false), true)
+    end
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Phase 8: WorkflowEvent type
+  -- ─────────────────────────────────────────────────────────────
+
+  fn test_workflow_event_type_fields() do
+    let now = DateTime.now()
+    let evt : Conduit.WorkflowEvent = {
+      id          = 42,
+      workflow_id = "wf-abc",
+      sequence    = 0,
+      event_type  = "checkpoint",
+      payload     = "{\"name\":\"step1\",\"value\":\"hello\"}",
+      recorded_at = now
+    }
+    assert_eq_int(evt.id, 42)
+    assert_eq_str(evt.workflow_id, "wf-abc")
+    assert_eq_int(evt.sequence, 0)
+    assert_eq_str(evt.event_type, "checkpoint")
+    assert_true(String.contains(evt.payload, "step1"))
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Phase 8: EventStore (via fake storage)
+  -- ─────────────────────────────────────────────────────────────
+
+  fn test_event_store_append_and_load() do
+    let vault_k = "es_al_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let wf_id   = uuid_v4()
+    -- Append two events
+    let r1 = Conduit.EventStore.append(storage, wf_id, 0, "checkpoint", "{\"name\":\"a\",\"value\":\"1\"}")
+    assert_ok(r1)
+    let r2 = Conduit.EventStore.append(storage, wf_id, 1, "checkpoint", "{\"name\":\"b\",\"value\":\"2\"}")
+    assert_ok(r2)
+    -- Load all
+    let all = Conduit.EventStore.load_all(storage, wf_id)
+    assert_ok(all)
+    match all do
+      Err(_)    -> assert_true(false)
+      Ok(evts)  ->
+        assert_eq_int(List.length(evts), 2)
+        let first = List.head_opt(evts) |> unwrap
+        assert_eq_int(first.sequence, 0)
+        assert_eq_str(first.event_type, "checkpoint")
+    end
+  end
+
+  fn test_event_store_load_up_to() do
+    let vault_k = "es_lu_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let wf_id   = uuid_v4()
+    let _ = Conduit.EventStore.append(storage, wf_id, 0, "checkpoint", "{}")
+    let _ = Conduit.EventStore.append(storage, wf_id, 1, "checkpoint", "{}")
+    let _ = Conduit.EventStore.append(storage, wf_id, 2, "checkpoint", "{}")
+    -- Load up to sequence 1
+    let result = Conduit.EventStore.load_up_to(storage, wf_id, 1)
+    assert_ok(result)
+    match result do
+      Err(_)   -> assert_true(false)
+      Ok(evts) -> assert_eq_int(List.length(evts), 2)  -- sequences 0 and 1
+    end
+  end
+
+  fn test_event_store_count() do
+    let vault_k = "es_cnt_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let wf_id   = uuid_v4()
+    let _ = Conduit.EventStore.append(storage, wf_id, 0, "checkpoint", "{}")
+    let _ = Conduit.EventStore.append(storage, wf_id, 1, "checkpoint", "{}")
+    let result = Conduit.EventStore.count(storage, wf_id)
+    assert_ok(result)
+    match result do
+      Err(_)  -> assert_true(false)
+      Ok(cnt) -> assert_eq_int(cnt, 2)
+    end
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Phase 8: warm_replay sets Vault state
+  -- ─────────────────────────────────────────────────────────────
+
+  fn test_replay_warm_sets_vault_state() do
+    let vault_k = "rw_warm_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let wf_id   = uuid_v4()
+    -- Append 2 events to the fake store
+    let _ = Conduit.EventStore.append(storage, wf_id, 0, "checkpoint", "{\"name\":\"s1\",\"value\":\"v1\"}")
+    let _ = Conduit.EventStore.append(storage, wf_id, 1, "checkpoint", "{\"name\":\"s2\",\"value\":\"v2\"}")
+    -- Warm replay
+    let result = Conduit.EventStore.warm_replay(storage, wf_id)
+    assert_ok(result)
+    -- Check Vault state
+    let rk = Conduit.EventStore.replay_key(wf_id)
+    let mode = Vault.get(rk, "mode") |> unwrap_or("")
+    assert_eq_str(mode, "deterministic_replay")
+    let cursor = Vault.get(rk, "cursor") |> unwrap_or(-1)
+    assert_eq_int(cursor, 0)
+    let event_count = Vault.get(rk, "event_count") |> unwrap_or(-1)
+    assert_eq_int(event_count, 2)
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Phase 8: Replay checkpoint behavior
+  -- ─────────────────────────────────────────────────────────────
+
+  fn test_replay_checkpoint_first_run_logs_events() do
+    -- When no events exist, checkpoint should execute fn AND append an event.
+    let vault_k = "rp_fr_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let wf_id   = uuid_v4()
+    let ctx     = Conduit.WorkflowContext.new(wf_id)
+    -- Set up replay mode with 0 pre-existing events
+    let rk = Conduit.EventStore.replay_key(wf_id)
+    Vault.set(rk, "mode", "deterministic_replay")
+    Vault.set(rk, "cursor", 0)
+    Vault.set(rk, "event_count", 0)
+    Vault.set(rk, "next_seq", 0)
+    -- Track fn calls
+    let call_key = "rp_fr_calls_" ++ uuid_v4()
+    Vault.set(call_key, "count", 0)
+    -- Run checkpoint
+    let result = Conduit.WorkflowContext.checkpoint(storage, ctx, "step1", fn () ->
+      let c = Vault.get(call_key, "count") |> unwrap_or(0)
+      Vault.set(call_key, "count", c + 1)
+      "\"result_a\""
+    end)
+    assert_ok(result)
+    match result do
+      Err(_)  -> assert_true(false)
+      Ok(val) -> assert_eq_str(val, "\"result_a\"")
+    end
+    -- fn was called
+    assert_eq_int(Vault.get(call_key, "count") |> unwrap_or(0), 1)
+    -- An event was appended
+    let cnt = Conduit.EventStore.count(storage, wf_id)
+    match cnt do
+      Ok(n) -> assert_eq_int(n, 1)
+      Err(_) -> assert_true(false)
+    end
+  end
+
+  fn test_replay_checkpoint_replay_skips_fn() do
+    -- When events exist, checkpoint should return recorded value WITHOUT calling fn.
+    let vault_k = "rp_skip_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let wf_id   = uuid_v4()
+    let ctx     = Conduit.WorkflowContext.new(wf_id)
+    -- Pre-append an event via storage
+    let _ = Conduit.EventStore.append(storage, wf_id, 0, "checkpoint", "{\"name\":\"step1\",\"value\":\"recorded_val\"}")
+    -- Warm replay (loads events into Vault)
+    let _ = Conduit.EventStore.warm_replay(storage, wf_id)
+    -- Track fn calls
+    let call_key = "rp_skip_calls_" ++ uuid_v4()
+    Vault.set(call_key, "called", false)
+    -- Run checkpoint
+    let result = Conduit.WorkflowContext.checkpoint(storage, ctx, "step1", fn () ->
+      Vault.set(call_key, "called", true)
+      "\"should_not_be_used\""
+    end)
+    assert_ok(result)
+    match result do
+      Err(_)  -> assert_true(false)
+      Ok(val) -> assert_eq_str(val, "recorded_val")
+    end
+    -- fn was NOT called
+    assert_eq_bool(Vault.get(call_key, "called") |> unwrap_or(true), false)
+  end
+
+  fn test_replay_checkpoint_mixed_replay_and_new() do
+    -- 1 event pre-loaded, then a 2nd checkpoint should execute fn.
+    let vault_k = "rp_mix_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let wf_id   = uuid_v4()
+    let ctx     = Conduit.WorkflowContext.new(wf_id)
+    -- Pre-append 1 event
+    let _ = Conduit.EventStore.append(storage, wf_id, 0, "checkpoint", "{\"name\":\"step1\",\"value\":\"val_a\"}")
+    let _ = Conduit.EventStore.warm_replay(storage, wf_id)
+    -- First checkpoint: should replay from event (skip fn)
+    let r1 = Conduit.WorkflowContext.checkpoint(storage, ctx, "step1", fn () -> "\"unused\"")
+    assert_ok(r1)
+    match r1 do
+      Ok(v) -> assert_eq_str(v, "val_a")
+      Err(_) -> assert_true(false)
+    end
+    -- Second checkpoint: no event, should execute fn
+    let call_key = "rp_mix_fn_" ++ uuid_v4()
+    Vault.set(call_key, "called", false)
+    let r2 = Conduit.WorkflowContext.checkpoint(storage, ctx, "step2", fn () ->
+      Vault.set(call_key, "called", true)
+      "\"val_b\""
+    end)
+    assert_ok(r2)
+    match r2 do
+      Ok(v) -> assert_eq_str(v, "\"val_b\"")
+      Err(_) -> assert_true(false)
+    end
+    assert_eq_bool(Vault.get(call_key, "called") |> unwrap_or(false), true)
+  end
+
+  fn test_replay_cursor_advances() do
+    -- After 3 checkpoints, cursor should be 3.
+    let vault_k = "rp_cur_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let wf_id   = uuid_v4()
+    let ctx     = Conduit.WorkflowContext.new(wf_id)
+    -- Pre-append 3 events
+    let _ = Conduit.EventStore.append(storage, wf_id, 0, "checkpoint", "{\"name\":\"a\",\"value\":\"1\"}")
+    let _ = Conduit.EventStore.append(storage, wf_id, 1, "checkpoint", "{\"name\":\"b\",\"value\":\"2\"}")
+    let _ = Conduit.EventStore.append(storage, wf_id, 2, "checkpoint", "{\"name\":\"c\",\"value\":\"3\"}")
+    let _ = Conduit.EventStore.warm_replay(storage, wf_id)
+    -- Run 3 checkpoints
+    let _ = Conduit.WorkflowContext.checkpoint(storage, ctx, "a", fn () -> "x")
+    let _ = Conduit.WorkflowContext.checkpoint(storage, ctx, "b", fn () -> "x")
+    let _ = Conduit.WorkflowContext.checkpoint(storage, ctx, "c", fn () -> "x")
+    -- Cursor should be 3
+    let rk = Conduit.EventStore.replay_key(wf_id)
+    let cursor = Vault.get(rk, "cursor") |> unwrap_or(-1)
+    assert_eq_int(cursor, 3)
+  end
+
+  fn test_replay_preserves_order() do
+    -- Events should be replayed in sequence order: "first", "second", "third"
+    let vault_k = "rp_ord_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let wf_id   = uuid_v4()
+    let ctx     = Conduit.WorkflowContext.new(wf_id)
+    let _ = Conduit.EventStore.append(storage, wf_id, 0, "checkpoint", "{\"name\":\"s1\",\"value\":\"first\"}")
+    let _ = Conduit.EventStore.append(storage, wf_id, 1, "checkpoint", "{\"name\":\"s2\",\"value\":\"second\"}")
+    let _ = Conduit.EventStore.append(storage, wf_id, 2, "checkpoint", "{\"name\":\"s3\",\"value\":\"third\"}")
+    let _ = Conduit.EventStore.warm_replay(storage, wf_id)
+    let r1 = Conduit.WorkflowContext.checkpoint(storage, ctx, "s1", fn () -> "x")
+    let r2 = Conduit.WorkflowContext.checkpoint(storage, ctx, "s2", fn () -> "x")
+    let r3 = Conduit.WorkflowContext.checkpoint(storage, ctx, "s3", fn () -> "x")
+    match r1 do Ok(v) -> assert_eq_str(v, "first")  Err(_) -> assert_true(false) end
+    match r2 do Ok(v) -> assert_eq_str(v, "second") Err(_) -> assert_true(false) end
+    match r3 do Ok(v) -> assert_eq_str(v, "third")  Err(_) -> assert_true(false) end
+  end
+
+  fn test_point_in_time_replay() do
+    -- load_up_to(1) should return sequences 0 and 1 only.
+    let vault_k = "pit_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let wf_id   = uuid_v4()
+    let _ = Conduit.EventStore.append(storage, wf_id, 0, "checkpoint", "{}")
+    let _ = Conduit.EventStore.append(storage, wf_id, 1, "checkpoint", "{}")
+    let _ = Conduit.EventStore.append(storage, wf_id, 2, "checkpoint", "{}")
+    -- warm_replay_to loads only first 2 events (up to sequence 1)
+    let result = Conduit.EventStore.warm_replay_to(storage, wf_id, 1)
+    assert_ok(result)
+    let rk = Conduit.EventStore.replay_key(wf_id)
+    let event_count = Vault.get(rk, "event_count") |> unwrap_or(-1)
+    assert_eq_int(event_count, 2)
+  end
+
+  fn test_replay_with_parallel() do
+    -- Parallel branches should log events with namespaced names.
+    let vault_k = "rp_par_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let wf_id   = uuid_v4()
+    let ctx     = Conduit.WorkflowContext.new(wf_id)
+    -- Set replay mode with 0 events (first run)
+    let rk = Conduit.EventStore.replay_key(wf_id)
+    Vault.set(rk, "mode", "deterministic_replay")
+    Vault.set(rk, "cursor", 0)
+    Vault.set(rk, "event_count", 0)
+    Vault.set(rk, "next_seq", 0)
+    -- Execute 2 checkpoints in parallel sub-contexts
+    let branch0 = Conduit.WorkflowContext.child(ctx, "parallel:0:")
+    let branch1 = Conduit.WorkflowContext.child(ctx, "parallel:1:")
+    let _ = Conduit.WorkflowContext.checkpoint(storage, branch0, "step", fn () -> "\"r0\"")
+    let _ = Conduit.WorkflowContext.checkpoint(storage, branch1, "step", fn () -> "\"r1\"")
+    -- Should have 2 events logged
+    let cnt = Conduit.EventStore.count(storage, wf_id)
+    match cnt do
+      Ok(n) -> assert_eq_int(n, 2)
+      Err(_) -> assert_true(false)
+    end
+    -- The events should have different names (namespaced)
+    let all = Conduit.EventStore.load_all(storage, wf_id)
+    match all do
+      Ok(evts) ->
+        let first = List.head_opt(evts) |> unwrap
+        assert_true(String.contains(first.payload, "parallel:0:step"))
+      Err(_) -> assert_true(false)
     end
   end
 end

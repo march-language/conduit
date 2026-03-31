@@ -1,0 +1,338 @@
+doc """
+End-to-end test app for Phase 8: Deterministic Replay.
+
+Simulates a payment workflow with 3 checkpoint steps, then verifies:
+  1. First run: all fns execute, events are logged
+  2. Replay: fns are NOT called, recorded values returned
+  3. Point-in-time replay: only first N events loaded
+  4. Event history is queryable
+"""
+
+mod DeterministicAppTest do
+  use Test
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Fake storage (reuses the FakeWorkflowStorage pattern from the
+  -- main test file but self-contained here)
+  -- ─────────────────────────────────────────────────────────────
+
+  pfn make_storage() : String do
+    let key = "det_app_" ++ uuid_v4()
+    Vault.set(key, "checkpoints", Nil)
+    key
+  end
+
+  ptype FakeDetStorage = FakeDetStorage({ vault_key : String })
+
+  pfn new_storage(vault_key : String) : FakeDetStorage do
+    FakeDetStorage({ vault_key = vault_key })
+  end
+
+  impl Conduit.Storage(FakeDetStorage) do
+    -- Minimal stubs: only checkpoint + event methods are exercised.
+    fn enqueue(_self, job : Conduit.JobRow) : Result(String, String) do Ok(job.id) end
+    fn fetch_next(_self, _q : String) : Result(Option(Conduit.JobRow), String) do Ok(None) end
+    fn mark_running(_self, _id : String, _w : String) : Result((), String) do Ok(()) end
+    fn mark_completed(_self, _id : String) : Result((), String) do Ok(()) end
+    fn mark_snoozed(_self, _id : String, _d : DateTime) : Result((), String) do Ok(()) end
+    fn heartbeat(_self, _id : String) : Result((), String) do Ok(()) end
+    fn schedule_retry(_self, _id : String, _m : String, _d : DateTime) : Result((), String) do Ok(()) end
+    fn discard(_self, _id : String, _m : String) : Result((), String) do Ok(()) end
+    fn move_to_dead_letter(_self, _dl : Conduit.DeadLetter) : Result((), String) do Ok(()) end
+    fn rescue_stale(_self, _s : Int) : Result(List(String), String) do Ok(Nil) end
+
+    fn cron_upsert(_self, _s : Conduit.CronSchedule) : Result((), String) do Ok(()) end
+    fn cron_load_due(_self) : Result(List(Conduit.CronSchedule), String) do Ok(Nil) end
+    fn cron_load_by_id(_self, _id : String) : Result(Option(Conduit.CronSchedule), String) do Ok(None) end
+    fn cron_mark_fired(_self, _id : String, _jid : String, _next : Option(DateTime)) : Result((), String) do Ok(()) end
+    fn cron_job_active(_self, _id : String) : Result(Bool, String) do Ok(false) end
+    fn cron_cancel_job(_self, _id : String) : Result((), String) do Ok(()) end
+    fn cron_delete(_self, _id : String) : Result((), String) do Ok(()) end
+    fn cron_advisory_lock(_self, _id : Int) : Result(Bool, String) do Ok(true) end
+    fn cron_advisory_unlock(_self, _id : Int) : Result((), String) do Ok(()) end
+
+    fn node_register(_self, _node : Conduit.NodeInfo) : Result((), String) do Ok(()) end
+    fn node_heartbeat(_self, _id : String) : Result((), String) do Ok(()) end
+    fn node_deregister(_self, _id : String) : Result((), String) do Ok(()) end
+    fn node_list_active(_self) : Result(List(Conduit.NodeInfo), String) do Ok(Nil) end
+    fn node_reclaim_jobs(_self, _s : Int) : Result(List(String), String) do Ok(Nil) end
+    fn node_cleanup_stale(_self, _s : Int) : Result(Int, String) do Ok(0) end
+    fn node_try_leader_lock(_self, _id : Int) : Result(Bool, String) do Ok(true) end
+    fn node_release_leader_lock(_self, _id : Int) : Result((), String) do Ok(()) end
+
+    fn workflow_insert(_self, row : Conduit.WorkflowRow) : Result(String, String) do Ok(row.id) end
+    fn workflow_load(_self, _id : String) : Result(Option(Conduit.WorkflowRow), String) do Ok(None) end
+    fn workflow_update_status(_self, _id : String, _s : String, _o : Option(String), _e : Option(String)) : Result((), String) do Ok(()) end
+    fn workflow_cancel(_self, _id : String, _r : String) : Result((), String) do Ok(()) end
+
+    fn checkpoint_get(_self, _wf : String, _n : String) : Result(Option(String), String) do Ok(None) end
+
+    fn checkpoint_set(self : FakeDetStorage, wf_id : String, name : String, value : String, _dur : Int) : Result((), String) do
+      let cps = Vault.get(self.vault_key, "checkpoints") |> unwrap_or(Nil)
+      Vault.set(self.vault_key, "checkpoints", Cons((wf_id, name, value), cps))
+      Ok(())
+    end
+
+    fn checkpoint_load_all(_self, _wf : String) : Result(List(Conduit.WorkflowCheckpoint), String) do Ok(Nil) end
+
+    fn signal_insert(_self, _sig : Conduit.WorkflowSignal) : Result(Int, String) do Ok(1) end
+    fn signal_peek(_self, _wf : String, _t : String) : Result(Option(Conduit.WorkflowSignal), String) do Ok(None) end
+    fn signal_mark_delivered(_self, _id : Int) : Result((), String) do Ok(()) end
+
+    fn dashboard_queue_summary(_self) : Result(List(Conduit.Dashboard.QueueSummary), String) do Ok(Nil) end
+    fn dashboard_jobs_list(_self, _q : String, _s : String, _p : Int) : Result(List(Conduit.JobRow), String) do Ok(Nil) end
+    fn dead_letter_list(_self, _p : Int) : Result(List(Conduit.DeadLetter), String) do Ok(Nil) end
+    fn dead_letter_load(_self, _id : String) : Result(Option(Conduit.DeadLetter), String) do Ok(None) end
+    fn job_retry(_self, _id : String) : Result((), String) do Ok(()) end
+    fn job_cancel(_self, _id : String, _r : String) : Result((), String) do Ok(()) end
+    fn job_delete(_self, _id : String) : Result((), String) do Ok(()) end
+    fn dead_letter_delete(_self, _id : String) : Result((), String) do Ok(()) end
+    fn notify_subscribe(_self, _ch : String) : Result((), String) do Ok(()) end
+
+    fn rate_limit_acquire(_self, _k : String, _r : Int) : Result(Bool, String) do Ok(true) end
+    fn unique_check(_self, _k : String) : Result(Bool, String) do Ok(false) end
+    fn unique_release(_self, _id : String) : Result((), String) do Ok(()) end
+
+    -- Event store methods (used by this test).
+    fn event_append(self : FakeDetStorage, workflow_id : String, sequence : Int, event_type : String, payload : String) : Result(Int, String) do
+      let key = "events:" ++ workflow_id
+      let events = Vault.get(self.vault_key, key) |> unwrap_or(Nil)
+      let evt : Conduit.WorkflowEvent = {
+        id          = List.length(events) + 1,
+        workflow_id = workflow_id,
+        sequence    = sequence,
+        event_type  = event_type,
+        payload     = payload,
+        recorded_at = DateTime.now()
+      }
+      Vault.set(self.vault_key, key, List.append(events, Cons(evt, Nil)))
+      Ok(evt.id)
+    end
+
+    fn event_load_all(self : FakeDetStorage, workflow_id : String) : Result(List(Conduit.WorkflowEvent), String) do
+      let key = "events:" ++ workflow_id
+      Ok(Vault.get(self.vault_key, key) |> unwrap_or(Nil))
+    end
+
+    fn event_load_up_to(self : FakeDetStorage, workflow_id : String, max_seq : Int) : Result(List(Conduit.WorkflowEvent), String) do
+      let key = "events:" ++ workflow_id
+      let all = Vault.get(self.vault_key, key) |> unwrap_or(Nil)
+      Ok(List.filter(all, fn e -> e.sequence <= max_seq))
+    end
+
+    fn event_count(self : FakeDetStorage, workflow_id : String) : Result(Int, String) do
+      let key = "events:" ++ workflow_id
+      Ok(List.length(Vault.get(self.vault_key, key) |> unwrap_or(Nil)))
+    end
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Test workflow: simulates a 3-step payment pipeline
+  -- ─────────────────────────────────────────────────────────────
+
+  pfn run_payment_workflow(storage, wf_id : String, call_tracker_key : String) : Result(String, Conduit.WorkflowError) do
+    let ctx = Conduit.WorkflowContext.new(wf_id)
+
+    -- Step 1: Validate order
+    let r1 = Conduit.WorkflowContext.checkpoint(storage, ctx, "validate_order", fn () ->
+      let c = Vault.get(call_tracker_key, "validate_calls") |> unwrap_or(0)
+      Vault.set(call_tracker_key, "validate_calls", c + 1)
+      "\"order_valid\""
+    end)
+    match r1 do
+      Err(e) -> Err(e)
+      Ok(v1) ->
+        -- Step 2: Charge card
+        let r2 = Conduit.WorkflowContext.checkpoint(storage, ctx, "charge_card", fn () ->
+          let c = Vault.get(call_tracker_key, "charge_calls") |> unwrap_or(0)
+          Vault.set(call_tracker_key, "charge_calls", c + 1)
+          "\"charge_ch_abc123\""
+        end)
+        match r2 do
+          Err(e) -> Err(e)
+          Ok(v2) ->
+            -- Step 3: Send confirmation
+            let r3 = Conduit.WorkflowContext.checkpoint(storage, ctx, "send_confirmation", fn () ->
+              let c = Vault.get(call_tracker_key, "confirm_calls") |> unwrap_or(0)
+              Vault.set(call_tracker_key, "confirm_calls", c + 1)
+              "\"email_sent\""
+            end)
+            match r3 do
+              Err(e) -> Err(e)
+              Ok(v3) ->
+                Ok("{\"order\":\"" ++ v1 ++ "\",\"charge\":\"" ++ v2 ++ "\",\"confirm\":\"" ++ v3 ++ "\"}")
+            end
+        end
+    end
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Test 1: First run logs all events
+  -- ─────────────────────────────────────────────────────────────
+
+  fn test_first_run_executes_all_fns_and_logs_events() do
+    let vault_k  = make_storage()
+    let storage  = new_storage(vault_k)
+    let wf_id    = uuid_v4()
+    let call_key = "calls_first_" ++ uuid_v4()
+    Vault.set(call_key, "validate_calls", 0)
+    Vault.set(call_key, "charge_calls", 0)
+    Vault.set(call_key, "confirm_calls", 0)
+
+    -- Set up replay mode with 0 events (first execution)
+    let rk = Conduit.EventStore.replay_key(wf_id)
+    Vault.set(rk, "mode", "deterministic_replay")
+    Vault.set(rk, "cursor", 0)
+    Vault.set(rk, "event_count", 0)
+    Vault.set(rk, "next_seq", 0)
+
+    let result = run_payment_workflow(storage, wf_id, call_key)
+    assert_ok(result)
+
+    -- All 3 fns were called
+    assert_eq_int(Vault.get(call_key, "validate_calls") |> unwrap_or(0), 1)
+    assert_eq_int(Vault.get(call_key, "charge_calls") |> unwrap_or(0), 1)
+    assert_eq_int(Vault.get(call_key, "confirm_calls") |> unwrap_or(0), 1)
+
+    -- 3 events were logged
+    let cnt = Conduit.EventStore.count(storage, wf_id)
+    match cnt do
+      Ok(n) -> assert_eq_int(n, 3)
+      Err(_) -> assert_true(false)
+    end
+
+    -- Events are in correct order
+    let events = Conduit.EventStore.load_all(storage, wf_id)
+    match events do
+      Ok(evts) ->
+        assert_eq_int(List.length(evts), 3)
+        let e0 = List.nth_opt(evts, 0) |> unwrap
+        let e1 = List.nth_opt(evts, 1) |> unwrap
+        let e2 = List.nth_opt(evts, 2) |> unwrap
+        assert_eq_int(e0.sequence, 0)
+        assert_eq_int(e1.sequence, 1)
+        assert_eq_int(e2.sequence, 2)
+        assert_true(String.contains(e0.payload, "validate_order"))
+        assert_true(String.contains(e1.payload, "charge_card"))
+        assert_true(String.contains(e2.payload, "send_confirmation"))
+      Err(_) -> assert_true(false)
+    end
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Test 2: Replay uses recorded events, skips fns
+  -- ─────────────────────────────────────────────────────────────
+
+  fn test_replay_skips_all_fns_and_returns_recorded_values() do
+    let vault_k  = make_storage()
+    let storage  = new_storage(vault_k)
+    let wf_id    = uuid_v4()
+
+    -- Pre-populate 3 events (simulating a previous first run)
+    let _ = Conduit.EventStore.append(storage, wf_id, 0, "checkpoint",
+      "{\"name\":\"validate_order\",\"value\":\"order_valid\",\"duration_ms\":5}")
+    let _ = Conduit.EventStore.append(storage, wf_id, 1, "checkpoint",
+      "{\"name\":\"charge_card\",\"value\":\"charge_ch_abc123\",\"duration_ms\":100}")
+    let _ = Conduit.EventStore.append(storage, wf_id, 2, "checkpoint",
+      "{\"name\":\"send_confirmation\",\"value\":\"email_sent\",\"duration_ms\":10}")
+
+    -- Warm replay
+    let _ = Conduit.EventStore.warm_replay(storage, wf_id)
+
+    -- Track calls
+    let call_key = "calls_replay_" ++ uuid_v4()
+    Vault.set(call_key, "validate_calls", 0)
+    Vault.set(call_key, "charge_calls", 0)
+    Vault.set(call_key, "confirm_calls", 0)
+
+    let result = run_payment_workflow(storage, wf_id, call_key)
+    assert_ok(result)
+
+    -- NO fns were called (all replayed from events)
+    assert_eq_int(Vault.get(call_key, "validate_calls") |> unwrap_or(-1), 0)
+    assert_eq_int(Vault.get(call_key, "charge_calls") |> unwrap_or(-1), 0)
+    assert_eq_int(Vault.get(call_key, "confirm_calls") |> unwrap_or(-1), 0)
+
+    -- Values are correct (from recorded events)
+    match result do
+      Ok(output) ->
+        assert_true(String.contains(output, "order_valid"))
+        assert_true(String.contains(output, "charge_ch_abc123"))
+        assert_true(String.contains(output, "email_sent"))
+      Err(_) -> assert_true(false)
+    end
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Test 3: Point-in-time replay (only first 2 events)
+  -- ─────────────────────────────────────────────────────────────
+
+  fn test_point_in_time_replay_partial_events() do
+    let vault_k  = make_storage()
+    let storage  = new_storage(vault_k)
+    let wf_id    = uuid_v4()
+
+    -- Pre-populate 3 events
+    let _ = Conduit.EventStore.append(storage, wf_id, 0, "checkpoint",
+      "{\"name\":\"validate_order\",\"value\":\"order_valid\",\"duration_ms\":5}")
+    let _ = Conduit.EventStore.append(storage, wf_id, 1, "checkpoint",
+      "{\"name\":\"charge_card\",\"value\":\"charge_ch_abc123\",\"duration_ms\":100}")
+    let _ = Conduit.EventStore.append(storage, wf_id, 2, "checkpoint",
+      "{\"name\":\"send_confirmation\",\"value\":\"email_sent\",\"duration_ms\":10}")
+
+    -- Warm replay to sequence 1 only (first 2 events: 0 and 1)
+    let _ = Conduit.EventStore.warm_replay_to(storage, wf_id, 1)
+
+    let call_key = "calls_pit_" ++ uuid_v4()
+    Vault.set(call_key, "validate_calls", 0)
+    Vault.set(call_key, "charge_calls", 0)
+    Vault.set(call_key, "confirm_calls", 0)
+
+    let result = run_payment_workflow(storage, wf_id, call_key)
+    assert_ok(result)
+
+    -- First 2 fns NOT called (replayed), 3rd fn IS called (no event)
+    assert_eq_int(Vault.get(call_key, "validate_calls") |> unwrap_or(-1), 0)
+    assert_eq_int(Vault.get(call_key, "charge_calls") |> unwrap_or(-1), 0)
+    assert_eq_int(Vault.get(call_key, "confirm_calls") |> unwrap_or(-1), 1)
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Test 4: Event history is queryable
+  -- ─────────────────────────────────────────────────────────────
+
+  fn test_event_history_queryable() do
+    let vault_k = make_storage()
+    let storage = new_storage(vault_k)
+    let wf_id   = uuid_v4()
+
+    -- Run the workflow in first-execution mode
+    let rk = Conduit.EventStore.replay_key(wf_id)
+    Vault.set(rk, "mode", "deterministic_replay")
+    Vault.set(rk, "cursor", 0)
+    Vault.set(rk, "event_count", 0)
+    Vault.set(rk, "next_seq", 0)
+
+    let call_key = "calls_hist_" ++ uuid_v4()
+    Vault.set(call_key, "validate_calls", 0)
+    Vault.set(call_key, "charge_calls", 0)
+    Vault.set(call_key, "confirm_calls", 0)
+
+    let _ = run_payment_workflow(storage, wf_id, call_key)
+
+    -- Query event history
+    let history = Conduit.EventStore.load_all(storage, wf_id)
+    match history do
+      Ok(evts) ->
+        assert_eq_int(List.length(evts), 3)
+        -- All events are checkpoint type
+        assert_true(List.all(evts, fn e -> e.event_type == "checkpoint"))
+        -- Sequences are 0, 1, 2
+        let seqs = List.map(evts, fn e -> e.sequence)
+        assert_true(List.member(seqs, 0))
+        assert_true(List.member(seqs, 1))
+        assert_true(List.member(seqs, 2))
+      Err(_) -> assert_true(false)
+    end
+  end
+end

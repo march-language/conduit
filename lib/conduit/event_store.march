@@ -1,0 +1,132 @@
+doc """
+Conduit.EventStore — append-only event log for deterministic replay.
+
+When a workflow runs with `ExecutionMode.DeterministicReplay`, every
+checkpoint decision is recorded as an ordered event in the store. On
+replay, events are loaded into Vault and consumed in sequence order;
+side-effect functions are skipped for events that already exist.
+
+Key Vault namespace: `"conduit_wf_replay_" ++ workflow_id`
+  - "mode"        → "deterministic_replay" (absent = normal checkpoint mode)
+  - "event_count" → Int (number of events loaded from DB)
+  - "cursor"      → Int (current position; starts at 0)
+  - "next_seq"    → Int (next sequence number for appending new events)
+  - "event:N"     → String (event payload at sequence N)
+"""
+
+mod Conduit.EventStore do
+  doc "The Vault namespace key used for replay state of a given workflow."
+  fn replay_key(workflow_id : String) : String do
+    "conduit_wf_replay_" ++ workflow_id
+  end
+
+  doc """
+  Append an event to the store.
+
+  Returns the event id on success.
+  """
+  fn append(storage, workflow_id : String, sequence : Int, event_type : String, payload : String) : Result(Int, String) do
+    Conduit.Storage.event_append(storage, workflow_id, sequence, event_type, payload)
+  end
+
+  doc "Load all events for a workflow in sequence order."
+  fn load_all(storage, workflow_id : String) : Result(List(Conduit.WorkflowEvent), String) do
+    Conduit.Storage.event_load_all(storage, workflow_id)
+  end
+
+  doc "Load events for a workflow up to and including `max_sequence`."
+  fn load_up_to(storage, workflow_id : String, max_sequence : Int) : Result(List(Conduit.WorkflowEvent), String) do
+    Conduit.Storage.event_load_up_to(storage, workflow_id, max_sequence)
+  end
+
+  doc "Count the number of events for a workflow."
+  fn count(storage, workflow_id : String) : Result(Int, String) do
+    Conduit.Storage.event_count(storage, workflow_id)
+  end
+
+  doc """
+  Load all events for a workflow into Vault and set replay mode.
+
+  After this call, `WorkflowContext.checkpoint` will use the event store
+  instead of the normal checkpoint DB path. Events already recorded are
+  replayed (fn skipped); new checkpoints beyond the recorded events
+  execute normally and append new events.
+  """
+  fn warm_replay(storage, workflow_id : String) : Result((), String) do
+    match load_all(storage, workflow_id) do
+      Err(e) -> Err(e)
+      Ok(events) ->
+        let rk = replay_key(workflow_id)
+        let count = List.length(events)
+        Vault.set(rk, "mode", "deterministic_replay")
+        Vault.set(rk, "cursor", 0)
+        Vault.set(rk, "event_count", count)
+        Vault.set(rk, "next_seq", count)
+        -- Cache each event payload by sequence number
+        List.each(events, fn evt ->
+          Vault.set(rk, "event:" ++ int_to_string(evt.sequence), evt.payload))
+        Ok(())
+    end
+  end
+
+  doc """
+  Load events up to a given sequence for point-in-time replay.
+
+  Same as warm_replay but only loads events with sequence <= max_sequence.
+  """
+  fn warm_replay_to(storage, workflow_id : String, max_sequence : Int) : Result((), String) do
+    match load_up_to(storage, workflow_id, max_sequence) do
+      Err(e) -> Err(e)
+      Ok(events) ->
+        let rk = replay_key(workflow_id)
+        let count = List.length(events)
+        Vault.set(rk, "mode", "deterministic_replay")
+        Vault.set(rk, "cursor", 0)
+        Vault.set(rk, "event_count", count)
+        Vault.set(rk, "next_seq", count)
+        List.each(events, fn evt ->
+          Vault.set(rk, "event:" ++ int_to_string(evt.sequence), evt.payload))
+        Ok(())
+    end
+  end
+
+  doc """
+  Build a JSON event payload for a checkpoint event.
+
+  Format: {"name":"full_name","value":"...","duration_ms":42}
+  """
+  fn checkpoint_payload(name : String, value : String, duration_ms : Int) : String do
+    "{\"name\":\"" ++ name ++ "\",\"value\":" ++ pesc_json_str(value) ++ ",\"duration_ms\":" ++ int_to_string(duration_ms) ++ "}"
+  end
+
+  doc "Extract the 'value' field from a checkpoint event payload."
+  fn extract_value(payload : String) : String do
+    -- Parse the JSON and extract the "value" field.
+    match JSON.parse(payload) do
+      Err(_) -> payload   -- fallback: treat entire payload as value
+      Ok(json) ->
+        match JSON.get(json, "value") do
+          None    -> payload
+          Some(v) ->
+            -- If the value is a JSON string, unwrap the quotes
+            let s = JSON.to_string(v)
+            -- JSON.to_string wraps strings in quotes; remove them
+            if String.starts_with(s, "\"") do
+              String.slice_bytes(s, 1, String.byte_size(s) - 2)
+            else
+              s
+            end
+        end
+    end
+  end
+
+  -- Escape a string for JSON embedding. If it's already JSON (starts with " or {),
+  -- embed directly; otherwise wrap in quotes.
+  pfn pesc_json_str(s : String) : String do
+    if String.starts_with(s, "\"") || String.starts_with(s, "{") || String.starts_with(s, "[") do
+      s
+    else
+      "\"" ++ s ++ "\""
+    end
+  end
+end

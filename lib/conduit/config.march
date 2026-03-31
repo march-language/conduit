@@ -1,93 +1,4 @@
-doc """
-Configuration types for Conduit jobs and the application-level queue config.
-"""
-
-mod Conduit do
-  doc "Per-job uniqueness constraint — prevent duplicate jobs within a time window."
-  type UniqueConstraint = {
-    duration : Duration,
-    by       : List(String)
-  }
-
-  doc """
-  What to do when a duplicate unique job is enqueued.
-    Ignore  — silently drop the duplicate (return the existing job id)
-    Replace — cancel the existing job and enqueue the new one
-    Raise   — return an error
-  """
-  type UniqueConflict = Ignore | Replace | Raise
-
-  doc """
-  Per-key rate limit configuration.
-
-    key_fn — function that extracts a rate-limit key from the payload string
-    limit  — max executions per second *per key*
-  """
-  type PerKeyRateLimit = {
-    key_fn : fn String -> String,
-    limit  : Int
-  }
-
-  doc """
-  Rate limit configuration for a job type.
-
-    max_per_second — global rate limit for this job type
-    per_key        — optional per-key rate limit (e.g. per user_id)
-  """
-  type RateLimit = {
-    max_per_second : Int,
-    per_key        : Option(Conduit.PerKeyRateLimit)
-  }
-
-  doc """
-  Configuration for a single job type. Override fields via `fn config` in your
-  `impl Conduit.Job` block; use `..Conduit.JobConfig.default()` to inherit the rest.
-  """
-  type JobConfig = {
-    queue            : String,
-    max_attempts     : Int,
-    timeout          : Duration,
-    backoff          : Conduit.Backoff,
-    dead_letter_queue: Option(String),
-    unique_for       : Option(Conduit.UniqueConstraint),
-    on_conflict      : Conduit.UniqueConflict,
-    rate_limit       : Option(Conduit.RateLimit),
-    on_dead_letter   : Option(fn Conduit.JobInfo -> ()),
-    priority         : Int,
-    tags             : List(String),
-    discard_after    : Option(Duration)
-  }
-
-  doc "A read-only snapshot of a job instance, passed to dead-letter callbacks."
-  type JobInfo = {
-    id           : String,
-    queue        : String,
-    job_type     : String,
-    attempt      : Int,
-    max_attempts : Int,
-    tags         : List(String),
-    inserted_at  : DateTime,
-    errors       : List(String)
-  }
-
-  doc "Application-level Conduit configuration, passed to Conduit.start/2."
-  type Config = {
-    queues                  : List(String),
-    workers_per_queue       : Int,
-    poll_interval_ms        : Int,
-    cron_tick_interval_ms   : Int,    -- how often the cron scheduler wakes (default 30s)
-    node_id                 : String, -- unique id for this node; auto-generated if not set
-    heartbeat_interval_ms   : Int,    -- how often the node heartbeats (default 15s)
-    stale_node_threshold_ms : Int     -- heartbeat age before node is considered stale (default 60s)
-  }
-end
-
 mod Conduit.JobConfig do
-  doc """
-  Default job configuration. Use record spread to override specific fields:
-
-    { queue: "critical", max_attempts: 10, ..Conduit.JobConfig.default() }
-  """
   fn default() : Conduit.JobConfig do
     {
       queue             = "default",
@@ -102,21 +13,6 @@ mod Conduit.JobConfig do
       priority          = 0,
       tags              = Nil,
       discard_after     = None
-    }
-  end
-end
-
-mod Conduit.Config do
-  doc "Default application configuration."
-  fn default() : Conduit.Config do
-    {
-      queues                  = Cons("default", Nil),
-      workers_per_queue       = 5,
-      poll_interval_ms        = 1000,
-      cron_tick_interval_ms   = 30000,
-      node_id                 = uuid_v4(),
-      heartbeat_interval_ms   = 15000,
-      stale_node_threshold_ms = 60000
     }
   end
 end

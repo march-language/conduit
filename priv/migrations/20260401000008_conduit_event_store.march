@@ -1,0 +1,31 @@
+doc """
+Phase 8 migration: Event store for deterministic replay.
+
+Creates `conduit_workflow_events` — an append-only event log used when
+a workflow runs with `ExecutionMode.DeterministicReplay`. Each checkpoint
+decision is recorded as a sequenced event; on replay the events are
+consumed in order and side-effect functions are skipped.
+"""
+
+mod Conduit.Migrations.CreateEventStore do
+  fn up() do
+    Depot.Migration.create_table("conduit_workflow_events", {
+      id          = ("Int",         { primary_key = true }),
+      workflow_id = ("String",      { null = false, references = { table = "conduit_workflows", column = "id", on_delete = "CASCADE" } }),
+      sequence    = ("Int",         { null = false }),
+      event_type  = ("String",      { null = false }),
+      payload     = ("Map",         { null = false }),
+      recorded_at = ("UtcDatetime", { null = false, default = "NOW()" })
+    })
+
+    -- Unique constraint on (workflow_id, sequence) ensures no duplicate events.
+    Depot.Migration.create_index("conduit_workflow_events", Cons("workflow_id", Cons("sequence", Nil)), { unique = true, name = "idx_conduit_events_wf_seq" })
+
+    -- Query index for loading events in order.
+    Depot.Migration.create_index("conduit_workflow_events", Cons("workflow_id", Cons("sequence", Nil)), { name = "idx_conduit_events_workflow" })
+  end
+
+  fn down() do
+    Depot.Migration.drop_table("conduit_workflow_events")
+  end
+end

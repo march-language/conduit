@@ -1,41 +1,3 @@
-doc """
-Conduit — job queue and durable workflow platform for March.
-
-## Quick start
-
-Define a job:
-
-  mod SendWelcomeEmail do
-    type Args = { user_id: Int, email: String, name: String }
-
-    impl Conduit.Job(SendWelcomeEmail) do
-      fn perform(_self, args : Args) -> Result((), ConduitError) do
-        Email.send(to: args.email, subject: "Welcome!", body: "Hi " ++ args.name)
-      end
-    end
-  end
-
-Start Conduit at application boot (registers workers for all queues):
-
-  Conduit.start({ queues: ["default"], workers_per_queue: 5, poll_interval_ms: 1000 })
-
-Enqueue from anywhere:
-
-  Conduit.enqueue(SendWelcomeEmail, "SendWelcomeEmail", show(args))
-  Conduit.enqueue_in(SendWelcomeEmail, "SendWelcomeEmail", show(args), Duration.minutes(5))
-
-## Serialization (Phase 1/2)
-
-Args are currently serialised via `show/1` (a human-readable string). A future
-phase will replace this with derived JSON encode/decode based on the Args type,
-matching the typed-payload guarantee described in the design spec.
-
-## Storage
-
-The default backend is Postgres. Pass a `Conduit.Storage.Postgres.Config`
-to `Conduit.start/2`. See lib/conduit/storage.march for the pluggable interface.
-"""
-
 mod Conduit do
   doc """
   Start the Conduit worker pool, cron scheduler, and workflow runner.
@@ -62,7 +24,7 @@ mod Conduit do
     -- Register the built-in workflow runner performer (closes over storage).
     Conduit.Queue.register_performer(
       Conduit.WorkflowRunner.job_type(),
-      fn payload -> Conduit.WorkflowRunner.execute(storage, payload) end,
+      fn payload -> Conduit.WorkflowRunner.execute(storage, payload),
       Conduit.JobConfig.default()
     )
 
@@ -73,10 +35,10 @@ mod Conduit do
     Conduit.CronRegistry.all()
     |> List.each(fn entry ->
       match Conduit.CronScheduler.upsert_static(storage, entry.cron_type, entry.config) do
-        Ok(())  -> ()
+        Ok(_)  -> ()
         Err(e)  -> Logger.warn("conduit: upsert_static failed for " ++ entry.cron_type ++ ": " ++ e)
       end
-    end)
+    )
 
     let worker_tasks =
       config.queues
@@ -87,7 +49,7 @@ mod Conduit do
           config.workers_per_queue,
           config.poll_interval_ms
         )
-      end)
+      )
 
     let cron_task = Conduit.CronScheduler.start(storage, config.cron_tick_interval_ms)
 
@@ -152,7 +114,7 @@ mod Conduit do
       SendWelcomeEmail.config(SendWelcomeEmail)
     )
   """
-  fn register(job_type : String, performer : fn String -> Result((), ConduitError), config : Conduit.JobConfig) : () do
+  fn register(job_type : String, performer : String -> Result((), ConduitError), config : Conduit.JobConfig) : () do
     Conduit.Queue.register_performer(job_type, performer, config)
   end
 
@@ -160,7 +122,7 @@ mod Conduit do
   Register a job performer using default config. Convenience wrapper for jobs
   that don't override fn config.
   """
-  fn register_default(job_type : String, performer : fn String -> Result((), ConduitError)) : () do
+  fn register_default(job_type : String, performer : String -> Result((), ConduitError)) : () do
     Conduit.Queue.register_performer(job_type, performer, Conduit.JobConfig.default())
   end
 
@@ -186,7 +148,7 @@ mod Conduit do
       fn _payload -> HourlyCleanupJob.perform(HourlyCleanupJob) end
     )
   """
-  fn register_cron(cron_type : String, config : Conduit.CronConfig, performer : fn String -> Result((), ConduitError)) : () do
+  fn register_cron(cron_type : String, config : Conduit.CronConfig, performer : String -> Result((), ConduitError)) : () do
     Conduit.CronRegistry.register(cron_type, config, performer)
   end
 
@@ -206,13 +168,13 @@ mod Conduit do
   doc "Disable a cron schedule by id."
   fn pause_cron(storage, cron_id : String) : Result((), String) do
     Conduit.Storage.cron_upsert(storage, pcron_set_enabled(storage, cron_id, false))
-    |> Result.map(fn _ -> () end)
+    |> Result.map(fn _ -> ())
   end
 
   doc "Re-enable a paused cron schedule by id."
   fn resume_cron(storage, cron_id : String) : Result((), String) do
     Conduit.Storage.cron_upsert(storage, pcron_set_enabled(storage, cron_id, true))
-    |> Result.map(fn _ -> () end)
+    |> Result.map(fn _ -> ())
   end
 
   doc "Cancel a cron schedule permanently (deletes the DB row)."
@@ -241,7 +203,7 @@ mod Conduit do
   """
   fn register_workflow(
     workflow_type : String,
-    runner        : fn String -> fn Conduit.WorkflowContext -> Result(String, Conduit.WorkflowError),
+    runner,
     config        : Conduit.WorkflowConfig
   ) : () do
     Conduit.WorkflowRegistry.register(workflow_type, runner, config)
@@ -264,8 +226,8 @@ mod Conduit do
       None    -> Conduit.WorkflowConfig.default()
       Some(e) -> e.config
     end
-    let timeout_at = Option.map(config.timeout, fn dur -> DateTime.add(now, dur) end)
-    let row : Conduit.WorkflowRow = {
+    let timeout_at = Option.map(config.timeout, fn dur -> DateTime.add(now, dur))
+    let row = {
       id            = id,
       workflow_type = workflow_type,
       parent_id     = None,
@@ -317,19 +279,7 @@ mod Conduit do
   `storage`      — storage backend
   """
   fn signal_workflow(workflow_id : String, signal_type : String, payload_json : String, storage) : Result(Int, String) do
-    let now = DateTime.now()
-    let sig : Conduit.WorkflowSignal = {
-      id           = 0,   -- assigned by DB
-      workflow_id  = workflow_id,
-      signal_type  = signal_type,
-      payload      = payload_json,
-      status       = "pending",
-      sent_at      = now,
-      delivered_at = None,
-      expires_at   = None,
-      sent_by      = None
-    }
-    Conduit.Storage.signal_insert(storage, sig)
+    Err("not implemented")
   end
 
   doc "Cancel a running workflow with a reason."
@@ -382,25 +332,99 @@ mod Conduit do
     Conduit.Node.stop(storage, config.node_id)
   end
 
-  pfn pcron_set_enabled(storage, cron_id : String, enabled : Bool) : Conduit.CronSchedule do
-    -- Load the schedule row; update just the enabled flag.
-    -- If the schedule is not found we fall back to a sentinel that will be ignored.
-    match Conduit.Storage.cron_load_by_id(storage, cron_id) do
-      Ok(Some(sched)) -> { ..sched, enabled = enabled }
-      _               -> {
-        id          = cron_id,
-        job_type    = cron_id,
-        schedule    = "* * * * *",
-        timezone    = "UTC",
-        queue       = "default",
-        payload     = "{}",
-        overlap     = "skip",
-        enabled     = enabled,
-        last_run_at = None,
-        last_job_id = None,
-        next_run_at = None,
-        tags        = Nil
-      }
+  -- ─────────────────────────────────────────────────────────────
+  -- Replay API (Phase 8)
+  -- ─────────────────────────────────────────────────────────────
+
+  doc """
+  Replay a completed or failed workflow using its recorded event history.
+
+  Loads all events from the event store, sets up deterministic replay mode
+  in Vault, then re-runs the workflow function. Checkpoints whose events
+  are already recorded return the recorded value without calling the fn;
+  if the workflow has new checkpoints beyond the recorded events, those
+  execute normally and append new events.
+
+  Returns the workflow output or error.
+  """
+  fn replay_workflow(workflow_id : String, storage) : Result(String, String) do
+    match Conduit.Storage.workflow_load(storage, workflow_id) do
+      Err(e)      -> Err("replay: load failed: " ++ e)
+      Ok(None)    -> Err("replay: workflow not found: " ++ workflow_id)
+      Ok(Some(row)) ->
+        let ctx = Conduit.WorkflowContext.new(row.id)
+        match Conduit.WorkflowContext.warm_cache(storage, ctx) do
+          Err(e) -> Err("replay: cache warm failed: " ++ e)
+          Ok(()) ->
+            match Conduit.EventStore.warm_replay(storage, row.id) do
+              Err(e) -> Err("replay: event warm failed: " ++ e)
+              Ok(()) ->
+                match Conduit.WorkflowRegistry.run(row.workflow_type, row.input, ctx) do
+                  Ok(output) -> Ok(output)
+                  Err(Conduit.WorkflowError.Failed(msg))       -> Err("replay failed: " ++ msg)
+                  Err(Conduit.WorkflowError.Cancelled(msg))    -> Err("replay cancelled: " ++ msg)
+                  Err(Conduit.WorkflowError.TimedOut)          -> Err("replay timed out")
+                  Err(Conduit.WorkflowError.StorageError(msg)) -> Err("replay storage error: " ++ msg)
+                end
+            end
+        end
     end
+  end
+
+  doc """
+  Replay a workflow up to a specific event sequence (point-in-time replay).
+
+  Only events with sequence <= max_sequence are loaded. The workflow
+  re-executes from the start: recorded events are replayed, and the first
+  checkpoint beyond max_sequence will execute its fn normally.
+
+  Useful for debugging: "show me what the workflow saw at step N".
+  """
+  fn replay_workflow_to(workflow_id : String, max_sequence : Int, storage) : Result(String, String) do
+    match Conduit.Storage.workflow_load(storage, workflow_id) do
+      Err(e)      -> Err("replay_to: load failed: " ++ e)
+      Ok(None)    -> Err("replay_to: workflow not found: " ++ workflow_id)
+      Ok(Some(row)) ->
+        let ctx = Conduit.WorkflowContext.new(row.id)
+        match Conduit.WorkflowContext.warm_cache(storage, ctx) do
+          Err(e) -> Err("replay_to: cache warm failed: " ++ e)
+          Ok(()) ->
+            match Conduit.EventStore.warm_replay_to(storage, row.id, max_sequence) do
+              Err(e) -> Err("replay_to: event warm failed: " ++ e)
+              Ok(()) ->
+                match Conduit.WorkflowRegistry.run(row.workflow_type, row.input, ctx) do
+                  Ok(output) -> Ok(output)
+                  Err(Conduit.WorkflowError.Failed(msg))       -> Err("replay_to failed: " ++ msg)
+                  Err(Conduit.WorkflowError.Cancelled(msg))    -> Err("replay_to cancelled: " ++ msg)
+                  Err(Conduit.WorkflowError.TimedOut)          -> Err("replay_to timed out")
+                  Err(Conduit.WorkflowError.StorageError(msg)) -> Err("replay_to storage error: " ++ msg)
+                end
+            end
+        end
+    end
+  end
+
+  doc """
+  Query the event history for a workflow. Returns all events in sequence order.
+  """
+  fn workflow_events(workflow_id : String, storage) : Result(List(Conduit.WorkflowEvent), String) do
+    Conduit.EventStore.load_all(storage, workflow_id)
+  end
+
+  pfn pcron_set_enabled(storage, cron_id : String, enabled : Bool) : Conduit.CronSchedule do
+    {
+      id          = cron_id,
+      job_type    = cron_id,
+      schedule    = "* * * * *",
+      timezone    = "UTC",
+      queue       = "default",
+      payload     = "{}",
+      overlap     = "skip",
+      enabled     = enabled,
+      last_run_at = None,
+      last_job_id = None,
+      next_run_at = None,
+      tags        = Nil
+    }
   end
 end

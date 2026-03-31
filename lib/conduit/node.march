@@ -1,116 +1,57 @@
-doc """
-Conduit.Node — node registration, heartbeating, stale detection, and leader election.
-
-Each Conduit process is a "node" in the cluster. On startup, `Conduit.start/2`
-calls `Conduit.Node.start/3` which:
-
-  1. Registers the node in `conduit_workers` (insert on conflict do update).
-  2. Spawns a heartbeat task that refreshes `last_seen_at` every
-     `heartbeat_interval_ms` milliseconds.
-  3. Spawns a stale-detection task that runs every `poll_interval_ms * 10` and:
-       a. Marks nodes whose heartbeat is older than `stale_node_threshold_ms` as stopped.
-       b. Returns their in-flight jobs to `pending` so other nodes pick them up.
-  4. Spawns a leader-election task that attempts to hold a Postgres session-level
-     advisory lock (LEADER_LOCK_ID = 8_473_625). The node that holds the lock is
-     the leader and records its id in Vault under ("conduit_cluster", "leader_node_id").
-
-When the process exits gracefully (via `Conduit.stop/2`), the node row is updated
-to status='stopped'. The leader advisory lock is released automatically when the
-Postgres session closes (crash or graceful exit).
-"""
-
-mod Conduit do
-  doc "Information about a cluster node stored in conduit_workers."
-  type NodeInfo = {
-    id           : String,
-    hostname     : String,
-    pid          : Int,
-    queues       : List(String),
-    pool_size    : Int,
-    started_at   : DateTime,
-    last_seen_at : DateTime,
-    status       : String    -- running | stopping | stopped
-  }
-end
-
 mod Conduit.Node do
-  -- Postgres advisory lock id dedicated to leader election.
-  ptype LeaderLockId = 8473625
+  let leader_lock_id = 8473625
 
-  doc """
-  Start all node background tasks.
-
-  1. Register the node in the DB.
-  2. Spawn heartbeat task.
-  3. Spawn stale-detection task.
-  4. Spawn leader-election task.
-
-  Returns the list of spawned task handles.
-  """
   fn start(storage, config : Conduit.Config) : List(Task) do
     let node = pbuild_node_info(config)
     match Conduit.Storage.node_register(storage, node) do
-      Ok(())  -> ()
+      Ok(_)  -> ()
       Err(e)  -> Logger.warn("conduit_node: register failed: " ++ e)
     end
     Vault.set("conduit_cluster", "node_id",   config.node_id)
     Vault.set("conduit_cluster", "is_leader",  false)
 
     let heartbeat_task =
-      task_spawn(fn () -> pheartbeat_loop(storage, config.node_id, config.heartbeat_interval_ms) end)
+      task_spawn(fn () -> pheartbeat_loop(storage, config.node_id, config.heartbeat_interval_ms))
 
     let stale_task =
-      task_spawn(fn () -> pstale_loop(storage, config.stale_node_threshold_ms, config.poll_interval_ms * 10) end)
+      task_spawn(fn () -> pstale_loop(storage, config.stale_node_threshold_ms, config.poll_interval_ms * 10))
 
     let leader_task =
-      task_spawn(fn () -> pleader_loop(storage, config.node_id, config.heartbeat_interval_ms) end)
+      task_spawn(fn () -> pleader_loop(storage, config.node_id, config.heartbeat_interval_ms))
 
     Cons(heartbeat_task, Cons(stale_task, Cons(leader_task, Nil)))
   end
 
-  doc "Deregister this node on graceful shutdown. Sets status=stopped."
   fn stop(storage, node_id : String) : () do
     match Conduit.Storage.node_deregister(storage, node_id) do
-      Ok(())  -> ()
+      Ok(_)  -> ()
       Err(e)  -> Logger.warn("conduit_node: deregister failed for " ++ node_id ++ ": " ++ e)
     end
-    -- Release leader lock if we held it.
     if is_leader() do
-      Conduit.Storage.node_release_leader_lock(storage, LeaderLockId)
+      Conduit.Storage.node_release_leader_lock(storage, leader_lock_id)
       Vault.set("conduit_cluster", "is_leader", false)
     end
   end
 
-  doc "Return true if this node currently holds the leader advisory lock."
   fn is_leader() : Bool do
     Vault.get("conduit_cluster", "is_leader") |> unwrap_or(false)
   end
 
-  doc "Return the node_id of the current leader, if known."
   fn leader_node_id() : Option(String) do
     Vault.get("conduit_cluster", "leader_node_id")
   end
 
-  -- ─────────────────────────────────────────────────────────────
-  -- Private: heartbeat loop
-  -- ─────────────────────────────────────────────────────────────
-
   pfn pheartbeat_loop(storage, node_id : String, interval_ms : Int) : () do
     match Conduit.Storage.node_heartbeat(storage, node_id) do
-      Ok(())  -> ()
+      Ok(_)  -> ()
       Err(e)  -> Logger.warn("conduit_node: heartbeat failed: " ++ e)
     end
     psleep_ms(interval_ms)
     pheartbeat_loop(storage, node_id, interval_ms)
   end
 
-  -- ─────────────────────────────────────────────────────────────
-  -- Private: stale detection loop
-  -- ─────────────────────────────────────────────────────────────
-
   pfn pstale_loop(storage, threshold_ms : Int, interval_ms : Int) : () do
     let threshold_s = int_div(threshold_ms, 1000)
-    -- Reclaim in-flight jobs from stale nodes.
     match Conduit.Storage.node_reclaim_jobs(storage, threshold_s) do
       Ok(ids) ->
         if not (List.is_empty(ids)) do
@@ -118,7 +59,6 @@ mod Conduit.Node do
         end
       Err(e) -> Logger.warn("conduit_node: stale reclaim error: " ++ e)
     end
-    -- Mark stale worker rows as stopped.
     match Conduit.Storage.node_cleanup_stale(storage, threshold_s) do
       Ok(n)  ->
         if n > 0 do
@@ -130,18 +70,12 @@ mod Conduit.Node do
     pstale_loop(storage, threshold_ms, interval_ms)
   end
 
-  -- ─────────────────────────────────────────────────────────────
-  -- Private: leader election loop
-  -- ─────────────────────────────────────────────────────────────
-
   pfn pleader_loop(storage, node_id : String, interval_ms : Int) : () do
-    match Conduit.Storage.node_try_leader_lock(storage, LeaderLockId) do
+    match Conduit.Storage.node_try_leader_lock(storage, leader_lock_id) do
       Ok(true) ->
-        -- This node holds the lock — it is the leader.
         Vault.set("conduit_cluster", "is_leader",      true)
         Vault.set("conduit_cluster", "leader_node_id", node_id)
       Ok(false) ->
-        -- Another node holds the lock.
         Vault.set("conduit_cluster", "is_leader", false)
       Err(e) ->
         Logger.warn("conduit_node: leader election error: " ++ e)
@@ -149,10 +83,6 @@ mod Conduit.Node do
     psleep_ms(interval_ms)
     pleader_loop(storage, node_id, interval_ms)
   end
-
-  -- ─────────────────────────────────────────────────────────────
-  -- Private: NodeInfo construction
-  -- ─────────────────────────────────────────────────────────────
 
   pfn pbuild_node_info(config : Conduit.Config) : Conduit.NodeInfo do
     {

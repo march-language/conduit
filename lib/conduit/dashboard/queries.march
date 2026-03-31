@@ -65,7 +65,7 @@ mod Conduit.Dashboard.Queries do
     match all_jobs do
       Err(_) -> None
       Ok(jobs) ->
-        List.find(jobs, fn j -> j.id == job_id end)
+        List.find(jobs, fn j -> j.id == job_id)
     end
   end
 

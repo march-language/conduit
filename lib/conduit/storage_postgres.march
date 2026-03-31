@@ -1,0 +1,22 @@
+mod Conduit.Storage.Postgres do
+  type Config = { host : String }
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Event store methods (Phase 8 — Deterministic Replay)
+  -- ─────────────────────────────────────────────────────────────
+
+  pfn prow_to_event(row : Map) : Conduit.WorkflowEvent do
+    {
+      id          = Map.get(row, "id")          |> Option.flat_map(fn s -> String.to_int(s)) |> unwrap_or(0),
+      workflow_id = Map.get(row, "workflow_id") |> unwrap,
+      sequence    = Map.get(row, "sequence")    |> Option.flat_map(fn s -> String.to_int(s)) |> unwrap_or(0),
+      event_type  = Map.get(row, "event_type") |> unwrap_or("checkpoint"),
+      payload     = Map.get(row, "payload")     |> unwrap_or("{}"),
+      recorded_at = Map.get(row, "recorded_at") |> unwrap |> pparse_dt
+    }
+  end
+
+  pfn pparse_dt(s : String) : DateTime do
+    DateTime.parse(s, "%Y-%m-%dT%H:%M:%SZ") |> unwrap
+  end
+end

@@ -1,38 +1,7 @@
-doc """
-Conduit.WorkflowRunner — executes workflow instances as durable jobs.
-
-The runner is registered as a regular Conduit job with type
-`"conduit.workflow_runner"`. When enqueued, its payload is:
-  {"workflow_id": "<uuid>"}
-
-Execution sequence:
-
-  1. Parse workflow_id from payload.
-  2. Load the workflow row from DB (conduit_workflows).
-  3. If already completed/cancelled/timed_out: finish (no-op).
-  4. Check workflow timeout_at; if exceeded: mark timed_out, finish.
-  5. Build WorkflowContext; warm checkpoint cache from DB.
-  6. Look up registered runner in WorkflowRegistry.
-  7. Call runner(input_json)(ctx).
-  8. On Ok(output_json): mark workflow completed.
-     On Err(Failed):     mark workflow failed (no retry).
-     On Err(Cancelled):  mark workflow cancelled.
-     On Err(TimedOut):   mark workflow timed_out.
-     On Err(StorageError): propagate as ConduitError.Retry.
-
-Crash recovery: if the runner job dies mid-execution, the job retries
-(heartbeat stale detection from Phase 2). On retry, warm_cache repopulates
-the checkpoint cache from DB — completed checkpoints are skipped, and
-execution resumes from the first incomplete step.
-"""
-
 mod Conduit.WorkflowRunner do
-  -- The job_type string used for all workflow runner jobs.
-  ptype RunnerJobType = "conduit.workflow_runner"
-
   doc "The job_type constant (public so callers can use it in tests)."
   fn job_type() : String do
-    RunnerJobType
+    "conduit.workflow_runner"
   end
 
   doc """
@@ -65,8 +34,18 @@ mod Conduit.WorkflowRunner do
   """
   fn enqueue(storage, workflow_id : String, config : Conduit.WorkflowConfig) : Result(String, String) do
     let job_config = {
-      ..Conduit.JobConfig.default(),
-      tags = config.tags
+      queue             = "default",
+      max_attempts      = 3,
+      timeout           = Duration.seconds(30),
+      backoff           = Conduit.Backoff.Exponential,
+      dead_letter_queue = None,
+      unique_for        = None,
+      on_conflict       = Conduit.UniqueConflict.Ignore,
+      rate_limit        = None,
+      on_dead_letter    = None,
+      priority          = 0,
+      tags              = config.tags,
+      discard_after     = None
     }
     let payload = "{\"workflow_id\": \"" ++ workflow_id ++ "\"}"
     Conduit.Queue.enqueue(storage, RunnerJobType, payload, job_config)
@@ -91,23 +70,37 @@ mod Conduit.WorkflowRunner do
       match Conduit.WorkflowContext.warm_cache(storage, ctx) do
         Err(e) -> Err(ConduitError.Retry("workflow_runner: cache warm failed: " ++ e))
         Ok(()) ->
-          -- Look up and run the registered workflow.
-          match Conduit.WorkflowRegistry.run(row.workflow_type, row.input, ctx) do
-            Ok(output_json) ->
-              pmark_status(storage, row.id, "completed", Some(output_json), None)
-              Ok(())
-            Err(Failed(msg)) ->
-              pmark_status(storage, row.id, "failed", None, Some(msg))
-              Err(ConduitError.Discard("workflow failed: " ++ msg))
-            Err(Cancelled(msg)) ->
-              pmark_status(storage, row.id, "cancelled", None, Some(msg))
-              Ok(())
-            Err(TimedOut) ->
-              pmark_status(storage, row.id, "timed_out", None, Some("Timed out during execution"))
-              Ok(())
-            Err(StorageError(msg)) ->
-              -- Transient — let the job retry via normal backoff.
-              Err(ConduitError.Retry("workflow_runner: storage error: " ++ msg))
+          -- If DeterministicReplay mode, warm the event replay cache.
+          let wf_config = match Conduit.WorkflowRegistry.lookup(row.workflow_type) do
+            None    -> Conduit.WorkflowConfig.default()
+            Some(e) -> e.config
+          end
+          let replay_warm_result = match wf_config.execution_mode do
+            Conduit.ExecutionMode.DeterministicReplay ->
+              Conduit.EventStore.warm_replay(storage, row.id)
+            _ -> Ok(())
+          end
+          match replay_warm_result do
+            Err(e) -> Err(ConduitError.Retry("workflow_runner: event warm failed: " ++ e))
+            Ok(()) ->
+              -- Look up and run the registered workflow.
+              match Conduit.WorkflowRegistry.run(row.workflow_type, row.input, ctx) do
+                Ok(output_json) ->
+                  pmark_status(storage, row.id, "completed", Some(output_json), None)
+                  Ok(())
+                Err(Failed(msg)) ->
+                  pmark_status(storage, row.id, "failed", None, Some(msg))
+                  Err(ConduitError.Discard("workflow failed: " ++ msg))
+                Err(Cancelled(msg)) ->
+                  pmark_status(storage, row.id, "cancelled", None, Some(msg))
+                  Ok(())
+                Err(TimedOut) ->
+                  pmark_status(storage, row.id, "timed_out", None, Some("Timed out during execution"))
+                  Ok(())
+                Err(StorageError(msg)) ->
+                  -- Transient — let the job retry via normal backoff.
+                  Err(ConduitError.Retry("workflow_runner: storage error: " ++ msg))
+              end
           end
       end
     end

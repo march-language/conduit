@@ -1,41 +1,7 @@
-doc """
-Conduit.CronScheduler — fires due cron schedules and handles overlap.
-
-The scheduler runs as a background task that wakes every `tick_interval_ms`
-(default 30s) and:
-
-  1. Acquires a Postgres advisory lock (cron_scheduler_lock_id = 7_326_482).
-     If the lock cannot be acquired another node is already handling this tick;
-     skip and try again next tick. This prevents duplicate fires in multi-node
-     deployments.
-
-  2. Loads all enabled cron schedules due for execution
-     (next_run_at <= NOW()).
-
-  3. For each due schedule, handles the overlap mode:
-       Skip    — query the last_job_id; if it is still pending/running, skip.
-       Allow   — enqueue unconditionally.
-       Replace — cancel last_job_id if pending/running, then enqueue.
-
-  4. Enqueues a job row for the cron (via Conduit.Queue.enqueue).
-
-  5. Updates the schedule: last_run_at, last_job_id, next_run_at.
-
-  6. Releases the advisory lock.
-
-Static crons (registered via Conduit.register_cron) are upserted into the
-`conduit_cron_schedules` table during `Conduit.start`. Dynamic crons
-inserted via `Conduit.schedule_cron` are picked up automatically on the
-next tick.
-"""
-
 mod Conduit.CronScheduler do
-  -- Postgres advisory lock id dedicated to the cron scheduler.
-  ptype LockId = 7326482
-
   doc "Start the cron scheduler as a background task."
   fn start(storage, tick_interval_ms : Int) : Task do
-    task_spawn(fn () -> scheduler_loop(storage, tick_interval_ms) end)
+    task_spawn(fn () -> scheduler_loop(storage, tick_interval_ms))
   end
 
   pfn scheduler_loop(storage, tick_interval_ms : Int) : () do
@@ -55,7 +21,7 @@ mod Conduit.CronScheduler do
         let result = pfire_due(storage)
         Conduit.Storage.cron_advisory_unlock(storage, 7326482)
         match result do
-          Ok(()) -> ()
+          Ok(_) -> ()
           Err(e) -> Logger.error("conduit_cron: tick error: " ++ e)
         end
     end
@@ -65,7 +31,7 @@ mod Conduit.CronScheduler do
     match Conduit.Storage.cron_load_due(storage) do
       Err(e)       -> Err(e)
       Ok(schedules) ->
-        List.each(schedules, fn sched -> pfire_one(storage, sched) end)
+        List.each(schedules, fn sched -> pfire_one(storage, sched))
         Ok(())
     end
   end
@@ -90,7 +56,7 @@ mod Conduit.CronScheduler do
           None      -> ()
           Some(jid) ->
             match Conduit.Storage.cron_cancel_job(storage, jid) do
-              Ok(())  -> ()
+              Ok(_)   -> ()
               Err(e)  -> Logger.warn("conduit_cron: cancel previous job " ++ jid ++ ": " ++ e)
             end
         end
@@ -106,11 +72,34 @@ mod Conduit.CronScheduler do
     let config = match Conduit.CronRegistry.lookup(sched.job_type) do
       None    ->
         -- Not in registry (dynamic cron or missing registration): use schedule's queue.
-        { ..Conduit.JobConfig.default(), queue = sched.queue, tags = sched.tags }
+        {
+          queue             = sched.queue,
+          max_attempts      = 3,
+          timeout           = Duration.seconds(30),
+          backoff           = Conduit.Backoff.Exponential,
+          dead_letter_queue = None,
+          unique_for        = None,
+          on_conflict       = Conduit.UniqueConflict.Ignore,
+          rate_limit        = None,
+          on_dead_letter    = None,
+          priority          = 0,
+          tags              = sched.tags,
+          discard_after     = None
+        }
       Some(e) ->
-        { ..Conduit.JobConfig.default(),
-          queue = e.config.queue,
-          tags  = e.config.tags
+        {
+          queue             = e.config.queue,
+          max_attempts      = 3,
+          timeout           = Duration.seconds(30),
+          backoff           = Conduit.Backoff.Exponential,
+          dead_letter_queue = None,
+          unique_for        = None,
+          on_conflict       = Conduit.UniqueConflict.Ignore,
+          rate_limit        = None,
+          on_dead_letter    = None,
+          priority          = 0,
+          tags              = e.config.tags,
+          discard_after     = None
         }
     end
 
@@ -126,7 +115,7 @@ mod Conduit.CronScheduler do
             None
         end
         match Conduit.Storage.cron_mark_fired(storage, sched.id, job_id, next) do
-          Ok(())  -> ()
+          Ok(_)   -> ()
           Err(e)  -> Logger.error("conduit_cron: cron_mark_fired error for " ++ sched.id ++ ": " ++ e)
         end
     end

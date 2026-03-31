@@ -1,173 +1,35 @@
-doc """
-Conduit cron types, interfaces, and the in-process cron registry.
-
-Two interfaces are provided:
-
-  Conduit.Cron(c)         — scheduled job with no payload (stateless)
-  Conduit.CronWithArgs(c) — scheduled job whose payload is stored in the DB
-
-Static crons (defined in code) are registered at startup via
-`Conduit.register_cron/3`. Dynamic crons are inserted into the
-`conduit_cron_schedules` table via `Conduit.schedule_cron/2`.
-"""
-
--- ─────────────────────────────────────────────────────────────
--- Types
--- ─────────────────────────────────────────────────────────────
-
-mod Conduit do
-  doc "Behaviour when a cron fires while a previous run is still pending/running."
-  type CronOverlap =
-    Skip      -- do not enqueue; wait for the previous job to finish
-    | Allow   -- enqueue regardless (may run concurrently)
-    | Replace -- cancel the previous pending/running job, then enqueue fresh
-
-  doc "Per-cron configuration."
-  type CronConfig = {
-    schedule : String,         -- standard 5-field cron expression, e.g. "0 * * * *"
-    timezone : String,         -- IANA timezone name, default "UTC"
-    queue    : String,         -- target queue, default "default"
-    overlap  : CronOverlap,    -- default Skip
-    tags     : List(String)
-  }
-
-  doc """
-  Internal DB row for conduit_cron_schedules. Stores both static and dynamic crons.
-  """
-  type CronSchedule = {
-    id          : String,
-    job_type    : String,
-    schedule    : String,
-    timezone    : String,
-    queue       : String,
-    payload     : String,           -- JSON payload for CronWithArgs; "{}" for Cron
-    overlap     : String,           -- "skip" | "allow" | "replace"
-    enabled     : Bool,
-    last_run_at : Option(DateTime),
-    last_job_id : Option(String),
-    next_run_at : Option(DateTime),
-    tags        : List(String)
-  }
-end
-
--- ─────────────────────────────────────────────────────────────
--- Interfaces
--- ─────────────────────────────────────────────────────────────
-
-doc """
-Conduit.Cron — implement to define a recurring scheduled job with no payload.
-
-Example:
-
-  mod HourlyCleanupJob do
-    impl Conduit.Cron(HourlyCleanupJob) do
-      fn config(_self) : Conduit.CronConfig do
-        {
-          schedule = "0 * * * *",
-          timezone = "UTC",
-          queue    = "default",
-          overlap  = Conduit.CronOverlap.Skip,
-          tags     = Nil
-        }
-      end
-
-      fn perform(_self) : Result((), ConduitError) do
-        Database.delete_expired_sessions()
-        Ok(())
-      end
-    end
-  end
-
-Register at startup:
-
-  Conduit.register_cron("HourlyCleanupJob",
-    HourlyCleanupJob.config(HourlyCleanupJob),
-    fn _payload -> HourlyCleanupJob.perform(HourlyCleanupJob) end
-  )
-"""
-interface Conduit.Cron(c) do
-  fn perform : c -> Result((), ConduitError)
-
-  fn config : c -> Conduit.CronConfig do
-    {
-      schedule = "* * * * *",
-      timezone = "UTC",
-      queue    = "default",
-      overlap  = Conduit.CronOverlap.Skip,
-      tags     = Nil
-    }
-  end
-end
-
-doc """
-Conduit.CronWithArgs — implement to define a recurring scheduled job whose
-payload is stored alongside the schedule in the DB.
-
-The payload is loaded from `conduit_cron_schedules.payload` at fire time.
-Each registered schedule can have a different payload.
-"""
-interface Conduit.CronWithArgs(c) do
-  type Args
-
-  fn perform : c -> Args -> Result((), ConduitError)
-
-  fn config : c -> Conduit.CronConfig do
-    {
-      schedule = "* * * * *",
-      timezone = "UTC",
-      queue    = "default",
-      overlap  = Conduit.CronOverlap.Skip,
-      tags     = Nil
-    }
-  end
-end
-
--- ─────────────────────────────────────────────────────────────
--- Cron registry
--- ─────────────────────────────────────────────────────────────
-
-doc """
-Conduit.CronRegistry — in-process map from cron_type to (config, performer).
-Populated at startup; used by the scheduler to fire static crons.
-"""
 mod Conduit.CronRegistry do
-  ptype Entry = Entry({
+  ptype Entry = {
     config    : Conduit.CronConfig,
-    performer : fn String -> Result((), ConduitError)
-  })
+    performer : String -> Result((), Conduit.ConduitError)
+  }
 
-  doc "Register a cron performer. Idempotent."
-  fn register(cron_type : String, config : Conduit.CronConfig, performer : fn String -> Result((), ConduitError)) : () do
-    Vault.set(registry_key(), cron_type, Entry({ config = config, performer = performer }))
+  fn register(cron_type : String, config : Conduit.CronConfig, performer : String -> Result((), Conduit.ConduitError)) : () do
+    Vault.set(registry_key(), cron_type, { config = config, performer = performer })
   end
 
-  doc "Look up a registered cron entry."
-  fn lookup(cron_type : String) : Option({ config : Conduit.CronConfig, performer : fn String -> Result((), ConduitError) }) do
+  fn lookup(cron_type : String) : Option(Entry) do
     match Vault.get(registry_key(), cron_type) do
-      None           -> None
-      Some(Entry(e)) -> Some({ config = e.config, performer = e.performer })
+      None    -> None
+      Some(e) -> Some({ config = e.config, performer = e.performer })
     end
   end
 
-  doc "Fire a cron: call its performer with the stored payload."
-  fn fire(cron_type : String, payload : String) : Result((), ConduitError) do
+  fn fire(cron_type : String, payload : String) : Result((), Conduit.ConduitError) do
     match Vault.get(registry_key(), cron_type) do
-      None           -> Err(ConduitError.Discard("No cron registered for type: " ++ cron_type))
-      Some(Entry(e)) -> e.performer(payload)
+      None    -> Err(Conduit.ConduitError.Discard("No cron registered for type: " ++ cron_type))
+      Some(e) -> e.performer(payload)
     end
   end
 
-  doc "Return all registered static cron entries as a list."
-  fn all() : List({ cron_type : String, config : Conduit.CronConfig, performer : fn String -> Result((), ConduitError) }) do
+  fn all() do
     Vault.all(registry_key())
     |> List.filter_map(fn pair ->
       match pair do
-        (cron_type, Entry(e)) -> Some({ cron_type = cron_type, config = e.config, performer = e.performer })
-      end
-    end)
+        (cron_type, e) -> Some({ cron_type = cron_type, config = e.config, performer = e.performer })
+      end)
   end
 
-  doc "Serialise a CronOverlap variant to its DB string."
   fn overlap_to_string(o : Conduit.CronOverlap) : String do
     match o do
       Skip    -> "skip"
@@ -176,7 +38,6 @@ mod Conduit.CronRegistry do
     end
   end
 
-  doc "Deserialise a DB string to CronOverlap."
   fn overlap_from_string(s : String) : Conduit.CronOverlap do
     match s do
       "allow"   -> Conduit.CronOverlap.Allow
@@ -187,22 +48,5 @@ mod Conduit.CronRegistry do
 
   pfn registry_key() : String do
     "conduit_cron_registry"
-  end
-end
-
--- ─────────────────────────────────────────────────────────────
--- CronConfig helpers
--- ─────────────────────────────────────────────────────────────
-
-mod Conduit.CronConfig do
-  doc "Default cron configuration."
-  fn default() : Conduit.CronConfig do
-    {
-      schedule = "* * * * *",
-      timezone = "UTC",
-      queue    = "default",
-      overlap  = Conduit.CronOverlap.Skip,
-      tags     = Nil
-    }
   end
 end

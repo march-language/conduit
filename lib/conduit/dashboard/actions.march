@@ -25,8 +25,20 @@ mod Conduit.Dashboard.Actions do
       Err(e)     -> Err(e)
       Ok(None)   -> Err("dead letter not found: " ++ dl_id)
       Ok(Some(dl)) ->
-        let config = Conduit.JobConfig.default()
-        let job_config = { ..config, queue = dl.queue }
+        let job_config = {
+          queue             = dl.queue,
+          max_attempts      = 3,
+          timeout           = Duration.seconds(30),
+          backoff           = Conduit.Backoff.Exponential,
+          dead_letter_queue = None,
+          unique_for        = None,
+          on_conflict       = Conduit.UniqueConflict.Ignore,
+          rate_limit        = None,
+          on_dead_letter    = None,
+          priority          = 0,
+          tags              = Nil,
+          discard_after     = None
+        }
         match Conduit.Queue.enqueue(storage, dl.job_type, dl.payload, job_config) do
           Err(e)       -> Err(e)
           Ok(new_id) ->
@@ -64,8 +76,7 @@ mod Conduit.Dashboard.Actions do
         Err(e) ->
           Logger.warn("conduit_dashboard: retry_all: skipping " ++ dl.id ++ ": " ++ e)
           None
-      end
-    end)
+      end)
   end
 
   doc "Trigger a cron job immediately (bypasses the schedule)."
@@ -74,8 +85,20 @@ mod Conduit.Dashboard.Actions do
       Err(e)       -> Err(e)
       Ok(None)     -> Err("cron schedule not found: " ++ cron_id)
       Ok(Some(sched)) ->
-        let config = Conduit.JobConfig.default()
-        let job_config = { ..config, queue = sched.queue }
+        let job_config = {
+          queue             = sched.queue,
+          max_attempts      = 3,
+          timeout           = Duration.seconds(30),
+          backoff           = Conduit.Backoff.Exponential,
+          dead_letter_queue = None,
+          unique_for        = None,
+          on_conflict       = Conduit.UniqueConflict.Ignore,
+          rate_limit        = None,
+          on_dead_letter    = None,
+          priority          = 0,
+          tags              = Nil,
+          discard_after     = None
+        }
         Conduit.Queue.enqueue(storage, sched.job_type, sched.payload, job_config)
     end
   end

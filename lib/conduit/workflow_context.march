@@ -1,31 +1,3 @@
-doc """
-Conduit.WorkflowContext — durable execution primitives for workflows.
-
-This module provides the three core workflow operations:
-
-  checkpoint(storage, ctx, name, f)
-    — run f() once and persist the result; on re-execution (after crash)
-      return the stored value without calling f again.
-
-  parallel(storage, ctx, items, f)
-    — execute f for each item with its own checkpoint sub-namespace;
-      returns results in order. Phase 4: sequential execution in-process.
-      Phase 5+ will spawn true parallel tasks.
-
-  wait_for_signal(storage, ctx, signal_type, timeout)
-    — check DB for a pending signal of the given type; if none exists,
-      poll until one arrives or the timeout fires.
-
-  warm_cache(storage, ctx)
-    — load all checkpoints for this workflow from the DB into Vault
-      so subsequent checkpoint() calls hit the in-memory cache first.
-
-Checkpoint values are stored as plain strings (JSON-serialized by the caller).
-The checkpoint cache is stored in Vault under the key
-  "conduit_wf_" ++ workflow_id
-with the full checkpoint name (namespace ++ name) as the Vault field.
-"""
-
 mod Conduit.WorkflowContext do
   doc "Create a root context for a new or resuming workflow execution."
   fn new(workflow_id : String) : Conduit.WorkflowContext do
@@ -59,8 +31,21 @@ mod Conduit.WorkflowContext do
   `f` must return a String (typically JSON-serialized). The return value
   is the stored string on success or a WorkflowError on failure.
   """
-  fn checkpoint(storage, ctx : Conduit.WorkflowContext, name : String, f : fn () -> String) : Result(String, Conduit.WorkflowError) do
+  fn checkpoint(storage, ctx : Conduit.WorkflowContext, name : String, f : () -> String) : Result(String, Conduit.WorkflowError) do
     let full_name = ctx.namespace ++ name
+    -- Check if deterministic replay mode is active for this workflow.
+    let replay_key = Conduit.EventStore.replay_key(ctx.workflow_id)
+    let mode = Vault.get(replay_key, "mode") |> unwrap_or("")
+    if mode == "deterministic_replay" do
+      preplay_checkpoint(storage, ctx, replay_key, full_name, f)
+    else
+      -- Normal checkpoint mode (Phase 4 behavior).
+      pnormal_checkpoint(storage, ctx, full_name, f)
+    end
+  end
+
+  -- Normal checkpoint: cache → DB → execute → persist (Phase 4 path).
+  pfn pnormal_checkpoint(storage, ctx : Conduit.WorkflowContext, full_name : String, f : () -> String) : Result(String, Conduit.WorkflowError) do
     -- 1. In-memory cache hit
     match pvault_get(ctx.checkpoint_key, full_name) do
       Some(v) -> Ok(v)
@@ -79,11 +64,49 @@ mod Conduit.WorkflowContext do
             -- 4. Persist
             match Conduit.Storage.checkpoint_set(storage, ctx.workflow_id, full_name, value, dur_ms) do
               Err(e) -> Err(Conduit.WorkflowError.StorageError(e))
-              Ok(()) ->
+              Ok(_) ->
                 pvault_set(ctx.checkpoint_key, full_name, value)
                 Ok(value)
             end
         end
+    end
+  end
+
+  -- Deterministic replay checkpoint: consume from event store or execute + append.
+  pfn preplay_checkpoint(storage, ctx : Conduit.WorkflowContext, replay_key : String, full_name : String, f : () -> String) : Result(String, Conduit.WorkflowError) do
+    let cursor      = Vault.get(replay_key, "cursor")      |> unwrap_or(0)
+    let event_count = Vault.get(replay_key, "event_count") |> unwrap_or(0)
+    if cursor < event_count do
+      -- Replay: read recorded event, advance cursor, return value.
+      let event_payload = Vault.get(replay_key, "event:" ++ int_to_string(cursor)) |> unwrap_or("{}")
+      let value = Conduit.EventStore.extract_value(event_payload)
+      Vault.set(replay_key, "cursor", cursor + 1)
+      -- Also populate the normal checkpoint cache so subsequent non-replay reads work.
+      pvault_set(ctx.checkpoint_key, full_name, value)
+      Ok(value)
+    else
+      -- First execution territory: execute fn, append event, advance cursor.
+      let started = DateTime.to_timestamp(DateTime.now())
+      let value   = f()
+      let dur_ms  = (DateTime.to_timestamp(DateTime.now()) - started) * 1000
+      let next_seq = Vault.get(replay_key, "next_seq") |> unwrap_or(cursor)
+      let event_payload = Conduit.EventStore.checkpoint_payload(full_name, value, dur_ms)
+      match Conduit.EventStore.append(storage, ctx.workflow_id, next_seq, "checkpoint", event_payload) do
+        Err(e) -> Err(Conduit.WorkflowError.StorageError(e))
+        Ok(_)  ->
+          -- Cache the event in Vault for potential later replay access.
+          Vault.set(replay_key, "event:" ++ int_to_string(next_seq), event_payload)
+          Vault.set(replay_key, "cursor", cursor + 1)
+          Vault.set(replay_key, "next_seq", next_seq + 1)
+          Vault.set(replay_key, "event_count", event_count + 1)
+          -- Also populate normal checkpoint cache + DB.
+          match Conduit.Storage.checkpoint_set(storage, ctx.workflow_id, full_name, value, dur_ms) do
+            Err(e) -> Err(Conduit.WorkflowError.StorageError(e))
+            Ok(_) ->
+              pvault_set(ctx.checkpoint_key, full_name, value)
+              Ok(value)
+          end
+      end
     end
   end
 
@@ -96,7 +119,7 @@ mod Conduit.WorkflowContext do
   `f` takes (item, sub_ctx) and returns Result(String, WorkflowError).
   Returns Ok(List(String)) with results in order, or Err on first failure.
   """
-  fn parallel(storage, ctx : Conduit.WorkflowContext, items : List(a), f : fn (a, Conduit.WorkflowContext) -> Result(String, Conduit.WorkflowError)) : Result(List(String), Conduit.WorkflowError) do
+  fn parallel(storage, ctx : Conduit.WorkflowContext, items : List(a), f : (a, Conduit.WorkflowContext) -> Result(String, Conduit.WorkflowError)) : Result(List(String), Conduit.WorkflowError) do
     pparallel_loop(storage, ctx, items, 0, Nil)
   end
 
@@ -123,7 +146,7 @@ mod Conduit.WorkflowContext do
   Returns Ok(payload_json) or Err(WorkflowError.TimedOut).
   """
   fn wait_for_signal(storage, ctx : Conduit.WorkflowContext, signal_type : String, timeout : Option(Duration)) : Result(String, Conduit.WorkflowError) do
-    let deadline = Option.map(timeout, fn dur -> DateTime.to_timestamp(DateTime.add(DateTime.now(), dur)) end)
+    let deadline = Option.map(timeout, fn dur -> DateTime.to_timestamp(DateTime.add(DateTime.now(), dur)))
     pwait_loop(storage, ctx.workflow_id, signal_type, deadline)
   end
 
@@ -141,7 +164,7 @@ mod Conduit.WorkflowContext do
         Ok(Some(sig)) ->
           match Conduit.Storage.signal_mark_delivered(storage, sig.id) do
             Err(e) -> Err(Conduit.WorkflowError.StorageError(e))
-            Ok(()) -> Ok(sig.payload)
+            Ok(_) -> Ok(sig.payload)
           end
         Ok(None) ->
           psleep_ms(1000)
@@ -159,8 +182,7 @@ mod Conduit.WorkflowContext do
       Err(e)          -> Err(e)
       Ok(checkpoints) ->
         List.each(checkpoints, fn cp ->
-          pvault_set(ctx.checkpoint_key, cp.name, cp.value)
-        end)
+          pvault_set(ctx.checkpoint_key, cp.name, cp.value))
         Ok(())
     end
   end

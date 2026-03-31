@@ -1,0 +1,218 @@
+mod Conduit do
+  type ConduitError = Retry(String) | Discard(String) | Snooze(Duration) | WorkerError(String)
+
+  type Schema(a) = { validator : Option(a -> Result((), String)) }
+
+  type Backoff =
+    Linear
+    | Exponential
+    | Fibonacci
+    | Custom(Int -> Duration)
+
+  type UniqueConstraint = {
+    duration : Duration,
+    fields   : List(String)
+  }
+
+  type UniqueConflict = Ignore | Replace | Raise
+
+  type PerKeyRateLimit = {
+    key_fn : String -> String,
+    limit  : Int
+  }
+
+  type RateLimit = {
+    max_per_second : Int,
+    per_key        : Option(Conduit.PerKeyRateLimit)
+  }
+
+  type JobConfig = {
+    queue             : String,
+    max_attempts      : Int,
+    timeout           : Duration,
+    backoff           : Conduit.Backoff,
+    dead_letter_queue : Option(String),
+    unique_for        : Option(Conduit.UniqueConstraint),
+    on_conflict       : Conduit.UniqueConflict,
+    rate_limit        : Option(Conduit.RateLimit),
+    on_dead_letter    : Option(Conduit.JobInfo -> ()),
+    priority          : Int,
+    tags              : List(String),
+    discard_after     : Option(Duration)
+  }
+
+  type JobInfo = {
+    id           : String,
+    queue        : String,
+    job_type     : String,
+    attempt      : Int,
+    max_attempts : Int,
+    tags         : List(String),
+    inserted_at  : DateTime,
+    errors       : List(String)
+  }
+
+  type Config = {
+    queues                  : List(String),
+    workers_per_queue       : Int,
+    poll_interval_ms        : Int,
+    cron_tick_interval_ms   : Int,
+    node_id                 : String,
+    heartbeat_interval_ms   : Int,
+    stale_node_threshold_ms : Int
+  }
+
+  type CronOverlap = Skip | Allow | Replace
+
+  type CronConfig = {
+    schedule : String,
+    timezone : String,
+    queue    : String,
+    overlap  : Conduit.CronOverlap,
+    tags     : List(String)
+  }
+
+  type CronSchedule = {
+    id          : String,
+    job_type    : String,
+    schedule    : String,
+    timezone    : String,
+    queue       : String,
+    payload     : String,
+    overlap     : String,
+    enabled     : Bool,
+    last_run_at : Option(DateTime),
+    last_job_id : Option(String),
+    next_run_at : Option(DateTime),
+    tags        : List(String)
+  }
+
+  type JobRow = {
+    id                : String,
+    queue             : String,
+    job_type          : String,
+    payload           : String,
+    status            : String,
+    attempt           : Int,
+    max_attempts      : Int,
+    priority          : Int,
+    backoff           : String,
+    dead_letter_queue : Option(String),
+    inserted_at       : DateTime,
+    scheduled_at      : DateTime,
+    run_at            : DateTime,
+    started_at        : Option(DateTime),
+    completed_at      : Option(DateTime),
+    heartbeat_at      : Option(DateTime),
+    worker_id         : Option(String),
+    unique_key        : Option(String),
+    errors            : List(String),
+    tags              : List(String)
+  }
+
+  type DeadLetter = {
+    id                 : String,
+    job_id             : String,
+    queue              : String,
+    job_type           : String,
+    payload            : String,
+    errors             : List(String),
+    attempts           : Int,
+    first_attempted_at : Option(DateTime),
+    last_attempted_at  : Option(DateTime),
+    discarded_at       : DateTime,
+    reviewed           : Bool,
+    reviewed_by        : Option(String),
+    reviewed_at        : Option(DateTime),
+    retry_count        : Int
+  }
+
+  type NodeInfo = {
+    id           : String,
+    hostname     : String,
+    pid          : Int,
+    queues       : List(String),
+    pool_size    : Int,
+    started_at   : DateTime,
+    last_seen_at : DateTime,
+    status       : String
+  }
+
+  type WorkflowError =
+    Failed(String)
+    | Cancelled(String)
+    | TimedOut
+    | StorageError(String)
+
+  type ExecutionMode = Checkpoint | DeterministicReplay
+
+  type WorkflowConfig = {
+    execution_mode : Conduit.ExecutionMode,
+    timeout        : Option(Duration),
+    tags           : List(String)
+  }
+
+  type WorkflowHandle = {
+    id            : String,
+    workflow_type : String,
+    started_at    : DateTime
+  }
+
+  type WorkflowRow = {
+    id            : String,
+    workflow_type : String,
+    parent_id     : Option(String),
+    input         : String,
+    output        : Option(String),
+    status        : String,
+    started_at    : DateTime,
+    completed_at  : Option(DateTime),
+    timeout_at    : Option(DateTime),
+    error         : Option(String),
+    error_at      : Option(DateTime),
+    tags          : List(String),
+    meta          : String
+  }
+
+  type WorkflowCheckpoint = {
+    id          : Int,
+    workflow_id : String,
+    name        : String,
+    value       : String,
+    created_at  : DateTime,
+    duration_ms : Option(Int)
+  }
+
+  type WorkflowSignal = {
+    id           : Int,
+    workflow_id  : String,
+    signal_type  : String,
+    payload      : String,
+    status       : String,
+    sent_at      : DateTime,
+    delivered_at : Option(DateTime),
+    expires_at   : Option(DateTime),
+    sent_by      : Option(String)
+  }
+
+  type WorkflowContext = {
+    workflow_id    : String,
+    parent_id      : Option(String),
+    namespace      : String,
+    checkpoint_key : String
+  }
+
+  type WorkflowEvent = {
+    id          : Int,
+    workflow_id : String,
+    sequence    : Int,
+    event_type  : String,
+    payload     : String,
+    recorded_at : DateTime
+  }
+
+  type Auth =
+    None
+    | Token(String)
+    | Fn(String -> Bool)
+end

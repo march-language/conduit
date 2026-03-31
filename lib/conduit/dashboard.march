@@ -37,10 +37,8 @@ mod Conduit.Dashboard do
     task_spawn(fn () ->
       HttpServer.new(port)
       |> HttpServer.plug(fn conn ->
-        Conduit.Dashboard.Router.handle(storage, auth, base_path, conn)
-      end)
-      |> HttpServer.listen()
-    end)
+        Conduit.Dashboard.Router.handle(storage, auth, base_path, conn))
+      |> HttpServer.listen())
   end
 
   doc """

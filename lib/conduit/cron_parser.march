@@ -1,44 +1,15 @@
-doc """
-Conduit.CronParser — parses 5-field cron expressions and computes next run times.
-
-Supported syntax (per field):
-  *       — every value
-  N       — exact value
-  N-M     — inclusive range
-  */N     — step from 0
-  N-M/N   — step within range
-  N,M,... — list of values (each item can itself be N, N-M, or */N)
-
-Fields (left to right): minute hour day-of-month month day-of-week
-  minute       0-59
-  hour         0-23
-  day-of-month 1-31
-  month        1-12
-  day-of-week  0-6 (0 = Sunday)
-
-Next-run algorithm:
-  Starting from `from_time` advanced to the next minute boundary, iterate
-  one minute at a time until a matching DateTime is found. The search is
-  bounded to ~1 year (527,040 iterations) to prevent infinite loops on
-  impossible expressions (e.g. "31 * 31 2 *").
-
-Note on timezones:
-  The scheduler stores the timezone in the DB but applies it as a UTC offset
-  approximation. Full IANA timezone support requires a TZ database (Phase 5+).
-"""
-
 mod Conduit.CronParser do
   -- A parsed cron field: either "match any" or a sorted list of valid integers.
   ptype Field = Any | Values(List(Int))
 
   -- A parsed 5-field cron expression.
-  ptype Expr = Expr({
+  ptype Expr = {
     minute : Field,
     hour   : Field,
-    dom    : Field,   -- day of month
+    dom    : Field,
     month  : Field,
-    dow    : Field    -- day of week
-  })
+    dow    : Field
+  }
 
   doc """
   Parse a cron expression string. Returns Ok(next_run_at) on success,
@@ -71,7 +42,7 @@ mod Conduit.CronParser do
   -- ─────────────────────────────────────────────────────────────
 
   pfn pparse_expr(s : String) : Result(Expr, String) do
-    let parts = String.split(s, " ") |> List.filter(fn p -> not (String.is_empty(p)) end)
+    let parts = String.split(s, " ") |> List.filter(fn p -> not (String.is_empty(p)))
     match parts do
       Cons(min, Cons(hr, Cons(dom, Cons(mo, Cons(dow, Nil))))) ->
         match (pparse_field(min, 0, 59),
@@ -80,7 +51,7 @@ mod Conduit.CronParser do
                pparse_field(mo,  1, 12),
                pparse_field(dow, 0, 6)) do
           (Ok(m), Ok(h), Ok(d), Ok(mo2), Ok(w)) ->
-            Ok(Expr({ minute = m, hour = h, dom = d, month = mo2, dow = w }))
+            Ok({ minute = m, hour = h, dom = d, month = mo2, dow = w })
           (Err(e), _, _, _, _) -> Err("minute: " ++ e)
           (_, Err(e), _, _, _) -> Err("hour: "   ++ e)
           (_, _, Err(e), _, _) -> Err("dom: "    ++ e)
@@ -149,7 +120,7 @@ mod Conduit.CronParser do
   pfn pparse_list(items : List(String), lo : Int, hi : Int, acc : List(Int)) : Result(Field, String) do
     match items do
       Nil ->
-        Ok(Values(List.sort_by(acc, fn a -> fn b -> compare(a, b) end)))
+        Ok(Values(List.sort_by(acc, fn a -> fn b -> compare(a, b))))
       Cons(item, rest) ->
         match pparse_field(item, lo, hi) do
           Err(e) -> Err(e)

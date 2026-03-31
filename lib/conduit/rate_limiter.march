@@ -1,23 +1,3 @@
-doc """
-Conduit.RateLimiter — token bucket rate limiter.
-
-Two tiers of rate limiting are supported:
-
-1. **Per-job-type** — controlled by `rate_limit.max_per_second` in JobConfig.
-   The bucket key is `"conduit_rl:" ++ job_type`.
-
-2. **Per-key** — controlled by `rate_limit.per_key` in JobConfig.
-   The bucket key is `"conduit_rl:" ++ job_type ++ ":" ++ key_fn(payload)`.
-
-Implementation: token bucket stored in Postgres (`conduit_rate_limit_buckets`).
-Each `acquire/3` call atomically refills tokens based on elapsed time, then
-decrements by 1. If the resulting token count is >= 0, the request is allowed.
-If < 0, the request is rate-limited and should be snoozed.
-
-This module also computes the snooze duration so the worker can reschedule
-the job to run once tokens are available.
-"""
-
 mod Conduit.RateLimiter do
   doc """
   Attempt to acquire a rate-limit token for the given job.

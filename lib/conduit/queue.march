@@ -1,40 +1,20 @@
-doc """
-Conduit.Queue — database-level queue operations and performer registry.
-
-Handles translation between typed job definitions and database rows.
-
-The performer registry maps job_type strings to (performer_fn, JobConfig) pairs,
-stored in a Vault-backed in-process map. The worker looks up both the performer
-and the config at execution time — this gives it access to the backoff strategy
-(including Custom functions that can't be serialized to the DB).
-
-Serialization note (Phase 1):
-  Args are serialised via `show(args)`. Phase 2 will replace this with proper
-  JSON encode/decode derived from each job's Args type.
-"""
-
 mod Conduit.Queue do
-  -- Registry entry: performer function + job config.
-  ptype Entry = Entry({
-    performer : fn String -> Result((), ConduitError),
+  ptype Entry = {
+    performer : String -> Result((), Conduit.ConduitError),
     config    : Conduit.JobConfig
-  })
+  }
 
-  doc """
-  Enqueue a job for immediate execution. Returns the job id on success.
-  """
   fn enqueue(storage, job_type : String, payload : String, config : Conduit.JobConfig) : Result(String, String) do
     let id  = uuid_v4()
     let now = DateTime.now()
     let unique_key = punique_key(job_type, payload, config)
-    -- Check unique constraint before inserting.
     match punique_guard(storage, unique_key, config) do
       Err(e) -> Err(e)
       Ok(existing_id) ->
         match existing_id do
-          Some(eid) -> Ok(eid)   -- Ignore conflict: return existing job id
+          Some(eid) -> Ok(eid)
           None ->
-            let row = {
+            let row : Conduit.JobRow = {
               id                = id,
               queue             = config.queue,
               job_type          = job_type,
@@ -61,9 +41,6 @@ mod Conduit.Queue do
     end
   end
 
-  doc """
-  Enqueue a job to run after `delay`. Returns the job id on success.
-  """
   fn enqueue_in(storage, job_type : String, payload : String, delay : Duration, config : Conduit.JobConfig) : Result(String, String) do
     let id     = uuid_v4()
     let now    = DateTime.now()
@@ -75,7 +52,7 @@ mod Conduit.Queue do
         match existing_id do
           Some(eid) -> Ok(eid)
           None ->
-            let row = {
+            let row : Conduit.JobRow = {
               id                = id,
               queue             = config.queue,
               job_type          = job_type,
@@ -102,35 +79,26 @@ mod Conduit.Queue do
     end
   end
 
-  doc """
-  Register a performer and its config for a job type. Must be called before any
-  worker can execute jobs of that type. Safe to call multiple times (idempotent).
-  """
-  fn register_performer(job_type : String, performer : fn String -> Result((), ConduitError), config : Conduit.JobConfig) : () do
-    Vault.set(registry_key(), job_type, Entry({ performer = performer, config = config }))
+  fn register_performer(job_type : String, performer : String -> Result((), Conduit.ConduitError), config : Conduit.JobConfig) : () do
+    Vault.set(registry_key(), job_type, { performer = performer, config = config })
   end
 
-  doc "Dispatch a job payload to its registered performer."
-  fn dispatch(job_type : String, payload : String) : Result((), ConduitError) do
+  fn dispatch(job_type : String, payload : String) : Result((), Conduit.ConduitError) do
     match Vault.get(registry_key(), job_type) do
-      None ->
-        Err(ConduitError.Discard("No performer registered for job type: " ++ job_type))
-      Some(Entry(e)) ->
+      None    ->
+        Err(Conduit.ConduitError.Discard("No performer registered for job type: " ++ job_type))
+      Some(e) ->
         e.performer(payload)
     end
   end
 
-  doc "Look up the JobConfig for a registered job type."
   fn lookup_config(job_type : String) : Option(Conduit.JobConfig) do
     match Vault.get(registry_key(), job_type) do
-      None           -> None
-      Some(Entry(e)) -> Some(e.config)
+      None    -> None
+      Some(e) -> Some(e.config)
     end
   end
 
-  -- Serialise a Backoff variant to its string name for DB storage.
-  -- Custom functions can't be serialised; they fall back to "exponential" in the
-  -- DB but the actual strategy is still available via lookup_config at runtime.
   pfn pbackoff_name(b : Conduit.Backoff) : String do
     match b do
       Linear      -> "linear"
@@ -140,34 +108,25 @@ mod Conduit.Queue do
     end
   end
 
-  -- Compute the unique_key for a job. Returns None if no unique_for is configured.
   pfn punique_key(job_type : String, payload : String, config : Conduit.JobConfig) : Option(String) do
     match config.unique_for do
-      None    -> None
-      Some(uc) -> Some(Conduit.Unique.fingerprint(job_type, payload, uc.by))
+      None     -> None
+      Some(uc) -> Some(Conduit.Unique.fingerprint(job_type, payload, uc.fields))
     end
   end
 
-  -- Enforce the unique constraint before enqueue.
-  -- Returns:
-  --   Ok(None)         — no conflict, proceed with insert
-  --   Ok(Some(job_id)) — conflict resolved as Ignore (return existing id)
-  --   Err(msg)         — conflict resolved as Raise (error) or storage error
   pfn punique_guard(storage, unique_key : Option(String), config : Conduit.JobConfig) : Result(Option(String), String) do
     match unique_key do
-      None    -> Ok(None)
+      None     -> Ok(None)
       Some(uk) ->
         match Conduit.Unique.conflicts(storage, uk) do
-          Err(e) -> Err(e)
-          Ok(false) -> Ok(None)   -- no conflict
-          Ok(true) ->
+          Err(e)    -> Err(e)
+          Ok(false) -> Ok(None)
+          Ok(true)  ->
             match config.on_conflict do
-              Conduit.UniqueConflict.Ignore  -> Ok(Some("existing"))
-              Conduit.UniqueConflict.Raise   -> Err("unique constraint violated for key: " ++ uk)
-              Conduit.UniqueConflict.Replace  ->
-                -- Cancel the existing job by its unique_key, then allow insert.
-                -- We rely on the DB partial unique index to prevent races.
-                Ok(None)
+              Ignore  -> Ok(Some("existing"))
+              Raise   -> Err("unique constraint violated for key: " ++ uk)
+              Replace -> Ok(None)
             end
         end
     end

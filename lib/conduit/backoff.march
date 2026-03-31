@@ -1,26 +1,4 @@
-doc """
-Backoff strategies for job retry delays.
-
-Built-in strategies:
-  - Linear      — attempt * base_interval (5s, 10s, 15s, ...)
-  - Exponential — 2^(attempt-1) seconds (1s, 2s, 4s, 8s, ...)
-  - Fibonacci   — Fibonacci sequence in seconds (1s, 1s, 2s, 3s, 5s, 8s, ...)
-  - Custom(f)   — fn Int -> Duration, called with the attempt number (1-indexed)
-"""
-
-mod Conduit do
-  type Backoff =
-    Linear
-    | Exponential
-    | Fibonacci
-    | Custom(fn Int -> Duration)
-end
-
 mod Conduit.Backoff do
-  doc """
-  Compute the delay before the next retry attempt.
-  `attempt` is 1-indexed (first retry is attempt 1).
-  """
   fn delay(strategy : Conduit.Backoff, attempt : Int) : Duration do
     match strategy do
       Linear ->
