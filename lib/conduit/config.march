@@ -37,12 +37,15 @@ mod Conduit do
     errors       : List(String)
   }
 
-  doc "Application-level Conduit configuration, passed to Conduit.start/1."
+  doc "Application-level Conduit configuration, passed to Conduit.start/2."
   type Config = {
-    queues               : List(String),
-    workers_per_queue    : Int,
-    poll_interval_ms     : Int,
-    cron_tick_interval_ms: Int    -- how often the cron scheduler wakes (default 30s)
+    queues                  : List(String),
+    workers_per_queue       : Int,
+    poll_interval_ms        : Int,
+    cron_tick_interval_ms   : Int,    -- how often the cron scheduler wakes (default 30s)
+    node_id                 : String, -- unique id for this node; auto-generated if not set
+    heartbeat_interval_ms   : Int,    -- how often the node heartbeats (default 15s)
+    stale_node_threshold_ms : Int     -- heartbeat age before node is considered stale (default 60s)
   }
 end
 
@@ -71,10 +74,13 @@ mod Conduit.Config do
   doc "Default application configuration."
   fn default() : Conduit.Config do
     {
-      queues                = Cons("default", Nil),
-      workers_per_queue     = 5,
-      poll_interval_ms      = 1000,
-      cron_tick_interval_ms = 30000
+      queues                  = Cons("default", Nil),
+      workers_per_queue       = 5,
+      poll_interval_ms        = 1000,
+      cron_tick_interval_ms   = 30000,
+      node_id                 = uuid_v4(),
+      heartbeat_interval_ms   = 15000,
+      stale_node_threshold_ms = 60000
     }
   end
 end

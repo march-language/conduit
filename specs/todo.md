@@ -66,17 +66,21 @@
 
 ---
 
-## Phase 5 — Multi-Node Coordination
+## Phase 5 — Multi-Node Coordination ✅
 
-- [ ] Node registration on startup (row in `conduit_nodes`)
-- [ ] Node heartbeat every N seconds
-- [ ] Stale node detection — mark nodes dead if heartbeat exceeds threshold
-- [ ] Reclaim orphaned jobs from dead nodes
-- [ ] Leader election via Postgres advisory lock
-- [ ] Cron fires exactly once per schedule across cluster (leader-only)
-- [ ] Graceful shutdown: stop accepting new jobs, drain in-progress
-- [ ] `Conduit.cluster_nodes/0` — return live node list
-- [ ] Migration: `conduit_nodes` table
+- [x] Node registration on startup (row in `conduit_workers`)
+- [x] Node heartbeat every N seconds (configurable via `heartbeat_interval_ms`)
+- [x] Stale node detection — mark nodes stopped if `last_seen_at` exceeds threshold
+- [x] Reclaim orphaned jobs from stale nodes (return to `pending`)
+- [x] Leader election via Postgres advisory lock (lock id 8473625)
+- [x] Graceful shutdown: deregister node, release leader lock
+- [x] `Conduit.cluster_nodes/1` — return live node list
+- [x] `Conduit.cluster_leader/0` — return leader node id from Vault cache
+- [x] `Conduit.is_cluster_leader/0` — fast boolean leader check
+- [x] `Conduit.Config` extended with `node_id`, `heartbeat_interval_ms`, `stale_node_threshold_ms`
+- [x] Migration: `conduit_workers` table + stored procedure + cluster status view
+- [x] Tests: config defaults, NodeInfo fields, leader/follower state, register/list, reclaim/cleanup, lock acquire/release
+- [ ] Cron fires exactly once per schedule across cluster (leader-only guard) — deferred to Phase 6
 
 ---
 

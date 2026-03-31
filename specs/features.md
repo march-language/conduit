@@ -188,3 +188,46 @@
 - `checkpoint_loop!` macro — usable via plain recursion today
 - `parallel!` runs sequentially in-process; true concurrent fan-out deferred to Phase 5+
 - Checkpoint values are plain Strings (JSON by convention); typed serialization deferred
+
+---
+
+## Phase 5 — Multi-Node Coordination ✅
+
+**Merged:** 2026-03-31
+
+### New types
+- `Conduit.NodeInfo` — live node snapshot: `id`, `hostname`, `pid`, `queues`, `pool_size`, `started_at`, `last_seen_at`, `status`
+- `Conduit.Config` extended — `node_id`, `heartbeat_interval_ms`, `stale_node_threshold_ms`
+
+### New modules
+- `Conduit.Node` — manages node lifecycle:
+  - `start/2` — registers node in `conduit_workers`, stores `node_id` and `is_leader` in Vault, spawns heartbeat / stale-detection / leader-election tasks
+  - `stop/2` — deregisters node, releases advisory leader lock if held
+  - `is_leader/0` — fast in-process check (reads Vault, no DB round-trip)
+  - `leader_node_id/0` — returns most-recently-observed leader node id from Vault
+  - Private loops: `pheartbeat_loop`, `pstale_loop`, `pleader_loop`
+
+### Storage additions (interface + Postgres impl)
+- `node_register/2` — upsert a `conduit_workers` row on startup
+- `node_heartbeat/2` — update `last_seen_at` for a node
+- `node_deregister/2` — mark a node as `stopped`
+- `node_list_active/1` — return all nodes with `status = 'running'`
+- `node_reclaim_jobs/2` — return stale-node in-flight jobs to `pending`
+- `node_cleanup_stale/2` — mark expired nodes as `stopped`; returns count
+- `node_try_leader_lock/2` — attempt `pg_try_advisory_lock(8473625)`; returns Bool
+- `node_release_leader_lock/2` — release advisory lock on graceful shutdown
+
+### Migration
+- `priv/migrations/20260401000005_conduit_multi_node.sql` — `conduit_workers` table + `idx_conduit_workers_active` index + `conduit_cleanup_stale_workers` stored procedure + `conduit_cluster_status` view
+
+### Public API (`lib/conduit.march`)
+- `Conduit.start/2` — now also registers the node and spawns background coordination tasks
+- `Conduit.stop/2` — graceful shutdown: deregisters node and releases leader lock
+- `Conduit.cluster_nodes/1` — return all active cluster nodes
+- `Conduit.cluster_leader/0` — return leader node id from this node's Vault cache
+- `Conduit.is_cluster_leader/0` — fast boolean leader check
+
+### Known gaps
+- Cron scheduler already multi-node safe (advisory lock 7326482); explicit leader-only scheduling guard deferred to Phase 6
+- Full IANA DST-aware timezone support for cron — deferred
+- `parallel!` true concurrent fan-out across cluster nodes — deferred to Phase 7

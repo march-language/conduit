@@ -81,6 +81,16 @@ interface Conduit.Storage(s) do
   fn cron_advisory_lock   : s -> Int -> Result(Bool, String)
   fn cron_advisory_unlock : s -> Int -> Result((), String)
 
+  -- Node / cluster storage methods (Phase 5)
+  fn node_register          : s -> Conduit.NodeInfo -> Result((), String)
+  fn node_heartbeat         : s -> String -> Result((), String)
+  fn node_deregister        : s -> String -> Result((), String)
+  fn node_list_active       : s -> Result(List(Conduit.NodeInfo), String)
+  fn node_reclaim_jobs      : s -> Int -> Result(List(String), String)
+  fn node_cleanup_stale     : s -> Int -> Result(Int, String)
+  fn node_try_leader_lock   : s -> Int -> Result(Bool, String)
+  fn node_release_leader_lock : s -> Int -> Result((), String)
+
   -- Workflow storage methods (Phase 4)
   fn workflow_insert        : s -> Conduit.WorkflowRow -> Result(String, String)
   fn workflow_load          : s -> String -> Result(Option(Conduit.WorkflowRow), String)
@@ -423,6 +433,134 @@ mod Conduit.Storage.Postgres do
     end
 
     -- ─────────────────────────────────────────────────────────────
+    -- Node / cluster storage methods (Phase 5)
+    -- ─────────────────────────────────────────────────────────────
+
+    fn node_register(_self, node : Conduit.NodeInfo) : Result((), String) do
+      let sql = "
+        INSERT INTO conduit_workers
+          (id, hostname, pid, queues, pool_size, started_at, last_seen_at, status)
+        VALUES ($1, $2, $3, $4, $5, NOW(), NOW(), 'running')
+        ON CONFLICT (id) DO UPDATE
+          SET hostname     = EXCLUDED.hostname,
+              pid          = EXCLUDED.pid,
+              queues       = EXCLUDED.queues,
+              pool_size    = EXCLUDED.pool_size,
+              last_seen_at = NOW(),
+              status       = 'running',
+              stopped_at   = NULL
+      "
+      let params = Cons(node.id,
+                   Cons(node.hostname,
+                   Cons(int_to_string(node.pid),
+                   Cons(string_join(node.queues, ","),
+                   Cons(int_to_string(node.pool_size),
+                   Nil)))))
+      match Depot.Repo.query(sql, params) do
+        Ok(_)  -> Ok(())
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn node_heartbeat(_self, node_id : String) : Result((), String) do
+      let sql = "UPDATE conduit_workers SET last_seen_at = NOW() WHERE id = $1 AND status = 'running'"
+      match Depot.Repo.query(sql, Cons(node_id, Nil)) do
+        Ok(_)  -> Ok(())
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn node_deregister(_self, node_id : String) : Result((), String) do
+      let sql = "UPDATE conduit_workers SET status = 'stopped', stopped_at = NOW() WHERE id = $1"
+      match Depot.Repo.query(sql, Cons(node_id, Nil)) do
+        Ok(_)  -> Ok(())
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn node_list_active(_self) : Result(List(Conduit.NodeInfo), String) do
+      let sql = "
+        SELECT id, hostname, pid, queues, pool_size, started_at, last_seen_at, status
+        FROM conduit_workers
+        WHERE status = 'running'
+        ORDER BY started_at ASC
+      "
+      match Depot.Repo.query(sql, Nil) do
+        Ok(rows) -> Ok(List.map(rows, fn r -> prow_to_node_info(r) end))
+        Err(e)   -> Err(e)
+      end
+    end
+
+    -- Return jobs to 'pending' for workers whose heartbeat has expired.
+    -- Returns the list of reclaimed job ids.
+    fn node_reclaim_jobs(_self, threshold_seconds : Int) : Result(List(String), String) do
+      let sql = "
+        UPDATE conduit_jobs
+        SET status    = 'pending',
+            worker_id = NULL,
+            run_at    = NOW()
+        WHERE status = 'running'
+          AND worker_id IN (
+            SELECT id FROM conduit_workers
+            WHERE status = 'running'
+              AND last_seen_at < NOW() - ($1 || ' seconds')::INTERVAL
+          )
+        RETURNING id
+      "
+      match Depot.Repo.query(sql, Cons(int_to_string(threshold_seconds), Nil)) do
+        Ok(rows) ->
+          let ids = List.map(rows, fn r -> Map.get(r, "id") |> unwrap_or("") end)
+          Ok(ids)
+        Err(e) -> Err(e)
+      end
+    end
+
+    -- Mark workers whose heartbeat has expired as stopped.
+    -- Returns the count of workers marked stale.
+    fn node_cleanup_stale(_self, threshold_seconds : Int) : Result(Int, String) do
+      let sql = "
+        WITH stale AS (
+          UPDATE conduit_workers
+          SET status = 'stopped', stopped_at = NOW()
+          WHERE status = 'running'
+            AND last_seen_at < NOW() - ($1 || ' seconds')::INTERVAL
+          RETURNING id
+        )
+        SELECT COUNT(*)::TEXT AS cnt FROM stale
+      "
+      match Depot.Repo.query(sql, Cons(int_to_string(threshold_seconds), Nil)) do
+        Ok(rows) ->
+          let cnt = match rows do
+            Cons(r, _) -> Map.get(r, "cnt") |> Option.flat_map(fn s -> String.to_int(s) end) |> unwrap_or(0)
+            Nil        -> 0
+          end
+          Ok(cnt)
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn node_try_leader_lock(_self, lock_id : Int) : Result(Bool, String) do
+      let sql = "SELECT pg_try_advisory_lock($1) AS acquired"
+      match Depot.Repo.query(sql, Cons(int_to_string(lock_id), Nil)) do
+        Ok(rows) ->
+          let acquired = match rows do
+            Cons(r, _) -> Map.get(r, "acquired") |> Option.map(fn s -> s == "true" end) |> unwrap_or(false)
+            Nil        -> false
+          end
+          Ok(acquired)
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn node_release_leader_lock(_self, lock_id : Int) : Result((), String) do
+      let sql = "SELECT pg_advisory_unlock($1)"
+      match Depot.Repo.query(sql, Cons(int_to_string(lock_id), Nil)) do
+        Ok(_)  -> Ok(())
+        Err(e) -> Err(e)
+      end
+    end
+
+    -- ─────────────────────────────────────────────────────────────
     -- Workflow storage methods (Phase 4)
     -- ─────────────────────────────────────────────────────────────
 
@@ -677,6 +815,19 @@ mod Conduit.Storage.Postgres do
       value       = Map.get(row, "value")       |> unwrap_or("{}"),
       created_at  = Map.get(row, "created_at")  |> unwrap |> pparse_dt,
       duration_ms = Map.get(row, "duration_ms") |> Option.flat_map(fn s -> String.to_int(s) end)
+    }
+  end
+
+  pfn prow_to_node_info(row : Map) : Conduit.NodeInfo do
+    {
+      id           = Map.get(row, "id")           |> unwrap,
+      hostname     = Map.get(row, "hostname")     |> unwrap_or(""),
+      pid          = Map.get(row, "pid")          |> Option.flat_map(fn s -> String.to_int(s) end) |> unwrap_or(0),
+      queues       = Map.get(row, "queues")       |> Option.map(fn s -> if String.is_empty(s) do Nil else String.split(s, ",") end end) |> unwrap_or(Nil),
+      pool_size    = Map.get(row, "pool_size")    |> Option.flat_map(fn s -> String.to_int(s) end) |> unwrap_or(0),
+      started_at   = Map.get(row, "started_at")   |> unwrap |> pparse_dt,
+      last_seen_at = Map.get(row, "last_seen_at") |> unwrap |> pparse_dt,
+      status       = Map.get(row, "status")       |> unwrap_or("running")
     }
   end
 

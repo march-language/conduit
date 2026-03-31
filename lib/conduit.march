@@ -66,6 +66,9 @@ mod Conduit do
       Conduit.JobConfig.default()
     )
 
+    -- Register this node and start heartbeat / stale-detection / leader-election tasks.
+    let node_tasks = Conduit.Node.start(storage, config)
+
     -- Upsert all registered static crons into the DB.
     Conduit.CronRegistry.all()
     |> List.each(fn entry ->
@@ -88,7 +91,7 @@ mod Conduit do
 
     let cron_task = Conduit.CronScheduler.start(storage, config.cron_tick_interval_ms)
 
-    Cons(cron_task, worker_tasks)
+    List.append(node_tasks, Cons(cron_task, worker_tasks))
   end
 
   doc """
@@ -332,6 +335,51 @@ mod Conduit do
   doc "Cancel a running workflow with a reason."
   fn cancel_workflow(workflow_id : String, reason : String, storage) : Result((), String) do
     Conduit.Storage.workflow_cancel(storage, workflow_id, reason)
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Cluster API (Phase 5)
+  -- ─────────────────────────────────────────────────────────────
+
+  doc """
+  Return all currently active cluster nodes.
+
+  Queries `conduit_workers` for nodes with status='running'.
+  Useful for dashboards and monitoring.
+  """
+  fn cluster_nodes(storage) : Result(List(Conduit.NodeInfo), String) do
+    Conduit.Storage.node_list_active(storage)
+  end
+
+  doc """
+  Return the node_id of the current leader from this node's perspective.
+
+  The leader is the node that holds the Postgres advisory leader lock
+  (lock id 8473625). This value is updated in Vault by the local leader-election
+  background task — it reflects the most recent election result this node observed.
+  Returns None if the leader is unknown or this node has not yet run an election tick.
+  """
+  fn cluster_leader() : Option(String) do
+    Conduit.Node.leader_node_id()
+  end
+
+  doc """
+  Return true if this node is currently the cluster leader.
+
+  Fast in-process check — reads from Vault, no DB round-trip.
+  """
+  fn is_cluster_leader() : Bool do
+    Conduit.Node.is_leader()
+  end
+
+  doc """
+  Gracefully stop this Conduit node.
+
+  Deregisters the node from `conduit_workers` and releases the leader advisory
+  lock if held. Call this during application shutdown before the process exits.
+  """
+  fn stop(storage, config : Conduit.Config) : () do
+    Conduit.Node.stop(storage, config.node_id)
   end
 
   pfn pcron_set_enabled(storage, cron_id : String, enabled : Bool) : Conduit.CronSchedule do
