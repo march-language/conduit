@@ -1,0 +1,67 @@
+doc """
+Conduit.RateLimiter — token bucket rate limiter.
+
+Two tiers of rate limiting are supported:
+
+1. **Per-job-type** — controlled by `rate_limit.max_per_second` in JobConfig.
+   The bucket key is `"conduit_rl:" ++ job_type`.
+
+2. **Per-key** — controlled by `rate_limit.per_key` in JobConfig.
+   The bucket key is `"conduit_rl:" ++ job_type ++ ":" ++ key_fn(payload)`.
+
+Implementation: token bucket stored in Postgres (`conduit_rate_limit_buckets`).
+Each `acquire/3` call atomically refills tokens based on elapsed time, then
+decrements by 1. If the resulting token count is >= 0, the request is allowed.
+If < 0, the request is rate-limited and should be snoozed.
+
+This module also computes the snooze duration so the worker can reschedule
+the job to run once tokens are available.
+"""
+
+mod Conduit.RateLimiter do
+  doc """
+  Attempt to acquire a rate-limit token for the given job.
+
+  Returns:
+    Ok(true)  — token acquired, job may proceed
+    Ok(false) — rate-limited, job should be snoozed
+    Err(e)    — storage error (treat as allowed to avoid blocking the queue)
+
+  When Ok(false) is returned, call `snooze_duration/1` to compute how long
+  to wait before retrying.
+  """
+  fn acquire(storage, job_type : String, config : Conduit.RateLimit, payload : String) : Result(Bool, String) do
+    -- Check the global per-job-type bucket first.
+    let global_key = "conduit_rl:" ++ job_type
+    match pacquire_token(storage, global_key, config.max_per_second) do
+      Err(e)      -> Err(e)
+      Ok(false)   -> Ok(false)
+      Ok(true)    ->
+        -- Global OK. Now check per-key if configured.
+        match config.per_key do
+          None -> Ok(true)
+          Some(pk) ->
+            let user_key = "conduit_rl:" ++ job_type ++ ":" ++ pk.key_fn(payload)
+            pacquire_token(storage, user_key, pk.limit)
+        end
+    end
+  end
+
+  doc """
+  Compute how long to snooze a rate-limited job (in milliseconds).
+
+  For a rate of N tokens/second, the minimum wait is 1000/N ms.
+  We add a small jitter (0–100ms) to avoid thundering herd.
+  """
+  fn snooze_duration(rate : Int) : Duration do
+    let base_ms = if rate > 0 do int_div(1000, rate) else 1000 end
+    let jitter  = Random.int(0, 100)
+    Duration.milliseconds(base_ms + jitter)
+  end
+
+  -- Atomically refill and consume one token from a bucket.
+  -- rate: tokens added per second.
+  pfn pacquire_token(storage, key : String, rate : Int) : Result(Bool, String) do
+    Conduit.Storage.rate_limit_acquire(storage, key, rate)
+  end
+end

@@ -306,3 +306,52 @@
 - Charts (throughput sparklines) deferred
 - Schema-aware job enqueue form deferred
 - LISTEN/NOTIFY real-time push — 5-second polling fallback used (full LISTEN requires dedicated non-pooled connection)
+
+---
+
+## Phase 7 — Advanced Features (Rate Limiting, Priority, Unique Jobs) ✅
+
+**Merged:** 2026-03-31
+
+### New types
+- `Conduit.UniqueConflict` — `Ignore | Replace | Raise` — what to do on duplicate enqueue
+- `Conduit.PerKeyRateLimit` — `{ key_fn, limit }` — per-key rate limit config
+- `Conduit.RateLimit` — `{ max_per_second, per_key }` — global + optional per-key rate limit
+- `Conduit.JobConfig` extended — `on_conflict`, `rate_limit`, `on_dead_letter` fields added
+
+### New modules
+- `Conduit.RateLimiter` — token bucket rate limiter:
+  - `acquire/4` — atomically refill + consume; returns `Ok(true/false)`
+  - `snooze_duration/1` — computes how long to sleep when rate-limited (base + jitter)
+- `Conduit.Unique` — unique job fingerprinting:
+  - `fingerprint/3` — SHA-256 of (job_type + selected payload fields via `by`)
+  - `conflicts/2` — check DB for active job with same unique_key
+  - `release/2` — set unique_key = NULL on a job (frees the slot)
+
+### Storage additions (interface + Postgres impl)
+- `rate_limit_acquire/3` — atomic token bucket upsert on `conduit_rate_limit_buckets`
+- `unique_check/2` — COUNT active jobs with the given unique_key
+- `unique_release/2` — NULL out unique_key for a job id
+- `unique_key` column added to `Conduit.JobRow` type and all SELECT/INSERT queries
+
+### Queue changes
+- `Queue.enqueue/4` and `Queue.enqueue_in/5` now:
+  1. Compute `unique_key` via `Conduit.Unique.fingerprint` (if `unique_for` is set)
+  2. Call `punique_guard` to check for conflicts before INSERT
+  3. Handle `on_conflict`: Ignore (return existing id), Replace (allow overwrite), Raise (return error)
+  4. Pass `unique_key` to the storage layer
+
+### Worker changes
+- Rate limit check inserted before dispatch: if `config.rate_limit` is set, `RateLimiter.acquire` is called; if denied the job is snoozed
+- Unique key released on: completion, discard (no DLQ), dead-letter
+
+### Migration
+- `priv/migrations/20260401000007_conduit_advanced.sql`:
+  - `ALTER TABLE conduit_jobs ADD COLUMN unique_key TEXT`
+  - Partial unique index `idx_conduit_jobs_unique_key` (active jobs only)
+  - `conduit_rate_limit_buckets` table (key, tokens, last_refill)
+
+### Known gaps
+- Pluggable rate limiter backend (in-process for single-node) — Postgres-only for now
+- Unique scope per-queue vs global — currently global only
+- `unique_for.duration` not enforced as a TTL on the constraint (the partial index keeps it active until complete/dead)

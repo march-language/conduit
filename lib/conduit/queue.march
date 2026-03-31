@@ -26,28 +26,39 @@ mod Conduit.Queue do
   fn enqueue(storage, job_type : String, payload : String, config : Conduit.JobConfig) : Result(String, String) do
     let id  = uuid_v4()
     let now = DateTime.now()
-    let row = {
-      id                = id,
-      queue             = config.queue,
-      job_type          = job_type,
-      payload           = payload,
-      status            = "pending",
-      attempt           = 0,
-      max_attempts      = config.max_attempts,
-      priority          = config.priority,
-      backoff           = pbackoff_name(config.backoff),
-      dead_letter_queue = config.dead_letter_queue,
-      inserted_at       = now,
-      scheduled_at      = now,
-      run_at            = now,
-      started_at        = None,
-      completed_at      = None,
-      heartbeat_at      = None,
-      worker_id         = None,
-      errors            = Nil,
-      tags              = config.tags
-    }
-    Conduit.Storage.enqueue(storage, row)
+    let unique_key = punique_key(job_type, payload, config)
+    -- Check unique constraint before inserting.
+    match punique_guard(storage, unique_key, config) do
+      Err(e) -> Err(e)
+      Ok(existing_id) ->
+        match existing_id do
+          Some(eid) -> Ok(eid)   -- Ignore conflict: return existing job id
+          None ->
+            let row = {
+              id                = id,
+              queue             = config.queue,
+              job_type          = job_type,
+              payload           = payload,
+              status            = "pending",
+              attempt           = 0,
+              max_attempts      = config.max_attempts,
+              priority          = config.priority,
+              backoff           = pbackoff_name(config.backoff),
+              dead_letter_queue = config.dead_letter_queue,
+              inserted_at       = now,
+              scheduled_at      = now,
+              run_at            = now,
+              started_at        = None,
+              completed_at      = None,
+              heartbeat_at      = None,
+              worker_id         = None,
+              unique_key        = unique_key,
+              errors            = Nil,
+              tags              = config.tags
+            }
+            Conduit.Storage.enqueue(storage, row)
+        end
+    end
   end
 
   doc """
@@ -57,28 +68,38 @@ mod Conduit.Queue do
     let id     = uuid_v4()
     let now    = DateTime.now()
     let run_at = DateTime.add(now, delay)
-    let row = {
-      id                = id,
-      queue             = config.queue,
-      job_type          = job_type,
-      payload           = payload,
-      status            = "pending",
-      attempt           = 0,
-      max_attempts      = config.max_attempts,
-      priority          = config.priority,
-      backoff           = pbackoff_name(config.backoff),
-      dead_letter_queue = config.dead_letter_queue,
-      inserted_at       = now,
-      scheduled_at      = now,
-      run_at            = run_at,
-      started_at        = None,
-      completed_at      = None,
-      heartbeat_at      = None,
-      worker_id         = None,
-      errors            = Nil,
-      tags              = config.tags
-    }
-    Conduit.Storage.enqueue(storage, row)
+    let unique_key = punique_key(job_type, payload, config)
+    match punique_guard(storage, unique_key, config) do
+      Err(e) -> Err(e)
+      Ok(existing_id) ->
+        match existing_id do
+          Some(eid) -> Ok(eid)
+          None ->
+            let row = {
+              id                = id,
+              queue             = config.queue,
+              job_type          = job_type,
+              payload           = payload,
+              status            = "pending",
+              attempt           = 0,
+              max_attempts      = config.max_attempts,
+              priority          = config.priority,
+              backoff           = pbackoff_name(config.backoff),
+              dead_letter_queue = config.dead_letter_queue,
+              inserted_at       = now,
+              scheduled_at      = now,
+              run_at            = run_at,
+              started_at        = None,
+              completed_at      = None,
+              heartbeat_at      = None,
+              worker_id         = None,
+              unique_key        = unique_key,
+              errors            = Nil,
+              tags              = config.tags
+            }
+            Conduit.Storage.enqueue(storage, row)
+        end
+    end
   end
 
   doc """
@@ -116,6 +137,39 @@ mod Conduit.Queue do
       Exponential -> "exponential"
       Fibonacci   -> "fibonacci"
       Custom(_)   -> "custom"
+    end
+  end
+
+  -- Compute the unique_key for a job. Returns None if no unique_for is configured.
+  pfn punique_key(job_type : String, payload : String, config : Conduit.JobConfig) : Option(String) do
+    match config.unique_for do
+      None    -> None
+      Some(uc) -> Some(Conduit.Unique.fingerprint(job_type, payload, uc.by))
+    end
+  end
+
+  -- Enforce the unique constraint before enqueue.
+  -- Returns:
+  --   Ok(None)         — no conflict, proceed with insert
+  --   Ok(Some(job_id)) — conflict resolved as Ignore (return existing id)
+  --   Err(msg)         — conflict resolved as Raise (error) or storage error
+  pfn punique_guard(storage, unique_key : Option(String), config : Conduit.JobConfig) : Result(Option(String), String) do
+    match unique_key do
+      None    -> Ok(None)
+      Some(uk) ->
+        match Conduit.Unique.conflicts(storage, uk) do
+          Err(e) -> Err(e)
+          Ok(false) -> Ok(None)   -- no conflict
+          Ok(true) ->
+            match config.on_conflict do
+              Conduit.UniqueConflict.Ignore  -> Ok(Some("existing"))
+              Conduit.UniqueConflict.Raise   -> Err("unique constraint violated for key: " ++ uk)
+              Conduit.UniqueConflict.Replace  ->
+                -- Cancel the existing job by its unique_key, then allow insert.
+                -- We rely on the DB partial unique index to prevent races.
+                Ok(None)
+            end
+        end
     end
   end
 

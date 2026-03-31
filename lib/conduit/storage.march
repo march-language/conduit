@@ -17,6 +17,7 @@ mod Conduit do
     completed_at      : Option(DateTime),
     heartbeat_at      : Option(DateTime),
     worker_id         : Option(String),
+    unique_key        : Option(String),
     errors            : List(String),
     tags              : List(String)
   }
@@ -76,6 +77,11 @@ interface Conduit.Storage(s) do
   fn job_delete                  : s -> String -> Result((), String)
   fn dead_letter_delete          : s -> String -> Result((), String)
   fn notify_subscribe            : s -> String -> Result((), String)
+
+  -- Rate limiting & unique jobs (Phase 7)
+  fn rate_limit_acquire  : s -> String -> Int -> Result(Bool, String)
+  fn unique_check        : s -> String -> Result(Bool, String)
+  fn unique_release      : s -> String -> Result((), String)
 end
 
 doc """
@@ -92,8 +98,9 @@ mod Conduit.Storage.Postgres do
       let sql = "
         INSERT INTO conduit_jobs
           (id, queue, job_type, payload, status, attempt, max_attempts,
-           priority, backoff, dead_letter_queue, inserted_at, scheduled_at, run_at, tags)
-        VALUES ($1, $2, $3, $4, 'pending', 0, $5, $6, $7, $8, NOW(), NOW(), $9, $10)
+           priority, backoff, dead_letter_queue, inserted_at, scheduled_at, run_at,
+           unique_key, tags)
+        VALUES ($1, $2, $3, $4, 'pending', 0, $5, $6, $7, $8, NOW(), NOW(), $9, $10, $11)
       "
       let params = Cons(job.id,
                    Cons(job.queue,
@@ -104,8 +111,9 @@ mod Conduit.Storage.Postgres do
                    Cons(job.backoff,
                    Cons(Option.unwrap_or(job.dead_letter_queue, ""),
                    Cons(job.run_at |> DateTime.format("%Y-%m-%dT%H:%M:%SZ"),
+                   Cons(Option.unwrap_or(job.unique_key, ""),
                    Cons(string_join(job.tags, ","),
-                   Nil))))))))))
+                   Nil)))))))))))
       match Depot.Repo.query(sql, params) do
         Ok(_)  -> Ok(job.id)
         Err(e) -> Err(e)
@@ -118,7 +126,7 @@ mod Conduit.Storage.Postgres do
                priority, backoff, dead_letter_queue,
                inserted_at, scheduled_at, run_at,
                started_at, completed_at, heartbeat_at, worker_id,
-               errors, tags
+               unique_key, errors, tags
         FROM conduit_jobs
         WHERE queue = $1
           AND status IN ('pending', 'snoozed')
@@ -746,6 +754,9 @@ mod Conduit.Storage.Postgres do
       completed_at = Map.get(row, "completed_at") |> Option.map(pparse_dt),
       heartbeat_at = Map.get(row, "heartbeat_at") |> Option.map(pparse_dt),
       worker_id    = Map.get(row, "worker_id"),
+      unique_key   = Map.get(row, "unique_key") |> Option.flat_map(fn s ->
+        if String.is_empty(s) do None else Some(s) end
+      end),
       errors       = Nil,   -- Phase 3: parse errors JSONB array
       tags         = Nil    -- Phase 3: parse tags array
     }
@@ -892,7 +903,7 @@ mod Conduit.Storage.Postgres do
              priority, backoff, dead_letter_queue,
              inserted_at, scheduled_at, run_at,
              started_at, completed_at, heartbeat_at, worker_id,
-             errors, tags
+             unique_key, errors, tags
       FROM conduit_jobs
       WHERE queue = $1
         AND ($2 = '' OR status = $2)
@@ -999,5 +1010,83 @@ mod Conduit.Storage.Postgres do
     -- Intentionally a no-op in the pooled Postgres backend.
     -- The dashboard uses 5-second polling as the real-time fallback.
     Ok(())
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Rate limiting & unique jobs (Phase 7)
+  -- ─────────────────────────────────────────────────────────────
+
+  doc """
+  Token bucket rate limiter implemented as an atomic upsert on
+  `conduit_rate_limit_buckets`.
+
+  Algorithm:
+    1. Compute elapsed time since last_refill.
+    2. Add elapsed * rate tokens (capped at `rate` — the bucket max).
+    3. Subtract 1 token.
+    4. If tokens >= 0 the request is allowed; otherwise denied.
+  """
+  fn rate_limit_acquire(_self, key : String, rate : Int) : Result(Bool, String) do
+    let sql = "
+      INSERT INTO conduit_rate_limit_buckets (key, tokens, last_refill)
+      VALUES ($1, $2::DECIMAL - 1, NOW())
+      ON CONFLICT (key) DO UPDATE SET
+        tokens = LEAST(
+          $2::DECIMAL,
+          conduit_rate_limit_buckets.tokens
+            + EXTRACT(EPOCH FROM (NOW() - conduit_rate_limit_buckets.last_refill)) * $2::DECIMAL
+        ) - 1,
+        last_refill = NOW()
+      RETURNING tokens
+    "
+    let rate_str = int_to_string(rate)
+    match Depot.Repo.query(sql, Cons(key, Cons(rate_str, Nil))) do
+      Ok(rows) ->
+        match rows do
+          Cons(r, _) ->
+            let tokens_str = Map.get(r, "tokens") |> unwrap_or("0")
+            let tokens = match String.to_float(tokens_str) do
+              Some(f) -> f
+              None    -> 0.0
+            end
+            Ok(tokens >= 0.0)
+          Nil -> Ok(true)   -- shouldn't happen, but allow if no row returned
+        end
+      Err(e) -> Err(e)
+    end
+  end
+
+  doc """
+  Check whether a unique_key already exists on an active (non-completed, non-dead) job.
+  Returns true if a conflicting job exists.
+  """
+  fn unique_check(_self, unique_key : String) : Result(Bool, String) do
+    let sql = "
+      SELECT COUNT(*) AS cnt
+      FROM conduit_jobs
+      WHERE unique_key = $1
+        AND status NOT IN ('completed', 'dead')
+    "
+    match Depot.Repo.query(sql, Cons(unique_key, Nil)) do
+      Ok(rows) ->
+        let cnt = match rows do
+          Cons(r, _) -> Map.get(r, "cnt") |> Option.flat_map(fn s -> String.to_int(s) end) |> unwrap_or(0)
+          Nil        -> 0
+        end
+        Ok(cnt > 0)
+      Err(e) -> Err(e)
+    end
+  end
+
+  doc """
+  Release a unique constraint: set unique_key = NULL for the given job.
+  Called when a job completes, is discarded, or dead-lettered.
+  """
+  fn unique_release(_self, job_id : String) : Result((), String) do
+    let sql = "UPDATE conduit_jobs SET unique_key = NULL WHERE id = $1"
+    match Depot.Repo.query(sql, Cons(job_id, Nil)) do
+      Ok(_)  -> Ok(())
+      Err(e) -> Err(e)
+    end
   end
 end

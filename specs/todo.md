@@ -102,15 +102,23 @@
 
 ---
 
-## Phase 7 — Advanced Features
+## Phase 7 — Advanced Features ✅
 
-- [ ] Rate limiting per job type (e.g. max 100/minute)
-- [ ] Rate limiting per key (e.g. per `user_id`)
-- [ ] Pluggable rate limiter backend (in-process default, Postgres for coordinated)
-- [ ] Priority ordering within a queue (higher `priority` runs first)
-- [ ] Unique jobs: `unique_for` config prevents duplicate enqueues within window
-- [ ] Unique constraint released on job complete/fail
-- [ ] Unique scope: per-queue (default) or global
+- [x] Rate limiting per job type (`RateLimit.max_per_second` in JobConfig)
+- [x] Rate limiting per key (`PerKeyRateLimit` with `key_fn` and `limit`)
+- [x] Postgres-backed token bucket (atomic upsert on `conduit_rate_limit_buckets`)
+- [x] Worker checks rate limit before dispatch; snoozes job if rate-limited
+- [x] Priority ordering within a queue (`priority DESC` in `fetch_next` ORDER BY)
+- [x] Unique jobs: `unique_for` config with `duration` and `by` field list
+- [x] Unique fingerprint: SHA-256 of (job_type + selected payload fields)
+- [x] `on_conflict` handling: `Ignore` (default, return existing id), `Replace`, `Raise`
+- [x] Unique constraint released on job complete, discard, or dead-letter
+- [x] `on_dead_letter` callback field added to JobConfig
+- [x] `Queue.enqueue/enqueue_in` enforce unique constraints via `punique_guard`
+- [x] Migration: `unique_key` column + partial unique index + `conduit_rate_limit_buckets` table
+- [x] Tests: RateLimit/PerKeyRateLimit types, UniqueConflict variants, fingerprint determinism, unique check/release, rate limiter acquire/block/snooze, priority ordering, on_dead_letter callback
+- [ ] Pluggable rate limiter backend (in-process default for single-node) — Postgres only for now
+- [ ] Unique scope per-queue vs global — currently global only
 
 ---
 

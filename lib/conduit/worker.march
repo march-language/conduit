@@ -73,12 +73,33 @@ mod Conduit.Worker do
           heartbeat_loop(storage, job.id, heartbeat_interval_ms)
         end)
 
-        let result = Conduit.Queue.dispatch(job.job_type, job.payload)
+        -- Rate limit check: if configured, try to acquire a token.
+        let rate_ok = match config.rate_limit do
+          None -> Ok(true)
+          Some(rl) -> Conduit.RateLimiter.acquire(storage, job.job_type, rl, job.payload)
+        end
 
-        -- Cancel the heartbeat task now that the job has finished.
-        kill(task_await_unwrap(hb_task))
-
-        handle_result(storage, job, next_attempt, config, result)
+        match rate_ok do
+          Err(e) ->
+            -- Storage error during rate limit check — proceed anyway to avoid blocking.
+            Logger.warn("conduit: rate limit check failed for " ++ job.id ++ ": " ++ e)
+            let result = Conduit.Queue.dispatch(job.job_type, job.payload)
+            kill(task_await_unwrap(hb_task))
+            handle_result(storage, job, next_attempt, config, result)
+          Ok(false) ->
+            -- Rate-limited: snooze the job.
+            let snooze_dur = match config.rate_limit do
+              None     -> Duration.seconds(1)
+              Some(rl) -> Conduit.RateLimiter.snooze_duration(rl.max_per_second)
+            end
+            kill(task_await_unwrap(hb_task))
+            handle_result(storage, job, next_attempt, config, Err(ConduitError.Snooze(snooze_dur)))
+          Ok(true) ->
+            let result = Conduit.Queue.dispatch(job.job_type, job.payload)
+            -- Cancel the heartbeat task now that the job has finished.
+            kill(task_await_unwrap(hb_task))
+            handle_result(storage, job, next_attempt, config, result)
+        end
     end
   end
 
@@ -86,7 +107,9 @@ mod Conduit.Worker do
     match result do
       Ok(()) ->
         match Conduit.Storage.mark_completed(storage, job.id) do
-          Ok(())  -> ()
+          Ok(())  ->
+            -- Release unique key on successful completion.
+            prelease_unique(storage, job)
           Err(e)  -> Logger.error("conduit: mark_completed failed for " ++ job.id ++ ": " ++ e)
         end
 
@@ -138,7 +161,7 @@ mod Conduit.Worker do
       None ->
         -- No DLQ configured: just mark the job dead in-place.
         match Conduit.Storage.discard(storage, job.id, "discarded: " ++ reason) do
-          Ok(())  -> ()
+          Ok(())  -> prelease_unique(storage, job)
           Err(e)  -> Logger.error("conduit: discard error for " ++ job.id ++ ": " ++ e)
         end
       Some(_) ->
@@ -147,12 +170,14 @@ mod Conduit.Worker do
     end
   end
 
-  -- Dead-letter path: insert into conduit_dead_letters, fire callback.
+  -- Dead-letter path: insert into conduit_dead_letters, fire callback, release unique key.
   pfn phandle_dead(storage, job : Conduit.JobRow, config : Conduit.JobConfig, error_msg : String) : () do
     let dl = Conduit.DeadLetter.from_job(job, error_msg)
     match Conduit.Storage.move_to_dead_letter(storage, dl) do
       Err(e)  -> Logger.error("conduit: move_to_dead_letter error for " ++ job.id ++ ": " ++ e)
       Ok(())  ->
+        -- Release the unique constraint so the same job can be re-enqueued.
+        prelease_unique(storage, job)
         -- Fire the on_dead_letter callback if configured.
         match config.on_dead_letter do
           None         -> ()
@@ -196,6 +221,18 @@ mod Conduit.Worker do
     else
       task_yield()
       psleep_loop(n - 1)
+    end
+  end
+
+  -- Release the unique constraint for a job, if it has one.
+  pfn prelease_unique(storage, job : Conduit.JobRow) : () do
+    match job.unique_key do
+      None    -> ()
+      Some(_) ->
+        match Conduit.Unique.release(storage, job.id) do
+          Ok(())  -> ()
+          Err(e)  -> Logger.warn("conduit: unique_release error for " ++ job.id ++ ": " ++ e)
+        end
     end
   end
 

@@ -6,7 +6,37 @@ mod Conduit do
   doc "Per-job uniqueness constraint — prevent duplicate jobs within a time window."
   type UniqueConstraint = {
     duration : Duration,
-    by : List(String)
+    by       : List(String)
+  }
+
+  doc """
+  What to do when a duplicate unique job is enqueued.
+    Ignore  — silently drop the duplicate (return the existing job id)
+    Replace — cancel the existing job and enqueue the new one
+    Raise   — return an error
+  """
+  type UniqueConflict = Ignore | Replace | Raise
+
+  doc """
+  Per-key rate limit configuration.
+
+    key_fn — function that extracts a rate-limit key from the payload string
+    limit  — max executions per second *per key*
+  """
+  type PerKeyRateLimit = {
+    key_fn : fn String -> String,
+    limit  : Int
+  }
+
+  doc """
+  Rate limit configuration for a job type.
+
+    max_per_second — global rate limit for this job type
+    per_key        — optional per-key rate limit (e.g. per user_id)
+  """
+  type RateLimit = {
+    max_per_second : Int,
+    per_key        : Option(Conduit.PerKeyRateLimit)
   }
 
   doc """
@@ -20,6 +50,9 @@ mod Conduit do
     backoff          : Conduit.Backoff,
     dead_letter_queue: Option(String),
     unique_for       : Option(Conduit.UniqueConstraint),
+    on_conflict      : Conduit.UniqueConflict,
+    rate_limit       : Option(Conduit.RateLimit),
+    on_dead_letter   : Option(fn Conduit.JobInfo -> ()),
     priority         : Int,
     tags             : List(String),
     discard_after    : Option(Duration)
@@ -63,6 +96,9 @@ mod Conduit.JobConfig do
       backoff           = Conduit.Backoff.Exponential,
       dead_letter_queue = None,
       unique_for        = None,
+      on_conflict       = Conduit.UniqueConflict.Ignore,
+      rate_limit        = None,
+      on_dead_letter    = None,
       priority          = 0,
       tags              = Nil,
       discard_after     = None

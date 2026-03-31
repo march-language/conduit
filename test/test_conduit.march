@@ -1,5 +1,5 @@
 doc """
-Phase 1–6 tests for Conduit — Job Queue + Retries + Cron + Workflows + Multi-Node + Dashboard.
+Phase 1–7 tests for Conduit — Job Queue + Retries + Cron + Workflows + Multi-Node + Dashboard + Advanced.
 
 These tests use a fake in-memory storage backend so no database is required.
 The fake storage captures all operations and lets tests inspect state.
@@ -242,6 +242,7 @@ mod ConduitTest do
       completed_at = None,
       heartbeat_at = None,
       worker_id    = None,
+      unique_key   = None,
       errors       = Nil,
       tags         = config.tags
     }
@@ -313,6 +314,7 @@ mod ConduitTest do
       completed_at      = None,
       heartbeat_at      = Some(now),
       worker_id         = Some("worker-1"),
+      unique_key        = None,
       errors            = Nil,
       tags              = Nil
     }
@@ -680,6 +682,7 @@ mod ConduitTest do
       completed_at      = None,
       heartbeat_at      = None,
       worker_id         = None,
+      unique_key        = None,
       errors            = Nil,
       tags              = Nil
     }
@@ -1340,6 +1343,24 @@ mod ConduitTest do
     fn notify_subscribe(_self : FakeWorkflowStorage, _channel : String) : Result((), String) do
       Ok(())
     end
+
+    -- Rate limiting & unique job stubs (Phase 7).
+    fn rate_limit_acquire(self : FakeWorkflowStorage, key : String, _rate : Int) : Result(Bool, String) do
+      -- Check if the key is blocked in test state.
+      let blocked = Vault.get(self.vault_key, "rl_blocked:" ++ key) |> unwrap_or(false)
+      Ok(not blocked)
+    end
+
+    fn unique_check(self : FakeWorkflowStorage, unique_key : String) : Result(Bool, String) do
+      let exists = Vault.get(self.vault_key, "unique:" ++ unique_key) |> unwrap_or(false)
+      Ok(exists)
+    end
+
+    fn unique_release(self : FakeWorkflowStorage, job_id : String) : Result((), String) do
+      let evs = Vault.get(self.vault_key, "events") |> unwrap_or(Nil)
+      Vault.set(self.vault_key, "events", Cons("unique_release:" ++ job_id, evs))
+      Ok(())
+    end
   end
 
   -- ─────────────────────────────────────────────────────────────
@@ -1662,5 +1683,220 @@ mod ConduitTest do
     let storage = fake_workflow_storage_new(vault_k)
     let result  = Conduit.Storage.notify_subscribe(storage, "conduit_jobs")
     assert_ok(result)
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Phase 7: Rate limiting types
+  -- ─────────────────────────────────────────────────────────────
+
+  fn test_rate_limit_type_fields() do
+    let rl : Conduit.RateLimit = {
+      max_per_second = 10,
+      per_key        = None
+    }
+    assert_eq_int(rl.max_per_second, 10)
+    assert_none(rl.per_key)
+  end
+
+  fn test_rate_limit_with_per_key() do
+    let pk : Conduit.PerKeyRateLimit = {
+      key_fn = fn payload -> "user_123",
+      limit  = 2
+    }
+    let rl : Conduit.RateLimit = {
+      max_per_second = 10,
+      per_key        = Some(pk)
+    }
+    assert_eq_int(rl.max_per_second, 10)
+    assert_some(rl.per_key)
+    match rl.per_key do
+      None     -> assert_true(false)
+      Some(pk2) ->
+        assert_eq_int(pk2.limit, 2)
+        assert_eq_str(pk2.key_fn("{}"), "user_123")
+    end
+  end
+
+  fn test_job_config_default_has_no_rate_limit() do
+    let cfg = Conduit.JobConfig.default()
+    assert_none(cfg.rate_limit)
+    assert_none(cfg.on_dead_letter)
+    match cfg.on_conflict do
+      Conduit.UniqueConflict.Ignore -> assert_true(true)
+      _                             -> assert_true(false)
+    end
+  end
+
+  fn test_job_config_with_rate_limit() do
+    let rl : Conduit.RateLimit = { max_per_second = 5, per_key = None }
+    let cfg = { ..Conduit.JobConfig.default(), rate_limit = Some(rl) }
+    assert_some(cfg.rate_limit)
+    match cfg.rate_limit do
+      None     -> assert_true(false)
+      Some(r)  -> assert_eq_int(r.max_per_second, 5)
+    end
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Phase 7: Unique jobs
+  -- ─────────────────────────────────────────────────────────────
+
+  fn test_unique_fingerprint_deterministic() do
+    let fp1 = Conduit.Unique.fingerprint("TestJob", "{\"id\":1}", Nil)
+    let fp2 = Conduit.Unique.fingerprint("TestJob", "{\"id\":1}", Nil)
+    assert_eq_str(fp1, fp2)
+  end
+
+  fn test_unique_fingerprint_differs_by_job_type() do
+    let fp1 = Conduit.Unique.fingerprint("JobA", "{}", Nil)
+    let fp2 = Conduit.Unique.fingerprint("JobB", "{}", Nil)
+    assert_true(fp1 != fp2)
+  end
+
+  fn test_unique_fingerprint_differs_by_payload() do
+    let fp1 = Conduit.Unique.fingerprint("Job", "{\"id\":1}", Nil)
+    let fp2 = Conduit.Unique.fingerprint("Job", "{\"id\":2}", Nil)
+    assert_true(fp1 != fp2)
+  end
+
+  fn test_unique_fingerprint_with_by_fields() do
+    let fp1 = Conduit.Unique.fingerprint("Job", "{\"user_id\":1,\"other\":\"a\"}", Cons("user_id", Nil))
+    let fp2 = Conduit.Unique.fingerprint("Job", "{\"user_id\":1,\"other\":\"b\"}", Cons("user_id", Nil))
+    -- Same user_id → same fingerprint (only user_id is in `by`)
+    assert_eq_str(fp1, fp2)
+  end
+
+  fn test_unique_conflict_ignore_variant() do
+    match Conduit.UniqueConflict.Ignore do
+      Conduit.UniqueConflict.Ignore  -> assert_true(true)
+      _                               -> assert_true(false)
+    end
+  end
+
+  fn test_unique_conflict_replace_variant() do
+    match Conduit.UniqueConflict.Replace do
+      Conduit.UniqueConflict.Replace -> assert_true(true)
+      _                              -> assert_true(false)
+    end
+  end
+
+  fn test_unique_conflict_raise_variant() do
+    match Conduit.UniqueConflict.Raise do
+      Conduit.UniqueConflict.Raise -> assert_true(true)
+      _                            -> assert_true(false)
+    end
+  end
+
+  fn test_unique_check_no_conflict_in_fake_storage() do
+    let vault_k = "unique_nc_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let result  = Conduit.Unique.conflicts(storage, "some_key")
+    assert_ok(result)
+    match result do
+      Err(_)    -> assert_true(false)
+      Ok(found) -> assert_eq_bool(found, false)
+    end
+  end
+
+  fn test_unique_check_conflict_in_fake_storage() do
+    let vault_k = "unique_cf_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    -- Mark a key as existing.
+    Vault.set(vault_k, "unique:my_key", true)
+    let result = Conduit.Unique.conflicts(storage, "my_key")
+    assert_ok(result)
+    match result do
+      Err(_)    -> assert_true(false)
+      Ok(found) -> assert_eq_bool(found, true)
+    end
+  end
+
+  fn test_unique_release_records_event() do
+    let vault_k = "unique_rel_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let job_id  = uuid_v4()
+    let result  = Conduit.Unique.release(storage, job_id)
+    assert_ok(result)
+    let evs = Vault.get(vault_k, "events") |> unwrap_or(Nil)
+    assert_true(List.any(evs, fn e -> String.starts_with(e, "unique_release:" ++ job_id) end))
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Phase 7: Rate limiter
+  -- ─────────────────────────────────────────────────────────────
+
+  fn test_rate_limiter_acquire_allowed_by_default() do
+    let vault_k = "rl_acq_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let rl : Conduit.RateLimit = { max_per_second = 10, per_key = None }
+    let result = Conduit.RateLimiter.acquire(storage, "TestJob", rl, "{}")
+    assert_ok(result)
+    match result do
+      Err(_)      -> assert_true(false)
+      Ok(allowed) -> assert_eq_bool(allowed, true)
+    end
+  end
+
+  fn test_rate_limiter_acquire_blocked_when_flagged() do
+    let vault_k = "rl_blk_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    -- Block the global key.
+    Vault.set(vault_k, "rl_blocked:conduit_rl:TestJob", true)
+    let rl : Conduit.RateLimit = { max_per_second = 10, per_key = None }
+    let result = Conduit.RateLimiter.acquire(storage, "TestJob", rl, "{}")
+    assert_ok(result)
+    match result do
+      Err(_)      -> assert_true(false)
+      Ok(allowed) -> assert_eq_bool(allowed, false)
+    end
+  end
+
+  fn test_rate_limiter_snooze_duration_positive() do
+    let dur = Conduit.RateLimiter.snooze_duration(10)
+    let ms  = Duration.to_milliseconds(dur)
+    -- Should be at least 100ms (1000/10) and at most ~200ms (100 + 100 jitter)
+    assert_true(ms >= 100)
+    assert_true(ms <= 300)
+  end
+
+  fn test_rate_limiter_snooze_duration_zero_rate() do
+    let dur = Conduit.RateLimiter.snooze_duration(0)
+    let ms  = Duration.to_milliseconds(dur)
+    -- With rate 0, base is 1000ms plus up to 100ms jitter
+    assert_true(ms >= 1000)
+    assert_true(ms <= 1200)
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Phase 7: Priority ordering
+  -- ─────────────────────────────────────────────────────────────
+
+  fn test_priority_ordering_in_job_config() do
+    -- Priority is just an Int field on JobConfig; higher values run first.
+    -- The ORDER BY in fetch_next is `priority DESC, run_at ASC`.
+    let low  = { ..Conduit.JobConfig.default(), priority = 0 }
+    let high = { ..Conduit.JobConfig.default(), priority = 100 }
+    assert_eq_int(low.priority, 0)
+    assert_eq_int(high.priority, 100)
+    assert_true(high.priority > low.priority)
+  end
+
+  fn test_on_dead_letter_callback_in_config() do
+    let fired_key = "odl_" ++ uuid_v4()
+    Vault.set(fired_key, "fired", false)
+    let cb = fn (_info : Conduit.JobInfo) -> Vault.set(fired_key, "fired", true)
+    let cfg = { ..Conduit.JobConfig.default(), on_dead_letter = Some(cb) }
+    assert_some(cfg.on_dead_letter)
+    match cfg.on_dead_letter do
+      None    -> assert_true(false)
+      Some(f) ->
+        let dummy_info : Conduit.JobInfo = {
+          id = "x", queue = "q", job_type = "t",
+          attempt = 1, max_attempts = 3, tags = Nil,
+          inserted_at = DateTime.now(), errors = Nil
+        }
+        f(dummy_info)
+        assert_eq_bool(Vault.get(fired_key, "fired") |> unwrap_or(false), true)
+    end
   end
 end
