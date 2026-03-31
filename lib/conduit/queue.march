@@ -112,10 +112,10 @@ mod Conduit.Queue do
   -- DB but the actual strategy is still available via lookup_config at runtime.
   pfn pbackoff_name(b : Conduit.Backoff) : String do
     match b do
-      Conduit.Backoff.Linear      -> "linear"
-      Conduit.Backoff.Exponential -> "exponential"
-      Conduit.Backoff.Fibonacci   -> "fibonacci"
-      Conduit.Backoff.Custom(_)   -> "custom"
+      Linear      -> "linear"
+      Exponential -> "exponential"
+      Fibonacci   -> "fibonacci"
+      Custom(_)   -> "custom"
     end
   end
 

@@ -170,9 +170,9 @@ mod Conduit.CronRegistry do
   doc "Serialise a CronOverlap variant to its DB string."
   fn overlap_to_string(o : Conduit.CronOverlap) : String do
     match o do
-      Conduit.CronOverlap.Skip    -> "skip"
-      Conduit.CronOverlap.Allow   -> "allow"
-      Conduit.CronOverlap.Replace -> "replace"
+      Skip    -> "skip"
+      Allow   -> "allow"
+      Replace -> "replace"
     end
   end
 

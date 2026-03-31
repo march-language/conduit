@@ -73,7 +73,7 @@ mod Conduit.CronScheduler do
   pfn pfire_one(storage, sched : Conduit.CronSchedule) : () do
     let overlap = Conduit.CronRegistry.overlap_from_string(sched.overlap)
     let should_fire = match overlap do
-      Conduit.CronOverlap.Skip ->
+      Skip ->
         -- Only fire if there is no pending/running job from the last tick.
         match sched.last_job_id do
           None     -> true
@@ -83,8 +83,8 @@ mod Conduit.CronScheduler do
               Err(_)     -> false
             end
         end
-      Conduit.CronOverlap.Allow   -> true
-      Conduit.CronOverlap.Replace ->
+      Allow   -> true
+      Replace ->
         -- Cancel the previous job (if any) before firing.
         match sched.last_job_id do
           None      -> ()

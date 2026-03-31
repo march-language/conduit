@@ -96,16 +96,16 @@ mod Conduit.WorkflowRunner do
             Ok(output_json) ->
               pmark_status(storage, row.id, "completed", Some(output_json), None)
               Ok(())
-            Err(Conduit.WorkflowError.Failed(msg)) ->
+            Err(Failed(msg)) ->
               pmark_status(storage, row.id, "failed", None, Some(msg))
               Err(ConduitError.Discard("workflow failed: " ++ msg))
-            Err(Conduit.WorkflowError.Cancelled(msg)) ->
+            Err(Cancelled(msg)) ->
               pmark_status(storage, row.id, "cancelled", None, Some(msg))
               Ok(())
-            Err(Conduit.WorkflowError.TimedOut) ->
+            Err(TimedOut) ->
               pmark_status(storage, row.id, "timed_out", None, Some("Timed out during execution"))
               Ok(())
-            Err(Conduit.WorkflowError.StorageError(msg)) ->
+            Err(StorageError(msg)) ->
               -- Transient — let the job retry via normal backoff.
               Err(ConduitError.Retry("workflow_runner: storage error: " ++ msg))
           end
