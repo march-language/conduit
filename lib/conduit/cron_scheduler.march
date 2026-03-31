@@ -1,0 +1,178 @@
+doc """
+Conduit.CronScheduler — fires due cron schedules and handles overlap.
+
+The scheduler runs as a background task that wakes every `tick_interval_ms`
+(default 30s) and:
+
+  1. Acquires a Postgres advisory lock (cron_scheduler_lock_id = 7_326_482).
+     If the lock cannot be acquired another node is already handling this tick;
+     skip and try again next tick. This prevents duplicate fires in multi-node
+     deployments.
+
+  2. Loads all enabled cron schedules due for execution
+     (next_run_at <= NOW()).
+
+  3. For each due schedule, handles the overlap mode:
+       Skip    — query the last_job_id; if it is still pending/running, skip.
+       Allow   — enqueue unconditionally.
+       Replace — cancel last_job_id if pending/running, then enqueue.
+
+  4. Enqueues a job row for the cron (via Conduit.Queue.enqueue).
+
+  5. Updates the schedule: last_run_at, last_job_id, next_run_at.
+
+  6. Releases the advisory lock.
+
+Static crons (registered via Conduit.register_cron) are upserted into the
+`conduit_cron_schedules` table during `Conduit.start`. Dynamic crons
+inserted via `Conduit.schedule_cron` are picked up automatically on the
+next tick.
+"""
+
+mod Conduit.CronScheduler do
+  -- Postgres advisory lock id dedicated to the cron scheduler.
+  ptype LockId = 7326482
+
+  doc "Start the cron scheduler as a background task."
+  fn start(storage, tick_interval_ms : Int) : Task do
+    task_spawn(fn () -> scheduler_loop(storage, tick_interval_ms) end)
+  end
+
+  pfn scheduler_loop(storage, tick_interval_ms : Int) : () do
+    ptick(storage)
+    psleep_ms(tick_interval_ms)
+    scheduler_loop(storage, tick_interval_ms)
+  end
+
+  pfn ptick(storage) : () do
+    -- Try to acquire the advisory lock. If another node holds it, skip this tick.
+    match Conduit.Storage.cron_advisory_lock(storage, 7326482) do
+      Err(e) ->
+        Logger.error("conduit_cron: advisory lock error: " ++ e)
+      Ok(false) ->
+        ()   -- another node is handling this tick
+      Ok(true) ->
+        let result = pfire_due(storage)
+        Conduit.Storage.cron_advisory_unlock(storage, 7326482)
+        match result do
+          Ok(()) -> ()
+          Err(e) -> Logger.error("conduit_cron: tick error: " ++ e)
+        end
+    end
+  end
+
+  pfn pfire_due(storage) : Result((), String) do
+    match Conduit.Storage.cron_load_due(storage) do
+      Err(e)       -> Err(e)
+      Ok(schedules) ->
+        List.each(schedules, fn sched -> pfire_one(storage, sched) end)
+        Ok(())
+    end
+  end
+
+  pfn pfire_one(storage, sched : Conduit.CronSchedule) : () do
+    let overlap = Conduit.CronRegistry.overlap_from_string(sched.overlap)
+    let should_fire = match overlap do
+      Conduit.CronOverlap.Skip ->
+        -- Only fire if there is no pending/running job from the last tick.
+        match sched.last_job_id do
+          None     -> true
+          Some(jid) ->
+            match Conduit.Storage.cron_job_active(storage, jid) do
+              Ok(active) -> not active
+              Err(_)     -> false
+            end
+        end
+      Conduit.CronOverlap.Allow   -> true
+      Conduit.CronOverlap.Replace ->
+        -- Cancel the previous job (if any) before firing.
+        match sched.last_job_id do
+          None      -> ()
+          Some(jid) ->
+            match Conduit.Storage.cron_cancel_job(storage, jid) do
+              Ok(())  -> ()
+              Err(e)  -> Logger.warn("conduit_cron: cancel previous job " ++ jid ++ ": " ++ e)
+            end
+        end
+        true
+    end
+    if should_fire do
+      pdo_fire(storage, sched)
+    end
+  end
+
+  pfn pdo_fire(storage, sched : Conduit.CronSchedule) : () do
+    -- Look up registered config to get the queue and priority.
+    let config = match Conduit.CronRegistry.lookup(sched.job_type) do
+      None    ->
+        -- Not in registry (dynamic cron or missing registration): use schedule's queue.
+        { ..Conduit.JobConfig.default(), queue = sched.queue, tags = sched.tags }
+      Some(e) ->
+        { ..Conduit.JobConfig.default(),
+          queue = e.config.queue,
+          tags  = e.config.tags
+        }
+    end
+
+    match Conduit.Queue.enqueue(storage, sched.job_type, sched.payload, config) do
+      Err(e) ->
+        Logger.error("conduit_cron: failed to enqueue " ++ sched.job_type ++ ": " ++ e)
+      Ok(job_id) ->
+        -- Compute next_run_at from now.
+        let next = match Conduit.CronParser.next_run(sched.schedule, DateTime.now()) do
+          Ok(t)  -> Some(t)
+          Err(e) ->
+            Logger.warn("conduit_cron: cannot compute next_run for " ++ sched.id ++ ": " ++ e)
+            None
+        end
+        match Conduit.Storage.cron_mark_fired(storage, sched.id, job_id, next) do
+          Ok(())  -> ()
+          Err(e)  -> Logger.error("conduit_cron: cron_mark_fired error for " ++ sched.id ++ ": " ++ e)
+        end
+    end
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Startup: upsert static crons into the DB
+  -- ─────────────────────────────────────────────────────────────
+
+  doc """
+  Upsert a static cron into conduit_cron_schedules so it survives restarts.
+  Called during Conduit.start for each registered static cron.
+  """
+  fn upsert_static(storage, cron_type : String, config : Conduit.CronConfig) : Result((), String) do
+    let now  = DateTime.now()
+    let next = match Conduit.CronParser.next_run(config.schedule, now) do
+      Ok(t)  -> Some(t)
+      Err(_) -> None
+    end
+    let sched : Conduit.CronSchedule = {
+      id          = cron_type,    -- static crons use their type name as id
+      job_type    = cron_type,
+      schedule    = config.schedule,
+      timezone    = config.timezone,
+      queue       = config.queue,
+      payload     = "{}",
+      overlap     = Conduit.CronRegistry.overlap_to_string(config.overlap),
+      enabled     = true,
+      last_run_at = None,
+      last_job_id = None,
+      next_run_at = next,
+      tags        = config.tags
+    }
+    Conduit.Storage.cron_upsert(storage, sched)
+  end
+
+  pfn psleep_ms(ms : Int) : () do
+    psleep_loop(int_div(ms, 10))
+  end
+
+  pfn psleep_loop(n : Int) : () do
+    if n <= 0 do
+      ()
+    else
+      task_yield()
+      psleep_loop(n - 1)
+    end
+  end
+end

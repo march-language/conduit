@@ -1,0 +1,237 @@
+doc """
+Conduit.CronParser — parses 5-field cron expressions and computes next run times.
+
+Supported syntax (per field):
+  *       — every value
+  N       — exact value
+  N-M     — inclusive range
+  */N     — step from 0
+  N-M/N   — step within range
+  N,M,... — list of values (each item can itself be N, N-M, or */N)
+
+Fields (left to right): minute hour day-of-month month day-of-week
+  minute       0-59
+  hour         0-23
+  day-of-month 1-31
+  month        1-12
+  day-of-week  0-6 (0 = Sunday)
+
+Next-run algorithm:
+  Starting from `from_time` advanced to the next minute boundary, iterate
+  one minute at a time until a matching DateTime is found. The search is
+  bounded to ~1 year (527,040 iterations) to prevent infinite loops on
+  impossible expressions (e.g. "31 * 31 2 *").
+
+Note on timezones:
+  The scheduler stores the timezone in the DB but applies it as a UTC offset
+  approximation. Full IANA timezone support requires a TZ database (Phase 5+).
+"""
+
+mod Conduit.CronParser do
+  -- A parsed cron field: either "match any" or a sorted list of valid integers.
+  ptype Field = Any | Values(List(Int))
+
+  -- A parsed 5-field cron expression.
+  ptype Expr = Expr({
+    minute : Field,
+    hour   : Field,
+    dom    : Field,   -- day of month
+    month  : Field,
+    dow    : Field    -- day of week
+  })
+
+  doc """
+  Parse a cron expression string. Returns Ok(next_run_at) on success,
+  Err(msg) if the expression is malformed or no match found within ~1 year.
+  """
+  fn next_run(schedule : String, from : DateTime) : Result(DateTime, String) do
+    match pparse_expr(schedule) do
+      Err(e)   -> Err(e)
+      Ok(expr) ->
+        let start = pnext_minute(from)
+        match pfind_next(expr, start, 0) do
+          None    -> Err("No next run found for schedule within 1 year: " ++ schedule)
+          Some(t) -> Ok(t)
+        end
+    end
+  end
+
+  doc "Parse a cron expression into its internal representation."
+  fn parse(schedule : String) : Result(Expr, String) do
+    pparse_expr(schedule)
+  end
+
+  doc "Check whether a DateTime matches a parsed cron expression."
+  fn matches(expr : Expr, dt : DateTime) : Bool do
+    pmatches(expr, dt)
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Private: parser
+  -- ─────────────────────────────────────────────────────────────
+
+  pfn pparse_expr(s : String) : Result(Expr, String) do
+    let parts = String.split(s, " ") |> List.filter(fn p -> not (String.is_empty(p)) end)
+    match parts do
+      Cons(min, Cons(hr, Cons(dom, Cons(mo, Cons(dow, Nil))))) ->
+        match (pparse_field(min, 0, 59),
+               pparse_field(hr,  0, 23),
+               pparse_field(dom, 1, 31),
+               pparse_field(mo,  1, 12),
+               pparse_field(dow, 0, 6)) do
+          (Ok(m), Ok(h), Ok(d), Ok(mo2), Ok(w)) ->
+            Ok(Expr({ minute = m, hour = h, dom = d, month = mo2, dow = w }))
+          (Err(e), _, _, _, _) -> Err("minute: " ++ e)
+          (_, Err(e), _, _, _) -> Err("hour: "   ++ e)
+          (_, _, Err(e), _, _) -> Err("dom: "    ++ e)
+          (_, _, _, Err(e), _) -> Err("month: "  ++ e)
+          (_, _, _, _, Err(e)) -> Err("dow: "    ++ e)
+        end
+      _ ->
+        Err("cron expression must have exactly 5 fields, got: " ++ s)
+    end
+  end
+
+  pfn pparse_field(s : String, lo : Int, hi : Int) : Result(Field, String) do
+    if s == "*" do
+      Ok(Any)
+    else if String.starts_with(s, "*/") do
+      let step_str = String.slice(s, 2, String.byte_size(s) - 2)
+      match String.to_int(step_str) do
+        None    -> Err("invalid step in */N: " ++ s)
+        Some(n) ->
+          if n <= 0 do Err("step must be > 0: " ++ s)
+          else Ok(Values(pstep_values(lo, hi, n)))
+          end
+      end
+    else if String.contains(s, ",") do
+      let items = String.split(s, ",")
+      pparse_list(items, lo, hi, Nil)
+    else if String.contains(s, "-") do
+      pparse_range_or_step(s, lo, hi)
+    else
+      match String.to_int(s) do
+        None    -> Err("invalid field value: " ++ s)
+        Some(n) ->
+          if n < lo || n > hi do
+            Err("value " ++ int_to_string(n) ++ " out of range [" ++ int_to_string(lo) ++ "," ++ int_to_string(hi) ++ "]")
+          else
+            Ok(Values(Cons(n, Nil)))
+          end
+      end
+    end
+  end
+
+  pfn pparse_range_or_step(s : String, lo : Int, hi : Int) : Result(Field, String) do
+    -- May be N-M or N-M/S
+    let (range_part, step_opt) = match String.split_first(s, "/") do
+      None        -> (s, None)
+      Some((r, step_s)) -> (r, String.to_int(step_s))
+    end
+    match String.split_first(range_part, "-") do
+      None ->
+        Err("expected range N-M in: " ++ s)
+      Some((lo_s, hi_s)) ->
+        match (String.to_int(lo_s), String.to_int(hi_s)) do
+          (Some(rlo), Some(rhi)) ->
+            let step = Option.unwrap_or(step_opt, 1)
+            if rlo < lo || rhi > hi || rlo > rhi do
+              Err("range out of bounds in: " ++ s)
+            else
+              Ok(Values(pstep_values(rlo, rhi, step)))
+            end
+          _ ->
+            Err("non-integer in range: " ++ s)
+        end
+    end
+  end
+
+  pfn pparse_list(items : List(String), lo : Int, hi : Int, acc : List(Int)) : Result(Field, String) do
+    match items do
+      Nil ->
+        Ok(Values(List.sort_by(acc, fn a -> fn b -> compare(a, b) end)))
+      Cons(item, rest) ->
+        match pparse_field(item, lo, hi) do
+          Err(e) -> Err(e)
+          Ok(Any) ->
+            Ok(Values(List.range(lo, hi)))
+          Ok(Values(vs)) ->
+            pparse_list(rest, lo, hi, List.append(acc, vs))
+        end
+    end
+  end
+
+  -- Generate [start, start+step, start+2*step, ..., ≤ hi]
+  pfn pstep_values(start : Int, hi : Int, step : Int) : List(Int) do
+    pfn go(cur : Int, acc : List(Int)) : List(Int) do
+      if cur > hi do List.reverse(acc)
+      else go(cur + step, Cons(cur, acc))
+      end
+    end
+    go(start, Nil)
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Private: matching
+  -- ─────────────────────────────────────────────────────────────
+
+  pfn pmatches(expr : Expr, dt : DateTime) : Bool do
+    match expr do
+      Expr(e) ->
+        pfield_matches(e.minute, pdt_minute(dt)) &&
+        pfield_matches(e.hour,   pdt_hour(dt))   &&
+        pfield_matches(e.dom,    pdt_dom(dt))     &&
+        pfield_matches(e.month,  pdt_month(dt))   &&
+        pfield_matches(e.dow,    pdt_dow(dt))
+    end
+  end
+
+  pfn pfield_matches(f : Field, v : Int) : Bool do
+    match f do
+      Any        -> true
+      Values(vs) -> List.member(vs, v)
+    end
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Private: next-run search
+  -- ─────────────────────────────────────────────────────────────
+
+  pfn pfind_next(expr : Expr, candidate : DateTime, count : Int) : Option(DateTime) do
+    if count > 527040 do
+      None
+    else if pmatches(expr, candidate) do
+      Some(candidate)
+    else
+      pfind_next(expr, pnext_minute(candidate), count + 1)
+    end
+  end
+
+  -- Advance to the start of the next minute (truncate seconds, add 60s).
+  pfn pnext_minute(dt : DateTime) : DateTime do
+    let ts       = DateTime.to_timestamp(dt)
+    let truncated = int_div(ts, 60) * 60
+    DateTime.from_timestamp(truncated + 60)
+  end
+
+  -- Extract time components as integers from a UTC DateTime.
+  pfn pdt_minute(dt : DateTime) : Int do
+    DateTime.format(dt, "%M") |> String.to_int |> unwrap_or(0)
+  end
+
+  pfn pdt_hour(dt : DateTime) : Int do
+    DateTime.format(dt, "%H") |> String.to_int |> unwrap_or(0)
+  end
+
+  pfn pdt_dom(dt : DateTime) : Int do
+    DateTime.format(dt, "%d") |> String.to_int |> unwrap_or(1)
+  end
+
+  pfn pdt_month(dt : DateTime) : Int do
+    DateTime.format(dt, "%m") |> String.to_int |> unwrap_or(1)
+  end
+
+  pfn pdt_dow(dt : DateTime) : Int do
+    DateTime.format(dt, "%w") |> String.to_int |> unwrap_or(0)
+  end
+end

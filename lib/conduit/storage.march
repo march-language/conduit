@@ -49,6 +49,15 @@ Phase 2 additions:
   discard          — record error and permanently fail a job (status → dead), no DLQ
   move_to_dead_letter — insert into dead_letters table, mark job dead
   rescue_stale     — return stale running jobs (heartbeat expired) to pending
+
+Phase 3 additions (cron):
+  cron_upsert          — insert or update a cron schedule row
+  cron_load_due        — load all enabled schedules with next_run_at <= NOW()
+  cron_mark_fired      — update last_run_at, last_job_id, next_run_at after firing
+  cron_job_active      — return true if a job is still pending or running
+  cron_cancel_job      — cancel a pending/running job (used by overlap: Replace)
+  cron_advisory_lock   — try to acquire a Postgres advisory lock; Ok(false) if held
+  cron_advisory_unlock — release a previously acquired advisory lock
 """
 interface Conduit.Storage(s) do
   fn enqueue            : s -> Conduit.JobRow -> Result(String, String)
@@ -60,6 +69,17 @@ interface Conduit.Storage(s) do
   fn discard            : s -> String -> String -> Result((), String)
   fn move_to_dead_letter: s -> Conduit.DeadLetter -> Result((), String)
   fn rescue_stale       : s -> Int -> Result(List(String), String)
+
+  -- Cron storage methods (Phase 3)
+  fn cron_upsert          : s -> Conduit.CronSchedule -> Result((), String)
+  fn cron_load_due        : s -> Result(List(Conduit.CronSchedule), String)
+  fn cron_load_by_id      : s -> String -> Result(Option(Conduit.CronSchedule), String)
+  fn cron_mark_fired      : s -> String -> String -> Option(DateTime) -> Result((), String)
+  fn cron_job_active      : s -> String -> Result(Bool, String)
+  fn cron_cancel_job      : s -> String -> Result((), String)
+  fn cron_delete          : s -> String -> Result((), String)
+  fn cron_advisory_lock   : s -> Int -> Result(Bool, String)
+  fn cron_advisory_unlock : s -> Int -> Result((), String)
 end
 
 doc """
@@ -245,6 +265,167 @@ mod Conduit.Storage.Postgres do
         Err(e) -> Err(e)
       end
     end
+
+    -- ─────────────────────────────────────────────────────────────
+    -- Cron storage methods (Phase 3)
+    -- ─────────────────────────────────────────────────────────────
+
+    fn cron_upsert(_self, sched : Conduit.CronSchedule) : Result((), String) do
+      let sql = "
+        INSERT INTO conduit_cron_schedules
+          (id, job_type, schedule, timezone, queue, payload, overlap,
+           enabled, next_run_at, tags)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        ON CONFLICT (id) DO UPDATE SET
+          schedule    = EXCLUDED.schedule,
+          timezone    = EXCLUDED.timezone,
+          queue       = EXCLUDED.queue,
+          overlap     = EXCLUDED.overlap,
+          enabled     = EXCLUDED.enabled,
+          next_run_at = COALESCE(EXCLUDED.next_run_at, conduit_cron_schedules.next_run_at),
+          tags        = EXCLUDED.tags
+      "
+      let next_at = Option.map(sched.next_run_at, fn d -> DateTime.format(d, "%Y-%m-%dT%H:%M:%SZ")) |> Option.unwrap_or("")
+      let params  = Cons(sched.id,
+                    Cons(sched.job_type,
+                    Cons(sched.schedule,
+                    Cons(sched.timezone,
+                    Cons(sched.queue,
+                    Cons(sched.payload,
+                    Cons(sched.overlap,
+                    Cons(bool_to_string(sched.enabled),
+                    Cons(next_at,
+                    Cons(string_join(sched.tags, ","),
+                    Nil))))))))))
+      match Depot.Repo.query(sql, params) do
+        Ok(_)  -> Ok(())
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn cron_load_due(_self) : Result(List(Conduit.CronSchedule), String) do
+      let sql = "
+        SELECT id, job_type, schedule, timezone, queue, payload, overlap,
+               enabled, last_run_at, last_job_id, next_run_at, tags
+        FROM conduit_cron_schedules
+        WHERE enabled = true
+          AND (next_run_at IS NULL OR next_run_at <= NOW())
+      "
+      match Depot.Repo.query(sql, Nil) do
+        Ok(rows) -> Ok(List.map(rows, fn r -> prow_to_cron_schedule(r) end))
+        Err(e)   -> Err(e)
+      end
+    end
+
+    fn cron_mark_fired(_self, sched_id : String, job_id : String, next_run_at : Option(DateTime)) : Result((), String) do
+      let sql = "
+        UPDATE conduit_cron_schedules
+        SET last_run_at = NOW(),
+            last_job_id = $2,
+            next_run_at = $3
+        WHERE id = $1
+      "
+      let next_at = Option.map(next_run_at, fn d -> DateTime.format(d, "%Y-%m-%dT%H:%M:%SZ")) |> Option.unwrap_or("")
+      match Depot.Repo.query(sql, Cons(sched_id, Cons(job_id, Cons(next_at, Nil)))) do
+        Ok(_)  -> Ok(())
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn cron_job_active(_self, job_id : String) : Result(Bool, String) do
+      let sql = "
+        SELECT COUNT(*) AS cnt
+        FROM conduit_jobs
+        WHERE id = $1
+          AND status IN ('pending', 'running', 'snoozed')
+      "
+      match Depot.Repo.query(sql, Cons(job_id, Nil)) do
+        Ok(rows) ->
+          let cnt = match rows do
+            Cons(r, _) -> Map.get(r, "cnt") |> Option.flat_map(fn s -> String.to_int(s) end) |> unwrap_or(0)
+            Nil        -> 0
+          end
+          Ok(cnt > 0)
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn cron_cancel_job(_self, job_id : String) : Result((), String) do
+      let sql = "
+        UPDATE conduit_jobs
+        SET status = 'dead', completed_at = NOW()
+        WHERE id = $1
+          AND status IN ('pending', 'running', 'snoozed')
+      "
+      match Depot.Repo.query(sql, Cons(job_id, Nil)) do
+        Ok(_)  -> Ok(())
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn cron_load_by_id(_self, sched_id : String) : Result(Option(Conduit.CronSchedule), String) do
+      let sql = "
+        SELECT id, job_type, schedule, timezone, queue, payload, overlap,
+               enabled, last_run_at, last_job_id, next_run_at, tags
+        FROM conduit_cron_schedules
+        WHERE id = $1
+        LIMIT 1
+      "
+      match Depot.Repo.query(sql, Cons(sched_id, Nil)) do
+        Ok(rows) ->
+          match rows do
+            Nil        -> Ok(None)
+            Cons(r, _) -> Ok(Some(prow_to_cron_schedule(r)))
+          end
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn cron_delete(_self, sched_id : String) : Result((), String) do
+      let sql = "DELETE FROM conduit_cron_schedules WHERE id = $1"
+      match Depot.Repo.query(sql, Cons(sched_id, Nil)) do
+        Ok(_)  -> Ok(())
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn cron_advisory_lock(_self, lock_id : Int) : Result(Bool, String) do
+      let sql = "SELECT pg_try_advisory_lock($1) AS acquired"
+      match Depot.Repo.query(sql, Cons(int_to_string(lock_id), Nil)) do
+        Ok(rows) ->
+          let acquired = match rows do
+            Cons(r, _) -> Map.get(r, "acquired") |> Option.map(fn s -> s == "true" end) |> unwrap_or(false)
+            Nil        -> false
+          end
+          Ok(acquired)
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn cron_advisory_unlock(_self, lock_id : Int) : Result((), String) do
+      let sql = "SELECT pg_advisory_unlock($1)"
+      match Depot.Repo.query(sql, Cons(int_to_string(lock_id), Nil)) do
+        Ok(_)  -> Ok(())
+        Err(e) -> Err(e)
+      end
+    end
+  end
+
+  pfn prow_to_cron_schedule(row : Map) : Conduit.CronSchedule do
+    {
+      id          = Map.get(row, "id")          |> unwrap,
+      job_type    = Map.get(row, "job_type")    |> unwrap,
+      schedule    = Map.get(row, "schedule")    |> unwrap,
+      timezone    = Map.get(row, "timezone")    |> unwrap_or("UTC"),
+      queue       = Map.get(row, "queue")       |> unwrap_or("default"),
+      payload     = Map.get(row, "payload")     |> unwrap_or("{}"),
+      overlap     = Map.get(row, "overlap")     |> unwrap_or("skip"),
+      enabled     = Map.get(row, "enabled")     |> Option.map(fn s -> s == "true" end) |> unwrap_or(true),
+      last_run_at = Map.get(row, "last_run_at") |> Option.map(pparse_dt),
+      last_job_id = Map.get(row, "last_job_id") |> Option.flat_map(fn s -> if String.is_empty(s) do None else Some(s) end end),
+      next_run_at = Map.get(row, "next_run_at") |> Option.map(pparse_dt),
+      tags        = Map.get(row, "tags") |> Option.map(fn s -> if String.is_empty(s) do Nil else String.split(s, ",") end end) |> unwrap_or(Nil)
+    }
   end
 
   pfn prow_to_job(row : Map) : Conduit.JobRow do

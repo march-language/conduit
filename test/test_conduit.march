@@ -1,5 +1,5 @@
 doc """
-Phase 1 & 2 tests for Conduit — Simple Job Queue + Retries & Dead Letters.
+Phase 1, 2 & 3 tests for Conduit — Simple Job Queue + Retries & Dead Letters + Cron Scheduling.
 
 These tests use a fake in-memory storage backend so no database is required.
 The fake storage captures all operations and lets tests inspect state.
@@ -25,6 +25,21 @@ Phase 2 coverage:
   - on_dead_letter callback fires when job is dead-lettered
   - DeadLetter.from_job builds correct record
   - rescue_stale tracked via events
+
+Phase 3 coverage:
+  - CronParser.next_run returns a DateTime after the given time
+  - CronParser parses * (any field) correctly
+  - CronParser parses N (exact value) correctly
+  - CronParser parses N-M (range) correctly
+  - CronParser parses */N (step) correctly
+  - CronParser parses N,M lists correctly
+  - CronParser returns Err for malformed expressions
+  - CronParser.matches returns true for a matching DateTime
+  - CronParser.matches returns false for a non-matching DateTime
+  - CronRegistry.register and lookup round-trip
+  - CronRegistry.fire calls the registered performer
+  - CronRegistry.fire returns Discard for unknown type
+  - CronOverlap round-trip via overlap_to_string / overlap_from_string
 """
 
 mod ConduitTest do
@@ -636,5 +651,230 @@ mod ConduitTest do
 
     assert_eq_bool(Vault.get(callback_fired, "fired") |> unwrap_or(false), true)
     assert_eq_str(Vault.get(callback_fired, "job_type") |> unwrap_or(""), "CallbackJob")
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Phase 3: CronParser — expression parsing and next_run
+  -- ─────────────────────────────────────────────────────────────
+
+  fn test_cron_parser_next_run_returns_future_datetime() do
+    -- "0 * * * *" fires at the top of each hour.
+    -- Whatever `from` is, next_run must be after `from`.
+    let from   = DateTime.now()
+    let result = Conduit.CronParser.next_run("0 * * * *", from)
+    assert_ok(result)
+    match result do
+      Err(_)   -> assert_true(false)
+      Ok(next) ->
+        let from_ts = DateTime.to_timestamp(from)
+        let next_ts = DateTime.to_timestamp(next)
+        assert_true(next_ts > from_ts)
+    end
+  end
+
+  fn test_cron_parser_wildcard_matches_every_minute() do
+    -- "* * * * *" should fire every minute; next_run is at most 60s away.
+    let from   = DateTime.now()
+    let result = Conduit.CronParser.next_run("* * * * *", from)
+    assert_ok(result)
+    match result do
+      Err(_)   -> assert_true(false)
+      Ok(next) ->
+        let diff = DateTime.to_timestamp(next) - DateTime.to_timestamp(from)
+        assert_true(diff <= 60)
+    end
+  end
+
+  fn test_cron_parser_exact_minute_field() do
+    -- "5 * * * *" — fires at minute 5 of every hour.
+    -- next_run minute component should be 5.
+    let from   = DateTime.now()
+    let result = Conduit.CronParser.next_run("5 * * * *", from)
+    assert_ok(result)
+    match result do
+      Err(_)   -> assert_true(false)
+      Ok(next) ->
+        let min_str = DateTime.format(next, "%M")
+        assert_eq_str(min_str, "05")
+    end
+  end
+
+  fn test_cron_parser_step_field() do
+    -- "*/15 * * * *" — fires every 15 minutes (0, 15, 30, 45).
+    let from   = DateTime.now()
+    let result = Conduit.CronParser.next_run("*/15 * * * *", from)
+    assert_ok(result)
+    match result do
+      Err(_)   -> assert_true(false)
+      Ok(next) ->
+        let min = DateTime.format(next, "%M") |> String.to_int |> unwrap_or(-1)
+        let valid = min == 0 || min == 15 || min == 30 || min == 45
+        assert_true(valid)
+    end
+  end
+
+  fn test_cron_parser_range_field() do
+    -- "0-5 * * * *" — fires at minutes 0 through 5 inclusive.
+    let from   = DateTime.now()
+    let result = Conduit.CronParser.next_run("0-5 * * * *", from)
+    assert_ok(result)
+    match result do
+      Err(_)   -> assert_true(false)
+      Ok(next) ->
+        let min = DateTime.format(next, "%M") |> String.to_int |> unwrap_or(-1)
+        assert_true(min >= 0 && min <= 5)
+    end
+  end
+
+  fn test_cron_parser_list_field() do
+    -- "1,31 * * * *" — fires at minute 1 and 31.
+    let from   = DateTime.now()
+    let result = Conduit.CronParser.next_run("1,31 * * * *", from)
+    assert_ok(result)
+    match result do
+      Err(_)   -> assert_true(false)
+      Ok(next) ->
+        let min = DateTime.format(next, "%M") |> String.to_int |> unwrap_or(-1)
+        assert_true(min == 1 || min == 31)
+    end
+  end
+
+  fn test_cron_parser_returns_err_for_wrong_field_count() do
+    let result = Conduit.CronParser.next_run("* * * *", DateTime.now())  -- only 4 fields
+    assert_err(result)
+  end
+
+  fn test_cron_parser_returns_err_for_invalid_value() do
+    let result = Conduit.CronParser.next_run("60 * * * *", DateTime.now())  -- minute 60 out of range
+    assert_err(result)
+  end
+
+  fn test_cron_parser_returns_err_for_impossible_expression() do
+    -- Feb 30 never exists; the search should exhaust the 1-year bound.
+    let result = Conduit.CronParser.next_run("0 0 30 2 *", DateTime.now())
+    assert_err(result)
+  end
+
+  fn test_cron_parser_matches_true() do
+    -- Build a DateTime known to match "0 12 * * *" (noon, any day).
+    -- We'll parse the expr and check that a noon DateTime matches it.
+    let expr_result = Conduit.CronParser.parse("0 12 * * *")
+    assert_ok(expr_result)
+    match expr_result do
+      Err(_)    -> assert_true(false)
+      Ok(expr)  ->
+        -- Find the next noon time and verify it matches.
+        let next_result = Conduit.CronParser.next_run("0 12 * * *", DateTime.now())
+        match next_result do
+          Err(_)   -> assert_true(false)
+          Ok(next) -> assert_true(Conduit.CronParser.matches(expr, next))
+        end
+    end
+  end
+
+  fn test_cron_parser_matches_false() do
+    -- A DateTime at minute 0 does NOT match "30 * * * *".
+    let expr_result = Conduit.CronParser.parse("30 * * * *")
+    assert_ok(expr_result)
+    match expr_result do
+      Err(_)   -> assert_true(false)
+      Ok(expr) ->
+        -- Find next :30 tick and verify next :00 does NOT match.
+        let next30_result = Conduit.CronParser.next_run("30 * * * *", DateTime.now())
+        match next30_result do
+          Err(_)    -> assert_true(false)
+          Ok(next30) ->
+            -- Advance 30 more minutes to reach the next :00 tick.
+            let ts_00 = DateTime.to_timestamp(next30) + (30 * 60)
+            let dt_00 = DateTime.from_timestamp(ts_00)
+            assert_true(not (Conduit.CronParser.matches(expr, dt_00)))
+        end
+    end
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Phase 3: CronRegistry — register, lookup, fire
+  -- ─────────────────────────────────────────────────────────────
+
+  fn test_cron_registry_register_and_lookup() do
+    let cron_type = "TestCron_" ++ uuid_v4()
+    let config    = Conduit.CronConfig.default()
+    Conduit.CronRegistry.register(cron_type, config, fn _payload -> Ok(()) end)
+    let result = Conduit.CronRegistry.lookup(cron_type)
+    assert_some(result)
+    match result do
+      None    -> assert_true(false)
+      Some(e) -> assert_eq_str(e.config.schedule, "* * * * *")
+    end
+  end
+
+  fn test_cron_registry_lookup_returns_none_for_unknown() do
+    let result = Conduit.CronRegistry.lookup("__no_such_cron__")
+    assert_none(result)
+  end
+
+  fn test_cron_registry_fire_calls_performer() do
+    let cron_type = "FireCron_" ++ uuid_v4()
+    let vault_key = "cron_fire_" ++ uuid_v4()
+    Vault.set(vault_key, "fired", false)
+
+    Conduit.CronRegistry.register(cron_type, Conduit.CronConfig.default(), fn _payload ->
+      Vault.set(vault_key, "fired", true)
+      Ok(())
+    end)
+    let result = Conduit.CronRegistry.fire(cron_type, "{}")
+    assert_ok(result)
+    assert_eq_bool(Vault.get(vault_key, "fired") |> unwrap_or(false), true)
+  end
+
+  fn test_cron_registry_fire_returns_discard_for_unknown() do
+    let result = Conduit.CronRegistry.fire("__no_such_cron__", "{}")
+    assert_err(result)
+    match result do
+      Err(ConduitError.Discard(_)) -> assert_true(true)
+      _                            -> assert_true(false)
+    end
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Phase 3: CronOverlap serialisation round-trip
+  -- ─────────────────────────────────────────────────────────────
+
+  fn test_cron_overlap_skip_round_trip() do
+    let s = Conduit.CronRegistry.overlap_to_string(Conduit.CronOverlap.Skip)
+    assert_eq_str(s, "skip")
+    let o = Conduit.CronRegistry.overlap_from_string(s)
+    match o do
+      Conduit.CronOverlap.Skip -> assert_true(true)
+      _                        -> assert_true(false)
+    end
+  end
+
+  fn test_cron_overlap_allow_round_trip() do
+    let s = Conduit.CronRegistry.overlap_to_string(Conduit.CronOverlap.Allow)
+    assert_eq_str(s, "allow")
+    let o = Conduit.CronRegistry.overlap_from_string(s)
+    match o do
+      Conduit.CronOverlap.Allow -> assert_true(true)
+      _                         -> assert_true(false)
+    end
+  end
+
+  fn test_cron_overlap_replace_round_trip() do
+    let s = Conduit.CronRegistry.overlap_to_string(Conduit.CronOverlap.Replace)
+    assert_eq_str(s, "replace")
+    let o = Conduit.CronRegistry.overlap_from_string(s)
+    match o do
+      Conduit.CronOverlap.Replace -> assert_true(true)
+      _                           -> assert_true(false)
+    end
+  end
+
+  fn test_cron_overlap_unknown_string_defaults_to_skip() do
+    let o = Conduit.CronRegistry.overlap_from_string("nonsense")
+    match o do
+      Conduit.CronOverlap.Skip -> assert_true(true)
+      _                        -> assert_true(false)
+    end
   end
 end

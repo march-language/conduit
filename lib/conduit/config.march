@@ -39,9 +39,10 @@ mod Conduit do
 
   doc "Application-level Conduit configuration, passed to Conduit.start/1."
   type Config = {
-    queues            : List(String),
-    workers_per_queue : Int,
-    poll_interval_ms  : Int
+    queues               : List(String),
+    workers_per_queue    : Int,
+    poll_interval_ms     : Int,
+    cron_tick_interval_ms: Int    -- how often the cron scheduler wakes (default 30s)
   }
 end
 
@@ -70,9 +71,10 @@ mod Conduit.Config do
   doc "Default application configuration."
   fn default() : Conduit.Config do
     {
-      queues            = Cons("default", Nil),
-      workers_per_queue = 5,
-      poll_interval_ms  = 1000
+      queues                = Cons("default", Nil),
+      workers_per_queue     = 5,
+      poll_interval_ms      = 1000,
+      cron_tick_interval_ms = 30000
     }
   end
 end

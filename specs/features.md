@@ -76,3 +76,59 @@
 ### Known gaps
 - `LISTEN/NOTIFY` — workers still poll; instant pickup deferred to Phase 3/5
 - Serialisation still uses `show/1` placeholder
+
+---
+
+## Phase 3 — Cron Scheduling ✅
+
+**Merged:** 2026-03-31
+
+### New types
+- `Conduit.CronOverlap` — `Skip | Allow | Replace`
+- `Conduit.CronConfig` — schedule string, timezone, queue, overlap, tags
+- `Conduit.CronSchedule` — internal DB row for `conduit_cron_schedules` (static and dynamic crons)
+
+### New interfaces
+- `Conduit.Cron(c)` — implement for a recurring job with no payload; provides `perform` and defaulted `config`
+- `Conduit.CronWithArgs(c)` — recurring job with a typed payload stored in the DB
+
+### New modules
+- `Conduit.CronRegistry` — in-process Vault map from cron_type → `(CronConfig, performer)`
+  - `register/3`, `lookup/1`, `fire/2`, `all/0`
+  - `overlap_to_string/1`, `overlap_from_string/1`
+- `Conduit.CronParser` — 5-field cron expression parser
+  - `next_run/2` — compute next fire time from a given DateTime (bounded to ~1 year)
+  - `parse/1` — parse expression into internal `Expr` type
+  - `matches/2` — check whether a DateTime satisfies a parsed expression
+  - Supports: `*`, `N`, `N-M`, `*/N`, `N-M/S`, `N,M,...`
+- `Conduit.CronScheduler` — background task that fires due crons
+  - `start/2` — spawn the scheduler task
+  - `upsert_static/3` — upsert a static cron into the DB at startup
+  - Tick loop: acquire Postgres advisory lock → load due schedules → handle overlap → enqueue → update next_run_at
+  - Multi-node safe via `pg_try_advisory_lock` (lock id 7326482)
+- `Conduit.CronConfig.default/0`
+
+### Storage additions (interface + Postgres impl)
+- `cron_upsert/2` — insert or update a cron schedule row
+- `cron_load_due/1` — load enabled schedules with `next_run_at <= NOW()`
+- `cron_load_by_id/2` — load a single schedule by id
+- `cron_mark_fired/4` — update `last_run_at`, `last_job_id`, `next_run_at`
+- `cron_job_active/2` — return true if a job is still pending/running/snoozed
+- `cron_cancel_job/2` — cancel a pending/running job (used by `Replace` overlap)
+- `cron_delete/2` — delete a cron schedule permanently
+- `cron_advisory_lock/2`, `cron_advisory_unlock/2`
+
+### Migration
+- `priv/migrations/20260401000003_conduit_cron.sql` — `conduit_cron_schedules` table + `idx_conduit_cron_due` index
+
+### Public API (`lib/conduit.march`)
+- `Conduit.start/2` — now also upserts static crons and launches the cron scheduler task
+- `Conduit.register_cron/3` — register a static cron (stored in CronRegistry)
+- `Conduit.schedule_cron/2` — insert/update a dynamic cron in the DB
+- `Conduit.pause_cron/2` — disable a cron schedule
+- `Conduit.resume_cron/2` — re-enable a paused cron schedule
+- `Conduit.cancel_cron/2` — permanently delete a cron schedule
+
+### Known gaps
+- Full IANA timezone support — scheduler stores timezone in DB but applies it as a UTC offset approximation; full TZ database support deferred to Phase 5+
+- `LISTEN/NOTIFY` push for instant cron tick — still polling

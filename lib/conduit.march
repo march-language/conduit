@@ -38,13 +38,17 @@ to `Conduit.start/2`. See lib/conduit/storage.march for the pluggable interface.
 
 mod Conduit do
   doc """
-  Start the Conduit worker pool.
+  Start the Conduit worker pool and cron scheduler.
 
-  `config`  — application config (queues, worker count, poll interval)
+  `config`  — application config (queues, worker count, poll interval, cron tick)
   `storage` — storage backend (e.g. Conduit.Storage.Postgres.Config)
 
-  Spawns `workers_per_queue` worker tasks per queue. Returns a list of all
-  task handles. In production, wrap this in a supervisor for auto-restart.
+  Spawns `workers_per_queue` worker tasks per queue and one cron scheduler task.
+  Returns a list of all task handles. In production, wrap this in a supervisor
+  for auto-restart.
+
+  Static crons registered via `Conduit.register_cron` are upserted into the DB
+  during startup so they survive node restarts.
 
   Example:
 
@@ -52,15 +56,29 @@ mod Conduit do
     Conduit.start(Conduit.Config.default(), storage)
   """
   fn start(config : Conduit.Config, storage) : List(Task) do
-    config.queues
-    |> List.flat_map(fn queue ->
-      Conduit.Worker.start_workers(
-        storage,
-        queue,
-        config.workers_per_queue,
-        config.poll_interval_ms
-      )
+    -- Upsert all registered static crons into the DB.
+    Conduit.CronRegistry.all()
+    |> List.each(fn entry ->
+      match Conduit.CronScheduler.upsert_static(storage, entry.cron_type, entry.config) do
+        Ok(())  -> ()
+        Err(e)  -> Logger.warn("conduit: upsert_static failed for " ++ entry.cron_type ++ ": " ++ e)
+      end
     end)
+
+    let worker_tasks =
+      config.queues
+      |> List.flat_map(fn queue ->
+        Conduit.Worker.start_workers(
+          storage,
+          queue,
+          config.workers_per_queue,
+          config.poll_interval_ms
+        )
+      end)
+
+    let cron_task = Conduit.CronScheduler.start(storage, config.cron_tick_interval_ms)
+
+    Cons(cron_task, worker_tasks)
   end
 
   doc """
@@ -131,5 +149,83 @@ mod Conduit do
   """
   fn register_default(job_type : String, performer : fn String -> Result((), ConduitError)) : () do
     Conduit.Queue.register_performer(job_type, performer, Conduit.JobConfig.default())
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Cron API (Phase 3)
+  -- ─────────────────────────────────────────────────────────────
+
+  doc """
+  Register a static cron at startup.
+
+  Static crons are defined in code; their schedule is upserted into the DB
+  each time `Conduit.start` is called, so they survive node restarts and
+  config changes.
+
+  `cron_type` — unique string name (e.g. "HourlyCleanupJob")
+  `config`    — CronConfig with schedule, timezone, queue, overlap
+  `performer` — fn(payload_string) -> Result((), ConduitError)
+
+  Example:
+
+    Conduit.register_cron("HourlyCleanupJob",
+      HourlyCleanupJob.config(HourlyCleanupJob),
+      fn _payload -> HourlyCleanupJob.perform(HourlyCleanupJob) end
+    )
+  """
+  fn register_cron(cron_type : String, config : Conduit.CronConfig, performer : fn String -> Result((), ConduitError)) : () do
+    Conduit.CronRegistry.register(cron_type, config, performer)
+  end
+
+  doc """
+  Insert or update a dynamic cron schedule in the DB at runtime.
+
+  Unlike static crons, dynamic crons are not registered in code; they are
+  created, modified, or removed via this API at runtime.
+
+  `storage` — storage backend
+  `sched`   — full CronSchedule row to upsert
+  """
+  fn schedule_cron(storage, sched : Conduit.CronSchedule) : Result((), String) do
+    Conduit.Storage.cron_upsert(storage, sched)
+  end
+
+  doc "Disable a cron schedule by id."
+  fn pause_cron(storage, cron_id : String) : Result((), String) do
+    Conduit.Storage.cron_upsert(storage, pcron_set_enabled(storage, cron_id, false))
+    |> Result.map(fn _ -> () end)
+  end
+
+  doc "Re-enable a paused cron schedule by id."
+  fn resume_cron(storage, cron_id : String) : Result((), String) do
+    Conduit.Storage.cron_upsert(storage, pcron_set_enabled(storage, cron_id, true))
+    |> Result.map(fn _ -> () end)
+  end
+
+  doc "Cancel a cron schedule permanently (deletes the DB row)."
+  fn cancel_cron(storage, cron_id : String) : Result((), String) do
+    Conduit.Storage.cron_delete(storage, cron_id)
+  end
+
+  pfn pcron_set_enabled(storage, cron_id : String, enabled : Bool) : Conduit.CronSchedule do
+    -- Load the schedule row; update just the enabled flag.
+    -- If the schedule is not found we fall back to a sentinel that will be ignored.
+    match Conduit.Storage.cron_load_by_id(storage, cron_id) do
+      Ok(Some(sched)) -> { ..sched, enabled = enabled }
+      _               -> {
+        id          = cron_id,
+        job_type    = cron_id,
+        schedule    = "* * * * *",
+        timezone    = "UTC",
+        queue       = "default",
+        payload     = "{}",
+        overlap     = "skip",
+        enabled     = enabled,
+        last_run_at = None,
+        last_job_id = None,
+        next_run_at = None,
+        tags        = Nil
+      }
+    end
   end
 end

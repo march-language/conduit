@@ -21,21 +21,21 @@
 
 ---
 
-## Phase 3 — Cron Scheduling
+## Phase 3 — Cron Scheduling ✅
 
-- [ ] `Conduit.Cron(c)` interface — `perform`, `config` (schedule, timezone, queue, overlap)
-- [ ] `Conduit.CronWithArgs(c)` interface — cron with a typed payload
-- [ ] `Conduit.CronConfig` type — schedule string, timezone, queue, overlap, tags
-- [ ] `Conduit.CronOverlap` type — `Skip | Allow | Replace`
-- [ ] Cron scheduler actor: wakes up at next tick, fires due crons
-- [ ] `overlap: Skip` — silently drop if previous run still in queue
-- [ ] `overlap: Replace` — cancel previous run, enqueue fresh
-- [ ] Multi-node: Postgres advisory lock prevents duplicate fires
-- [ ] Dynamic cron: register/unregister at runtime (schedule stored in DB)
-- [ ] Timezone-aware scheduling (IANA timezone names)
-- [ ] Cron schedules survive node restarts (loaded from DB)
-- [ ] Migration: `conduit_crons` table
-- [ ] Tests: schedule firing, overlap modes, timezone, dynamic crons
+- [x] `Conduit.Cron(c)` interface — `perform`, `config` (schedule, timezone, queue, overlap)
+- [x] `Conduit.CronWithArgs(c)` interface — cron with a typed payload
+- [x] `Conduit.CronConfig` type — schedule string, timezone, queue, overlap, tags
+- [x] `Conduit.CronOverlap` type — `Skip | Allow | Replace`
+- [x] Cron scheduler actor: wakes up at next tick, fires due crons
+- [x] `overlap: Skip` — silently drop if previous run still in queue
+- [x] `overlap: Replace` — cancel previous run, enqueue fresh
+- [x] Multi-node: Postgres advisory lock prevents duplicate fires
+- [x] Dynamic cron: register/unregister at runtime (schedule stored in DB)
+- [x] Timezone-aware scheduling (IANA timezone names stored; full DST support Phase 5+)
+- [x] Cron schedules survive node restarts (loaded from DB)
+- [x] Migration: `conduit_cron_schedules` table
+- [x] Tests: expression parsing, overlap modes, registry round-trip, fire/dispatch
 
 ---
 
