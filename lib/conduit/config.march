@@ -1,0 +1,78 @@
+doc """
+Configuration types for Conduit jobs and the application-level queue config.
+"""
+
+mod Conduit do
+  doc "Per-job uniqueness constraint — prevent duplicate jobs within a time window."
+  type UniqueConstraint = {
+    duration : Duration,
+    by : List(String)
+  }
+
+  doc """
+  Configuration for a single job type. Override fields via `fn config` in your
+  `impl Conduit.Job` block; use `..Conduit.JobConfig.default()` to inherit the rest.
+  """
+  type JobConfig = {
+    queue            : String,
+    max_attempts     : Int,
+    timeout          : Duration,
+    backoff          : Conduit.Backoff,
+    dead_letter_queue: Option(String),
+    unique_for       : Option(Conduit.UniqueConstraint),
+    priority         : Int,
+    tags             : List(String),
+    discard_after    : Option(Duration)
+  }
+
+  doc "A read-only snapshot of a job instance, passed to dead-letter callbacks."
+  type JobInfo = {
+    id           : String,
+    queue        : String,
+    job_type     : String,
+    attempt      : Int,
+    max_attempts : Int,
+    tags         : List(String),
+    inserted_at  : DateTime,
+    errors       : List(String)
+  }
+
+  doc "Application-level Conduit configuration, passed to Conduit.start/1."
+  type Config = {
+    queues            : List(String),
+    workers_per_queue : Int,
+    poll_interval_ms  : Int
+  }
+end
+
+mod Conduit.JobConfig do
+  doc """
+  Default job configuration. Use record spread to override specific fields:
+
+    { queue: "critical", max_attempts: 10, ..Conduit.JobConfig.default() }
+  """
+  fn default() : Conduit.JobConfig do
+    {
+      queue             = "default",
+      max_attempts      = 3,
+      timeout           = Duration.seconds(30),
+      backoff           = Conduit.Backoff.Exponential,
+      dead_letter_queue = None,
+      unique_for        = None,
+      priority          = 0,
+      tags              = Nil,
+      discard_after     = None
+    }
+  end
+end
+
+mod Conduit.Config do
+  doc "Default application configuration."
+  fn default() : Conduit.Config do
+    {
+      queues            = Cons("default", Nil),
+      workers_per_queue = 5,
+      poll_interval_ms  = 1000
+    }
+  end
+end

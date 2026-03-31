@@ -1,0 +1,122 @@
+doc """
+Conduit.Worker — polls the queue and executes jobs.
+
+Each worker is a long-lived task that loops:
+  1. Fetch the next available job from its assigned queue (SKIP LOCKED)
+  2. Mark it as running
+  3. Validate args (if a schema is configured)
+  4. Dispatch to the registered performer
+  5. Mark completed or failed based on the result
+  6. Handle ConduitError variants (retry scheduling, discard, snooze)
+  7. Sleep briefly and repeat
+
+Workers are supervised by Conduit.start/1. If a worker task crashes, the
+supervisor restarts it. Jobs left in 'running' state by a crashed worker are
+rescued by the stale-job detector (Phase 2).
+
+Concurrency: `workers_per_queue` independent tasks run per queue. They race for
+jobs via SKIP LOCKED — no additional coordination needed.
+"""
+
+mod Conduit.Worker do
+  doc """
+  Start `count` worker tasks for the given queue.
+  Returns a list of task handles (fire-and-forget; they loop indefinitely).
+  """
+  fn start_workers(storage, queue : String, count : Int, poll_interval_ms : Int) : List(Task) do
+    List.range(0, count - 1)
+    |> List.map(fn _ ->
+      task_spawn(fn () -> worker_loop(storage, queue, poll_interval_ms))
+    end)
+  end
+
+  pfn worker_loop(storage, queue : String, poll_interval_ms : Int) : () do
+    match Conduit.Storage.fetch_next(storage, queue) do
+      Err(e) ->
+        Logger.error("conduit: fetch_next error on queue " ++ queue ++ ": " ++ e)
+        psleep_ms(poll_interval_ms)
+        worker_loop(storage, queue, poll_interval_ms)
+      Ok(None) ->
+        -- No jobs ready; yield and wait before polling again.
+        -- Phase 2: replace with LISTEN/NOTIFY for immediate pickup.
+        psleep_ms(poll_interval_ms)
+        worker_loop(storage, queue, poll_interval_ms)
+      Ok(Some(job)) ->
+        execute(storage, job)
+        worker_loop(storage, queue, poll_interval_ms)
+    end
+  end
+
+  pfn execute(storage, job : Conduit.JobRow) : () do
+    let worker_id = uuid_v4()
+
+    -- Claim the job
+    match Conduit.Storage.mark_running(storage, job.id, worker_id) do
+      Err(e) ->
+        Logger.warn("conduit: could not mark job running " ++ job.id ++ ": " ++ e)
+      Ok(()) ->
+        let result = Conduit.Queue.dispatch(job.job_type, job.payload)
+        handle_result(storage, job, result)
+    end
+  end
+
+  pfn handle_result(storage, job : Conduit.JobRow, result : Result((), ConduitError)) : () do
+    match result do
+      Ok(()) ->
+        match Conduit.Storage.mark_completed(storage, job.id) do
+          Ok(())  -> ()
+          Err(e)  -> Logger.error("conduit: mark_completed failed for " ++ job.id ++ ": " ++ e)
+        end
+
+      Err(ConduitError.Retry(msg)) ->
+        pschedule_retry(storage, job, msg)
+
+      Err(ConduitError.Discard(msg)) ->
+        Logger.info("conduit: discarding job " ++ job.id ++ " (" ++ job.job_type ++ "): " ++ msg)
+        match Conduit.Storage.mark_failed(storage, job.id, "discarded: " ++ msg) do
+          Ok(())  -> ()
+          Err(e)  -> Logger.error("conduit: mark_failed (discard) error for " ++ job.id ++ ": " ++ e)
+        end
+
+      Err(ConduitError.Snooze(dur)) ->
+        let wake_at = DateTime.add(DateTime.now(), dur)
+        match Conduit.Storage.mark_snoozed(storage, job.id, wake_at) do
+          Ok(())  -> ()
+          Err(e)  -> Logger.error("conduit: mark_snoozed error for " ++ job.id ++ ": " ++ e)
+        end
+
+      Err(ConduitError.WorkerError(msg)) ->
+        Logger.error("conduit: worker error on job " ++ job.id ++ ": " ++ msg)
+        pschedule_retry(storage, job, "worker error: " ++ msg)
+    end
+  end
+
+  pfn pschedule_retry(storage, job : Conduit.JobRow, error_msg : String) : () do
+    match Conduit.Storage.mark_failed(storage, job.id, error_msg) do
+      Err(e) ->
+        Logger.error("conduit: mark_failed error for " ++ job.id ++ ": " ++ e)
+      Ok(()) ->
+        -- If there are attempts remaining, reschedule with backoff.
+        -- The storage's mark_failed transitions to 'dead' when attempt >= max_attempts.
+        -- Workers re-pick up 'failed' jobs on the next poll (run_at scheduling
+        -- based on backoff is applied via a separate UPDATE in Phase 2).
+        ()
+    end
+  end
+
+  -- Portable millisecond sleep via task_yield loop.
+  -- Phase 2: replace with a proper timer/sleep primitive.
+  pfn psleep_ms(ms : Int) : () do
+    let iterations = int_div(ms, 10)
+    psleep_loop(iterations)
+  end
+
+  pfn psleep_loop(n : Int) : () do
+    if n <= 0 do
+      ()
+    else
+      task_yield()
+      psleep_loop(n - 1)
+    end
+  end
+end

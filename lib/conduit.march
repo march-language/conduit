@@ -1,0 +1,124 @@
+doc """
+Conduit — job queue and durable workflow platform for March.
+
+## Quick start
+
+Define a job:
+
+  mod SendWelcomeEmail do
+    type Args = { user_id: Int, email: String, name: String }
+
+    impl Conduit.Job(SendWelcomeEmail) do
+      fn perform(_self, args : Args) -> Result((), ConduitError) do
+        Email.send(to: args.email, subject: "Welcome!", body: "Hi " ++ args.name)
+      end
+    end
+  end
+
+Start Conduit at application boot (registers workers for all queues):
+
+  Conduit.start({ queues: ["default"], workers_per_queue: 5, poll_interval_ms: 1000 })
+
+Enqueue from anywhere:
+
+  Conduit.enqueue(SendWelcomeEmail, "SendWelcomeEmail", show(args))
+  Conduit.enqueue_in(SendWelcomeEmail, "SendWelcomeEmail", show(args), Duration.minutes(5))
+
+## Serialization (Phase 1)
+
+Args are currently serialised via `show/1` (a human-readable string). Phase 2
+will replace this with derived JSON encode/decode based on the Args type,
+matching the typed-payload guarantee described in the design spec.
+
+## Storage
+
+The default backend is Postgres. Pass a `Conduit.Storage.Postgres.Config`
+to `Conduit.start/2`. See lib/conduit/storage.march for the pluggable interface.
+"""
+
+mod Conduit do
+  doc """
+  Start the Conduit worker pool.
+
+  `config`  — application config (queues, worker count, poll interval)
+  `storage` — storage backend (e.g. Conduit.Storage.Postgres.Config)
+
+  Spawns `workers_per_queue` worker tasks per queue. Returns a list of all
+  task handles. In production, wrap this in a supervisor for auto-restart.
+
+  Example:
+
+    let storage = { repo: MyApp.Repo }
+    Conduit.start(Conduit.Config.default(), storage)
+  """
+  fn start(config : Conduit.Config, storage) : List(Task) do
+    config.queues
+    |> List.flat_map(fn queue ->
+      Conduit.Worker.start_workers(
+        storage,
+        queue,
+        config.workers_per_queue,
+        config.poll_interval_ms
+      )
+    end)
+  end
+
+  doc """
+  Enqueue a job for immediate execution. Returns the job id on success.
+
+  `_job`     — the job module (used only to fetch config; conventionally passed
+               as the module value, e.g. `SendWelcomeEmail`)
+  `job_type` — string name of the job module ("SendWelcomeEmail")
+  `payload`  — serialised args string (Phase 1: use `show(args)`)
+  `storage`  — storage backend
+
+  Phase 2 will provide a typed wrapper:
+    Conduit.enqueue(SendWelcomeEmail, args)
+  """
+  fn enqueue(_job, job_type : String, payload : String, storage) : Result(String, String) do
+    let config = Conduit.JobConfig.default()
+    Conduit.Queue.enqueue(storage, job_type, payload, config)
+  end
+
+  doc """
+  Enqueue a job with an explicit JobConfig. Use this when you need to
+  override queue, priority, max_attempts, etc.
+  """
+  fn enqueue_with(job_type : String, payload : String, config : Conduit.JobConfig, storage) : Result(String, String) do
+    Conduit.Queue.enqueue(storage, job_type, payload, config)
+  end
+
+  doc """
+  Enqueue a job to run after `delay`. Returns the job id on success.
+  """
+  fn enqueue_in(_job, job_type : String, payload : String, delay : Duration, storage) : Result(String, String) do
+    let config = Conduit.JobConfig.default()
+    Conduit.Queue.enqueue_in(storage, job_type, payload, delay, config)
+  end
+
+  doc """
+  Enqueue a job to run after `delay` with explicit config.
+  """
+  fn enqueue_in_with(job_type : String, payload : String, delay : Duration, config : Conduit.JobConfig, storage) : Result(String, String) do
+    Conduit.Queue.enqueue_in(storage, job_type, payload, delay, config)
+  end
+
+  doc """
+  Register a job performer in the in-process registry. Must be called before
+  any worker can execute jobs of that type.
+
+  `job_type`  — string name of the job module
+  `performer` — fn (payload_string) -> Result((), ConduitError)
+
+  In Phase 2, this will be automated via the `impl Conduit.Job` macro.
+  For Phase 1, call this at startup for each job type:
+
+    Conduit.register("SendWelcomeEmail", fn payload ->
+      let args = todo("deserialise payload into SendWelcomeEmail.Args")
+      SendWelcomeEmail.perform(SendWelcomeEmail, args)
+    end)
+  """
+  fn register(job_type : String, performer : fn String -> Result((), ConduitError)) : () do
+    Conduit.Queue.register_performer(job_type, performer)
+  end
+end

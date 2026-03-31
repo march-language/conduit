@@ -1,0 +1,51 @@
+doc """
+Conduit.Schema provides optional argument validation for jobs.
+
+Validation runs before `perform` is called. A validation failure discards the
+job immediately (no retries) — it signals that the arguments are structurally
+invalid, not that execution failed.
+
+Usage:
+
+  impl Conduit.Job(MyJob) do
+    fn schema(_self) : Conduit.Schema(Args) do
+      Conduit.Schema.build(fn args ->
+        if String.is_empty(args.email) do
+          Err("email is required")
+        else
+          Ok(())
+        end
+      end)
+    end
+  end
+"""
+
+mod Conduit do
+  doc "Opaque validation schema for a job's Args type."
+  type Schema(a) = {
+    validator : Option(fn a -> Result((), String))
+  }
+end
+
+mod Conduit.Schema do
+  doc "No validation — all args pass through unchanged."
+  fn none() : Conduit.Schema(a) do
+    { validator = None }
+  end
+
+  doc "Build a schema from a validation function."
+  fn build(f : fn a -> Result((), String)) : Conduit.Schema(a) do
+    { validator = Some(f) }
+  end
+
+  doc """
+  Run validation against args. Returns Ok(()) when valid or when no validator
+  is set. Used internally by the worker before dispatching to perform.
+  """
+  fn validate(schema : Conduit.Schema(a), args : a) : Result((), String) do
+    match schema.validator do
+      None    -> Ok(())
+      Some(f) -> f(args)
+    end
+  end
+end

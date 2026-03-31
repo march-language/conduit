@@ -1,0 +1,101 @@
+doc """
+Conduit.Queue — database-level queue operations.
+
+Handles the translation between typed job definitions and database rows.
+All queue operations go through the configured Storage backend.
+
+Conduit.Queue also maintains the job performer registry — a Vault-backed map
+from `job_type` string to a performer closure. The performer captures the
+deserialization and dispatch logic for a specific job module.
+
+Serialization note (Phase 1):
+  Args are serialized via `show(args)` — a human-readable string representation.
+  Phase 2 will replace this with proper JSON encode/decode derived from the Args type.
+"""
+
+mod Conduit.Queue do
+  -- Performer: fn (payload_string) -> Result((), ConduitError)
+  -- Registered per job_type when enqueue is first called.
+  ptype Performer = Performer(fn String -> Result((), ConduitError))
+
+  doc """
+  Enqueue a job for immediate execution. Returns the job id on success.
+
+  `job_type` is the string name of the job module (e.g. "SendWelcomeEmail").
+  `payload`  is the serialised args (JSON string).
+  `config`   is the job's JobConfig.
+  `storage`  is the storage backend instance.
+  """
+  fn enqueue(storage, job_type : String, payload : String, config : Conduit.JobConfig) : Result(String, String) do
+    let id  = uuid_v4()
+    let now = DateTime.now()
+    let row = {
+      id           = id,
+      queue        = config.queue,
+      job_type     = job_type,
+      payload      = payload,
+      status       = "pending",
+      attempt      = 0,
+      max_attempts = config.max_attempts,
+      priority     = config.priority,
+      inserted_at  = now,
+      scheduled_at = now,
+      run_at       = now,
+      started_at   = None,
+      completed_at = None,
+      heartbeat_at = None,
+      worker_id    = None,
+      errors       = Nil,
+      tags         = config.tags
+    }
+    Conduit.Storage.enqueue(storage, row)
+  end
+
+  doc """
+  Enqueue a job to run after `delay` has elapsed. Returns the job id.
+  """
+  fn enqueue_in(storage, job_type : String, payload : String, delay : Duration, config : Conduit.JobConfig) : Result(String, String) do
+    let id     = uuid_v4()
+    let now    = DateTime.now()
+    let run_at = DateTime.add(now, delay)
+    let row = {
+      id           = id,
+      queue        = config.queue,
+      job_type     = job_type,
+      payload      = payload,
+      status       = "pending",
+      attempt      = 0,
+      max_attempts = config.max_attempts,
+      priority     = config.priority,
+      inserted_at  = now,
+      scheduled_at = now,
+      run_at       = run_at,
+      started_at   = None,
+      completed_at = None,
+      heartbeat_at = None,
+      worker_id    = None,
+      errors       = Nil,
+      tags         = config.tags
+    }
+    Conduit.Storage.enqueue(storage, row)
+  end
+
+  doc "Register a performer function for a job type. Called at enqueue time."
+  fn register_performer(job_type : String, performer : fn String -> Result((), ConduitError)) : () do
+    Vault.set(registry_key(), job_type, Performer(performer))
+  end
+
+  doc "Dispatch a job to its registered performer. Called by the worker."
+  fn dispatch(job_type : String, payload : String) : Result((), ConduitError) do
+    match Vault.get(registry_key(), job_type) do
+      None ->
+        Err(ConduitError.Discard("No performer registered for job type: " ++ job_type))
+      Some(Performer(f)) ->
+        f(payload)
+    end
+  end
+
+  pfn registry_key() : String do
+    "conduit_performer_registry"
+  end
+end

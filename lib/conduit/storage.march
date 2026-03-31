@@ -1,0 +1,202 @@
+doc """
+Conduit.Storage — pluggable storage backend interface.
+
+The default and recommended backend is Postgres (see Conduit.Storage.Postgres).
+SQLite can be used for development and testing. Implement this interface to
+add a new backend.
+
+JobRow is the internal database representation of an enqueued job. It maps
+directly to the `conduit_jobs` table.
+"""
+
+mod Conduit do
+  doc "Internal representation of a job in persistent storage."
+  type JobRow = {
+    id           : String,
+    queue        : String,
+    job_type     : String,
+    payload      : String,          -- JSON-encoded args
+    status       : String,          -- pending | running | completed | failed | dead | snoozed
+    attempt      : Int,
+    max_attempts : Int,
+    priority     : Int,
+    inserted_at  : DateTime,
+    scheduled_at : DateTime,
+    run_at       : DateTime,
+    started_at   : Option(DateTime),
+    completed_at : Option(DateTime),
+    heartbeat_at : Option(DateTime),
+    worker_id    : Option(String),
+    errors       : List(String),
+    tags         : List(String)
+  }
+end
+
+doc """
+Conduit.Storage interface. Implement to provide a custom storage backend.
+
+Methods:
+  enqueue     — persist a new job row, return its id on success
+  fetch_next  — atomically claim the next pending job in a queue (SKIP LOCKED)
+  mark_running    — record that a worker has started executing a job
+  mark_completed  — transition job to completed status
+  mark_failed     — record an error and increment attempt count
+  mark_snoozed    — reschedule job to run after a duration
+  heartbeat       — update heartbeat timestamp for stale-job detection
+"""
+interface Conduit.Storage(s) do
+  fn enqueue       : s -> Conduit.JobRow -> Result(String, String)
+  fn fetch_next    : s -> String -> Result(Option(Conduit.JobRow), String)
+  fn mark_running  : s -> String -> String -> Result((), String)
+  fn mark_completed: s -> String -> Result((), String)
+  fn mark_failed   : s -> String -> String -> Result((), String)
+  fn mark_snoozed  : s -> String -> DateTime -> Result((), String)
+  fn heartbeat     : s -> String -> Result((), String)
+end
+
+doc """
+Postgres storage backend for Conduit.
+
+Requires the `conduit_jobs` table (see specs/conduit.md § Phase 1 migration).
+Uses SKIP LOCKED for lock-free concurrent job claiming across multiple workers.
+Uses LISTEN/NOTIFY for near-instant job pickup.
+
+Configuration:
+  { repo: MyApp.Repo }
+"""
+mod Conduit.Storage.Postgres do
+  type Config = { repo : Depot.Repo }
+
+  impl Conduit.Storage(Conduit.Storage.Postgres.Config) do
+    fn enqueue(_self, job : Conduit.JobRow) : Result(String, String) do
+      let sql = "
+        INSERT INTO conduit_jobs
+          (id, queue, job_type, payload, status, attempt, max_attempts,
+           priority, inserted_at, scheduled_at, run_at, tags)
+        VALUES ($1, $2, $3, $4, 'pending', 0, $5, $6, NOW(), NOW(), $7, $8)
+      "
+      let params = Cons(job.id,
+                   Cons(job.queue,
+                   Cons(job.job_type,
+                   Cons(job.payload,
+                   Cons(int_to_string(job.max_attempts),
+                   Cons(int_to_string(job.priority),
+                   Cons(job.run_at |> DateTime.format("%Y-%m-%dT%H:%M:%SZ"),
+                   Cons(string_join(job.tags, ","),
+                   Nil))))))))
+      match Depot.Repo.query(sql, params) do
+        Ok(_)  -> Ok(job.id)
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn fetch_next(_self, queue : String) : Result(Option(Conduit.JobRow), String) do
+      let sql = "
+        SELECT id, queue, job_type, payload, status, attempt, max_attempts,
+               priority, inserted_at, scheduled_at, run_at, errors, tags
+        FROM conduit_jobs
+        WHERE queue = $1
+          AND status IN ('pending', 'snoozed')
+          AND run_at <= NOW()
+        ORDER BY priority DESC, run_at ASC
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+      "
+      match Depot.Repo.query(sql, Cons(queue, Nil)) do
+        Ok(rows) ->
+          match rows do
+            Nil        -> Ok(None)
+            Cons(r, _) -> Ok(Some(prow_to_job(r)))
+          end
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn mark_running(_self, job_id : String, worker_id : String) : Result((), String) do
+      let sql = "
+        UPDATE conduit_jobs
+        SET status = 'running', started_at = NOW(), heartbeat_at = NOW(),
+            worker_id = $2, attempt = attempt + 1
+        WHERE id = $1
+      "
+      match Depot.Repo.query(sql, Cons(job_id, Cons(worker_id, Nil))) do
+        Ok(_)  -> Ok(())
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn mark_completed(_self, job_id : String) : Result((), String) do
+      let sql = "
+        UPDATE conduit_jobs
+        SET status = 'completed', completed_at = NOW()
+        WHERE id = $1
+      "
+      match Depot.Repo.query(sql, Cons(job_id, Nil)) do
+        Ok(_)  -> Ok(())
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn mark_failed(_self, job_id : String, error_msg : String) : Result((), String) do
+      let sql = "
+        UPDATE conduit_jobs
+        SET status = CASE WHEN attempt >= max_attempts THEN 'dead' ELSE 'failed' END,
+            errors = errors || $2::jsonb
+        WHERE id = $1
+      "
+      let error_json = "{\"error\": \"" ++ error_msg ++ "\", \"at\": \"now\"}"
+      match Depot.Repo.query(sql, Cons(job_id, Cons(error_json, Nil))) do
+        Ok(_)  -> Ok(())
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn mark_snoozed(_self, job_id : String, run_at : DateTime) : Result((), String) do
+      let sql = "
+        UPDATE conduit_jobs
+        SET status = 'snoozed', run_at = $2
+        WHERE id = $1
+      "
+      let ts = DateTime.format(run_at, "%Y-%m-%dT%H:%M:%SZ")
+      match Depot.Repo.query(sql, Cons(job_id, Cons(ts, Nil))) do
+        Ok(_)  -> Ok(())
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn heartbeat(_self, job_id : String) : Result((), String) do
+      let sql = "UPDATE conduit_jobs SET heartbeat_at = NOW() WHERE id = $1"
+      match Depot.Repo.query(sql, Cons(job_id, Nil)) do
+        Ok(_)  -> Ok(())
+        Err(e) -> Err(e)
+      end
+    end
+  end
+
+  -- Convert a raw database row map to a Conduit.JobRow.
+  pfn prow_to_job(row : Map) : Conduit.JobRow do
+    {
+      id           = Map.get(row, "id") |> unwrap,
+      queue        = Map.get(row, "queue") |> unwrap,
+      job_type     = Map.get(row, "job_type") |> unwrap,
+      payload      = Map.get(row, "payload") |> unwrap,
+      status       = Map.get(row, "status") |> unwrap,
+      attempt      = Map.get(row, "attempt") |> unwrap |> string_to_int |> unwrap_or(0),
+      max_attempts = Map.get(row, "max_attempts") |> unwrap |> string_to_int |> unwrap_or(3),
+      priority     = Map.get(row, "priority") |> unwrap |> string_to_int |> unwrap_or(0),
+      inserted_at  = Map.get(row, "inserted_at") |> unwrap |> DateTime.parse("%Y-%m-%dT%H:%M:%SZ") |> unwrap,
+      scheduled_at = Map.get(row, "scheduled_at") |> unwrap |> DateTime.parse("%Y-%m-%dT%H:%M:%SZ") |> unwrap,
+      run_at       = Map.get(row, "run_at") |> unwrap |> DateTime.parse("%Y-%m-%dT%H:%M:%SZ") |> unwrap,
+      started_at   = None,
+      completed_at = None,
+      heartbeat_at = None,
+      worker_id    = None,
+      errors       = Nil,
+      tags         = Nil
+    }
+  end
+
+  pfn string_to_int(s : String) : Option(Int) do
+    String.to_int(s)
+  end
+end

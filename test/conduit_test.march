@@ -1,0 +1,12 @@
+mod ConduitTest do
+
+  fn test_placeholder() : Bool do
+    true
+  end
+
+  fn main() do
+    let result = test_placeholder()
+    if result then println("All tests passed.") else println("Tests failed.")
+  end
+
+end

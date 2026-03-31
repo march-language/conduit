@@ -1,0 +1,9 @@
+[package]
+name = "conduit"
+version = "0.1.0"
+type = "lib"
+description = "Job and workflow platform for March"
+author = ""
+
+[deps]
+depot = { path = "../depot" }

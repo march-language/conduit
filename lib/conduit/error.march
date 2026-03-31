@@ -1,0 +1,15 @@
+doc """
+ConduitError controls retry behavior from within a job's perform function.
+
+Return one of these from perform to direct what happens next:
+  - Retry(msg)   — transient failure; retry with the job's configured backoff
+  - Discard(msg) — permanent failure; do not retry, move to dead-letter queue
+  - Snooze(dur)  — reschedule to run after the given duration (e.g. rate limits)
+  - WorkerError  — unexpected worker-level error unrelated to job logic
+"""
+
+type ConduitError =
+  Retry(String)
+  | Discard(String)
+  | Snooze(Duration)
+  | WorkerError(String)

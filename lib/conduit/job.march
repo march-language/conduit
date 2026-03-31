@@ -1,0 +1,49 @@
+doc """
+Conduit.Job interface — implement this to define a background job.
+
+Minimal example:
+
+  mod SendWelcomeEmail do
+    type Args = { user_id: Int, email: String, name: String }
+
+    impl Conduit.Job(SendWelcomeEmail) do
+      fn perform(_self, args : Args) -> Result((), ConduitError) do
+        Email.send(to: args.email, subject: "Welcome!", body: "Hi " ++ args.name)
+      end
+    end
+  end
+
+Then enqueue from anywhere:
+
+  Conduit.enqueue(SendWelcomeEmail, { user_id: 42, email: "a@b.com", name: "Alice" })
+
+Override `fn config` to customise queue, retries, backoff, etc.
+Override `fn schema` to add argument validation before perform runs.
+
+The type parameter `j` is the module implementing this interface (the job module
+itself). Methods take `j` as their first argument, which is always passed as the
+module value and conventionally named `_self` when unused.
+"""
+
+interface Conduit.Job(j) do
+  -- Associated type: the serialisable arguments struct for this job.
+  type Args
+
+  -- Execute the job. Return Ok(()) on success.
+  -- Return Err(ConduitError.Retry(...))   to retry with configured backoff.
+  -- Return Err(ConduitError.Discard(...)) to discard permanently.
+  -- Return Err(ConduitError.Snooze(dur))  to reschedule after `dur`.
+  fn perform : j -> Args -> Result((), ConduitError)
+
+  -- Return the configuration for this job type.
+  -- Override to customise queue, max_attempts, backoff, etc.
+  fn config : j -> Conduit.JobConfig do
+    Conduit.JobConfig.default()
+  end
+
+  -- Return an optional schema for validating args before perform is called.
+  -- Validation failure discards the job immediately (no retries).
+  fn schema : j -> Conduit.Schema(Args) do
+    Conduit.Schema.none()
+  end
+end
