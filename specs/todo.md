@@ -84,16 +84,21 @@
 
 ---
 
-## Phase 6 — Bastion Dashboard
+## Phase 6 — Bastion Dashboard ✅
 
-- [ ] Separate `conduit_dashboard` package (no hard Bastion dep in core)
-- [ ] Dashboard router: `forward "/conduit", Conduit.Dashboard.Router`
-- [ ] Standalone mode: `Conduit.Dashboard.start_standalone/1`
-- [ ] Pages: queue overview, job list, job detail, dead letters, workflows, crons
-- [ ] Admin actions: retry job, cancel job, delete job, replay dead letter
-- [ ] Real-time updates via `LISTEN/NOTIFY` or polling
-- [ ] Pluggable auth adapter
-- [ ] Charts: throughput, latency, error rate
+- [x] Dashboard router: `Conduit.Dashboard.Router.handle/4` (embed via `forward` or use standalone)
+- [x] Standalone mode: `Conduit.Dashboard.start_standalone/3`
+- [x] Pages: queue overview, queue detail, job detail, dead letters, workflows, crons, nodes
+- [x] Admin actions: retry job, cancel job, delete job, retry/delete dead letter, retry-all, trigger cron, pause/resume/delete cron, cancel workflow
+- [x] Real-time updates: 5-second JS polling of `/api/summary` (LISTEN/NOTIFY deferred — needs dedicated non-pooled connection)
+- [x] Pluggable auth adapter: `Auth.None | Auth.Token(t) | Auth.Fn(f)`
+- [x] Per-queue aggregate stats: pending, running, failed, dead, throughput (24h), avg latency
+- [x] Storage additions: queue_summary, jobs_list, dead_letter_list/load, job_retry/cancel/delete, dl_delete, notify_subscribe
+- [x] Tests: QueueSummary type, Auth variants, Actions (retry/cancel/delete/dl), Queries via fake storage
+- [ ] Workflow list page (requires dashboard_workflows_list storage method — deferred)
+- [ ] Charts: throughput sparklines, error rate — deferred
+- [ ] Schema-aware job enqueue form — deferred
+- [ ] Separate `conduit_dashboard` package — deferred (lives in core for now)
 
 ---
 

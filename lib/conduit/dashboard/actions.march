@@ -1,0 +1,102 @@
+mod Conduit.Dashboard.Actions do
+  doc "Retry a job: reset to pending with attempt = 0."
+  fn retry_job(storage, job_id : String) : Result((), String) do
+    Conduit.Storage.job_retry(storage, job_id)
+  end
+
+  doc "Cancel a job: set status = dead."
+  fn cancel_job(storage, job_id : String) : Result((), String) do
+    Conduit.Storage.job_cancel(storage, job_id, "admin_cancel")
+  end
+
+  doc "Hard-delete a job row."
+  fn delete_job(storage, job_id : String) : Result((), String) do
+    Conduit.Storage.job_delete(storage, job_id)
+  end
+
+  doc """
+  Retry a dead letter: re-enqueue the original job with a fresh attempt count
+  and delete the dead letter entry.
+
+  Returns the new job id on success.
+  """
+  fn retry_dead_letter(storage, dl_id : String) : Result(String, String) do
+    match Conduit.Storage.dead_letter_load(storage, dl_id) do
+      Err(e)     -> Err(e)
+      Ok(None)   -> Err("dead letter not found: " ++ dl_id)
+      Ok(Some(dl)) ->
+        let config = Conduit.JobConfig.default()
+        let job_config = { ..config, queue = dl.queue }
+        match Conduit.Queue.enqueue(storage, dl.job_type, dl.payload, job_config) do
+          Err(e)       -> Err(e)
+          Ok(new_id) ->
+            match Conduit.Storage.dead_letter_delete(storage, dl_id) do
+              Err(e) ->
+                Logger.warn("conduit_dashboard: retry_dead_letter: could not delete DL " ++ dl_id ++ ": " ++ e)
+                Ok(new_id)    -- job was re-enqueued; deletion failure is non-fatal
+              Ok(()) -> Ok(new_id)
+            end
+        end
+    end
+  end
+
+  doc "Delete a dead letter entry."
+  fn delete_dead_letter(storage, dl_id : String) : Result((), String) do
+    Conduit.Storage.dead_letter_delete(storage, dl_id)
+  end
+
+  doc """
+  Retry all dead letters in the table.
+
+  Iterates through each and calls retry_dead_letter/2. Returns the list of
+  newly enqueued job ids. Errors per entry are logged and skipped.
+  """
+  fn retry_all_dead_letters(storage) : List(String) do
+    let dls = match Conduit.Storage.dead_letter_list(storage, 1) do
+      Ok(rows) -> rows
+      Err(e)   ->
+        Logger.warn("conduit_dashboard: retry_all: load failed: " ++ e)
+        Nil
+    end
+    List.filter_map(dls, fn dl ->
+      match retry_dead_letter(storage, dl.id) do
+        Ok(new_id) -> Some(new_id)
+        Err(e) ->
+          Logger.warn("conduit_dashboard: retry_all: skipping " ++ dl.id ++ ": " ++ e)
+          None
+      end
+    end)
+  end
+
+  doc "Trigger a cron job immediately (bypasses the schedule)."
+  fn trigger_cron_now(storage, cron_id : String) : Result(String, String) do
+    match Conduit.Storage.cron_load_by_id(storage, cron_id) do
+      Err(e)       -> Err(e)
+      Ok(None)     -> Err("cron schedule not found: " ++ cron_id)
+      Ok(Some(sched)) ->
+        let config = Conduit.JobConfig.default()
+        let job_config = { ..config, queue = sched.queue }
+        Conduit.Queue.enqueue(storage, sched.job_type, sched.payload, job_config)
+    end
+  end
+
+  doc "Pause a cron schedule (set enabled = false)."
+  fn pause_cron(storage, cron_id : String) : Result((), String) do
+    Conduit.pause_cron(storage, cron_id)
+  end
+
+  doc "Resume a paused cron schedule (set enabled = true)."
+  fn resume_cron(storage, cron_id : String) : Result((), String) do
+    Conduit.resume_cron(storage, cron_id)
+  end
+
+  doc "Permanently delete a cron schedule."
+  fn delete_cron(storage, cron_id : String) : Result((), String) do
+    Conduit.cancel_cron(storage, cron_id)
+  end
+
+  doc "Cancel a running workflow."
+  fn cancel_workflow(storage, wf_id : String) : Result((), String) do
+    Conduit.cancel_workflow(wf_id, "cancelled_by_admin", storage)
+  end
+end

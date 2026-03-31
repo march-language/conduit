@@ -231,3 +231,78 @@
 - Cron scheduler already multi-node safe (advisory lock 7326482); explicit leader-only scheduling guard deferred to Phase 6
 - Full IANA DST-aware timezone support for cron — deferred
 - `parallel!` true concurrent fan-out across cluster nodes — deferred to Phase 7
+
+---
+
+## Phase 6 — Bastion Dashboard ✅
+
+**Merged:** 2026-03-31
+
+### New types
+- `Conduit.Dashboard.QueueSummary` — per-queue aggregate stats: `queue`, `pending`, `running`, `failed`, `dead`, `throughput` (24 h), `avg_latency` (ms)
+- `Conduit.Dashboard.Auth` — `None | Token(String) | Fn(fn String -> Bool)` — pluggable auth adapter
+
+### New modules
+- `Conduit.Dashboard` — public API:
+  - `start_standalone/3` — starts a standalone HTTP server on a given port
+  - `get_summary/1` — returns current `List(QueueSummary)` (used by polling endpoint)
+  - `subscribe_to_summary/1` — best-effort Postgres LISTEN on `conduit_jobs`
+- `Conduit.Dashboard.Auth` — `check/2` — validates a conn against the auth adapter
+- `Conduit.Dashboard.Router` — HTTP request dispatcher; `handle/4` routes all dashboard requests
+- `Conduit.Dashboard.Queries` — data-fetching helpers wrapping storage calls
+- `Conduit.Dashboard.Actions` — admin mutation helpers:
+  - `retry_job/2`, `cancel_job/2`, `delete_job/2`
+  - `retry_dead_letter/2`, `delete_dead_letter/2`, `retry_all_dead_letters/1`
+  - `trigger_cron_now/2`, `pause_cron/2`, `resume_cron/2`, `delete_cron/2`
+  - `cancel_workflow/2`
+- `Conduit.Dashboard.Html` — shared layout, nav, table, status badge, pagination, flash, action_btn helpers
+- Page modules (server-rendered HTML):
+  - `Conduit.Dashboard.Pages.Overview` — queue summary + cluster health
+  - `Conduit.Dashboard.Pages.Queues` — queue list + tabbed job list with per-row admin actions
+  - `Conduit.Dashboard.Pages.Jobs` — full job detail with error history
+  - `Conduit.Dashboard.Pages.Workflows` — workflow list + detail with checkpoints and signals
+  - `Conduit.Dashboard.Pages.Crons` — cron schedule list with trigger/pause/resume/delete
+  - `Conduit.Dashboard.Pages.DeadLetters` — dead letter list with bulk retry/delete
+  - `Conduit.Dashboard.Pages.Nodes` — cluster node list with leader highlight
+
+### Storage additions (interface + Postgres impl)
+- `dashboard_queue_summary/1` — GROUP BY queue aggregate query
+- `dashboard_jobs_list/4` — paginated job list with queue + status filter
+- `dead_letter_list/2` — paginated dead letters
+- `dead_letter_load/2` — load single dead letter by id
+- `job_retry/2` — reset job to pending with attempt = 0
+- `job_cancel/3` — set status = dead with admin reason
+- `job_delete/2` — hard DELETE job row
+- `dead_letter_delete/2` — hard DELETE dead letter row
+- `notify_subscribe/2` — LISTEN on Postgres channel (no-op with pool; polling fallback used)
+
+### Routes (all mounted under the configured base_path, default `/conduit`)
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | / | Overview |
+| GET | /queues | Queue list |
+| GET | /queues/:queue | Queue detail (?status=&page=) |
+| GET | /jobs/:id | Job detail |
+| POST | /jobs/:id/retry | Retry job |
+| POST | /jobs/:id/cancel | Cancel job |
+| POST | /jobs/:id/delete | Delete job |
+| GET | /workflows | Workflow list |
+| GET | /workflows/:id | Workflow detail |
+| POST | /workflows/:id/cancel | Cancel workflow |
+| GET | /crons | Cron list |
+| POST | /crons/:id/trigger | Trigger cron now |
+| POST | /crons/:id/pause | Pause cron |
+| POST | /crons/:id/resume | Resume cron |
+| POST | /crons/:id/delete | Delete cron |
+| GET | /dead-letters | Dead letters |
+| POST | /dead-letters/retry-all | Retry all |
+| POST | /dead-letters/:id/retry | Retry one |
+| POST | /dead-letters/:id/delete | Delete one |
+| GET | /nodes | Cluster nodes |
+| GET | /api/summary | JSON summary for 5-second polling |
+
+### Known gaps
+- Workflow list page requires a new `dashboard_workflows_list` storage method (deferred; currently renders empty)
+- Charts (throughput sparklines) deferred
+- Schema-aware job enqueue form deferred
+- LISTEN/NOTIFY real-time push — 5-second polling fallback used (full LISTEN requires dedicated non-pooled connection)

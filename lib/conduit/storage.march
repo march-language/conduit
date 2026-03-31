@@ -1,16 +1,4 @@
-doc """
-Conduit.Storage — pluggable storage backend interface.
-
-The default and recommended backend is Postgres (see Conduit.Storage.Postgres).
-SQLite can be used for development and testing. Implement this interface to
-add a new backend.
-
-JobRow is the internal database representation of an enqueued job. It maps
-directly to the `conduit_jobs` table.
-"""
-
 mod Conduit do
-  doc "Internal representation of a job in persistent storage."
   type JobRow = {
     id                : String,
     queue             : String,
@@ -34,31 +22,6 @@ mod Conduit do
   }
 end
 
-doc """
-Conduit.Storage interface. Implement to provide a custom storage backend.
-
-Phase 1 methods:
-  enqueue          — persist a new job row, return its id
-  fetch_next       — atomically claim the next available job (SKIP LOCKED)
-  mark_running     — record that a worker has claimed a job; increments attempt
-  mark_completed   — transition job to completed
-  heartbeat        — refresh heartbeat timestamp for stale-job detection
-
-Phase 2 additions:
-  schedule_retry   — record error and reschedule with a future run_at (status → pending)
-  discard          — record error and permanently fail a job (status → dead), no DLQ
-  move_to_dead_letter — insert into dead_letters table, mark job dead
-  rescue_stale     — return stale running jobs (heartbeat expired) to pending
-
-Phase 3 additions (cron):
-  cron_upsert          — insert or update a cron schedule row
-  cron_load_due        — load all enabled schedules with next_run_at <= NOW()
-  cron_mark_fired      — update last_run_at, last_job_id, next_run_at after firing
-  cron_job_active      — return true if a job is still pending or running
-  cron_cancel_job      — cancel a pending/running job (used by overlap: Replace)
-  cron_advisory_lock   — try to acquire a Postgres advisory lock; Ok(false) if held
-  cron_advisory_unlock — release a previously acquired advisory lock
-"""
 interface Conduit.Storage(s) do
   fn enqueue            : s -> Conduit.JobRow -> Result(String, String)
   fn fetch_next         : s -> String -> Result(Option(Conduit.JobRow), String)
@@ -102,6 +65,17 @@ interface Conduit.Storage(s) do
   fn signal_insert          : s -> Conduit.WorkflowSignal -> Result(Int, String)
   fn signal_peek            : s -> String -> String -> Result(Option(Conduit.WorkflowSignal), String)
   fn signal_mark_delivered  : s -> Int -> Result((), String)
+
+  -- Dashboard storage methods (Phase 6)
+  fn dashboard_queue_summary     : s -> Result(List(Conduit.Dashboard.QueueSummary), String)
+  fn dashboard_jobs_list         : s -> String -> String -> Int -> Result(List(Conduit.JobRow), String)
+  fn dead_letter_list            : s -> Int -> Result(List(Conduit.DeadLetter), String)
+  fn dead_letter_load            : s -> String -> Result(Option(Conduit.DeadLetter), String)
+  fn job_retry                   : s -> String -> Result((), String)
+  fn job_cancel                  : s -> String -> String -> Result((), String)
+  fn job_delete                  : s -> String -> Result((), String)
+  fn dead_letter_delete          : s -> String -> Result((), String)
+  fn notify_subscribe            : s -> String -> Result((), String)
 end
 
 doc """
@@ -843,5 +817,187 @@ mod Conduit.Storage.Postgres do
       expires_at   = Map.get(row, "expires_at")  |> Option.flat_map(fn s -> pparse_dt_opt(s) end),
       sent_by      = Map.get(row, "sent_by")     |> Option.flat_map(fn s -> if String.is_empty(s) do None else Some(s) end end)
     }
+  end
+
+  pfn prow_to_dead_letter(row : Map) : Conduit.DeadLetter do
+    let errors_raw = Map.get(row, "errors") |> unwrap_or("[]")
+    let errors = if String.is_empty(errors_raw) || errors_raw == "[]" do
+      Nil
+    else
+      String.split(String.slice_bytes(errors_raw, 1, String.byte_size(errors_raw) - 2), ",")
+      |> List.map(fn s -> String.trim(s) end)
+    end
+    {
+      id                  = Map.get(row, "id")                  |> unwrap,
+      job_id              = Map.get(row, "job_id")              |> unwrap,
+      queue               = Map.get(row, "queue")               |> unwrap_or("default"),
+      job_type            = Map.get(row, "job_type")            |> unwrap,
+      payload             = Map.get(row, "payload")             |> unwrap_or("{}"),
+      errors              = errors,
+      attempts            = Map.get(row, "attempts")            |> Option.flat_map(fn s -> String.to_int(s) end) |> unwrap_or(0),
+      first_attempted_at  = Map.get(row, "first_attempted_at")  |> Option.flat_map(fn s -> pparse_dt_opt(s) end),
+      last_attempted_at   = Map.get(row, "last_attempted_at")   |> Option.flat_map(fn s -> pparse_dt_opt(s) end),
+      discarded_at        = Map.get(row, "discarded_at")        |> unwrap |> pparse_dt
+    }
+  end
+
+  pfn prow_to_queue_summary(row : Map) : Conduit.Dashboard.QueueSummary do
+    {
+      queue       = Map.get(row, "queue")       |> unwrap_or(""),
+      pending     = Map.get(row, "pending")     |> Option.flat_map(fn s -> String.to_int(s) end) |> unwrap_or(0),
+      running     = Map.get(row, "running")     |> Option.flat_map(fn s -> String.to_int(s) end) |> unwrap_or(0),
+      failed      = Map.get(row, "failed")      |> Option.flat_map(fn s -> String.to_int(s) end) |> unwrap_or(0),
+      dead        = Map.get(row, "dead")        |> Option.flat_map(fn s -> String.to_int(s) end) |> unwrap_or(0),
+      throughput  = Map.get(row, "throughput")  |> Option.flat_map(fn s -> String.to_int(s) end) |> unwrap_or(0),
+      avg_latency = Map.get(row, "avg_latency") |> Option.flat_map(fn s -> String.to_int(s) end) |> unwrap_or(0)
+    }
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Dashboard storage methods (Phase 6)
+  -- ─────────────────────────────────────────────────────────────
+
+  fn dashboard_queue_summary(_self) : Result(List(Conduit.Dashboard.QueueSummary), String) do
+    let sql = "
+      SELECT
+        queue,
+        COUNT(*) FILTER (WHERE status = 'pending')  AS pending,
+        COUNT(*) FILTER (WHERE status = 'running')  AS running,
+        COUNT(*) FILTER (WHERE status = 'failed')   AS failed,
+        COUNT(*) FILTER (WHERE status = 'dead')     AS dead,
+        COUNT(*) FILTER (WHERE status = 'completed'
+                          AND completed_at >= NOW() - INTERVAL '24 hours') AS throughput,
+        COALESCE(
+          AVG(EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000)
+            FILTER (WHERE status = 'completed'
+                     AND completed_at >= NOW() - INTERVAL '24 hours'),
+          0
+        )::BIGINT AS avg_latency
+      FROM conduit_jobs
+      GROUP BY queue
+      ORDER BY queue
+    "
+    match Depot.Repo.query(sql, Nil) do
+      Ok(rows) -> Ok(List.map(rows, fn r -> prow_to_queue_summary(r) end))
+      Err(e)   -> Err(e)
+    end
+  end
+
+  -- Returns up to 50 jobs for the given queue and status filter (empty = all).
+  -- page is 1-based.
+  fn dashboard_jobs_list(_self, queue : String, status_filter : String, page : Int) : Result(List(Conduit.JobRow), String) do
+    let offset = int_to_string((page - 1) * 50)
+    let sql = "
+      SELECT id, queue, job_type, payload, status, attempt, max_attempts,
+             priority, backoff, dead_letter_queue,
+             inserted_at, scheduled_at, run_at,
+             started_at, completed_at, heartbeat_at, worker_id,
+             errors, tags
+      FROM conduit_jobs
+      WHERE queue = $1
+        AND ($2 = '' OR status = $2)
+      ORDER BY priority DESC, run_at ASC
+      LIMIT 50 OFFSET $3
+    "
+    match Depot.Repo.query(sql, Cons(queue, Cons(status_filter, Cons(offset, Nil)))) do
+      Ok(rows) -> Ok(List.map(rows, fn r -> prow_to_job(r) end))
+      Err(e)   -> Err(e)
+    end
+  end
+
+  -- Returns up to 50 dead letters, page is 1-based.
+  fn dead_letter_list(_self, page : Int) : Result(List(Conduit.DeadLetter), String) do
+    let offset = int_to_string((page - 1) * 50)
+    let sql = "
+      SELECT id, job_id, queue, job_type, payload, errors, attempts,
+             first_attempted_at, last_attempted_at, discarded_at
+      FROM conduit_dead_letters
+      ORDER BY discarded_at DESC
+      LIMIT 50 OFFSET $1
+    "
+    match Depot.Repo.query(sql, Cons(offset, Nil)) do
+      Ok(rows) -> Ok(List.map(rows, fn r -> prow_to_dead_letter(r) end))
+      Err(e)   -> Err(e)
+    end
+  end
+
+  -- Load a single dead letter by id.
+  fn dead_letter_load(_self, dl_id : String) : Result(Option(Conduit.DeadLetter), String) do
+    let sql = "
+      SELECT id, job_id, queue, job_type, payload, errors, attempts,
+             first_attempted_at, last_attempted_at, discarded_at
+      FROM conduit_dead_letters
+      WHERE id = $1
+    "
+    match Depot.Repo.query(sql, Cons(dl_id, Nil)) do
+      Ok(rows) ->
+        match rows do
+          Nil        -> Ok(None)
+          Cons(r, _) -> Ok(Some(prow_to_dead_letter(r)))
+        end
+      Err(e) -> Err(e)
+    end
+  end
+
+  -- Reset a job to pending with attempt = 0 so it runs again.
+  fn job_retry(_self, job_id : String) : Result((), String) do
+    let sql = "
+      UPDATE conduit_jobs
+      SET status       = 'pending',
+          attempt      = 0,
+          run_at       = NOW(),
+          errors       = '[]'::jsonb,
+          worker_id    = NULL,
+          started_at   = NULL,
+          completed_at = NULL
+      WHERE id = $1
+    "
+    match Depot.Repo.query(sql, Cons(job_id, Nil)) do
+      Ok(_)  -> Ok(())
+      Err(e) -> Err(e)
+    end
+  end
+
+  -- Cancel a job: set status = 'dead' with an admin reason appended to errors.
+  fn job_cancel(_self, job_id : String, reason : String) : Result((), String) do
+    let sql = "
+      UPDATE conduit_jobs
+      SET status = 'dead', completed_at = NOW(),
+          errors = errors || $2::jsonb
+      WHERE id = $1
+        AND status NOT IN ('completed', 'dead')
+    "
+    let error_json = perror_json("cancelled_by_admin: " ++ reason)
+    match Depot.Repo.query(sql, Cons(job_id, Cons(error_json, Nil))) do
+      Ok(_)  -> Ok(())
+      Err(e) -> Err(e)
+    end
+  end
+
+  -- Hard-delete a job row.
+  fn job_delete(_self, job_id : String) : Result((), String) do
+    let sql = "DELETE FROM conduit_jobs WHERE id = $1"
+    match Depot.Repo.query(sql, Cons(job_id, Nil)) do
+      Ok(_)  -> Ok(())
+      Err(e) -> Err(e)
+    end
+  end
+
+  -- Hard-delete a dead letter row.
+  fn dead_letter_delete(_self, dl_id : String) : Result((), String) do
+    let sql = "DELETE FROM conduit_dead_letters WHERE id = $1"
+    match Depot.Repo.query(sql, Cons(dl_id, Nil)) do
+      Ok(_)  -> Ok(())
+      Err(e) -> Err(e)
+    end
+  end
+
+  -- Start listening on a Postgres NOTIFY channel.
+  -- Note: LISTEN requires a dedicated persistent connection; with a pool, this
+  -- is a best-effort call. Use the polling fallback for reliability.
+  fn notify_subscribe(_self, _channel : String) : Result((), String) do
+    -- Intentionally a no-op in the pooled Postgres backend.
+    -- The dashboard uses 5-second polling as the real-time fallback.
+    Ok(())
   end
 end

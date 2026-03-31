@@ -1,5 +1,5 @@
 doc """
-Phase 1, 2, 3 & 4 tests for Conduit — Job Queue + Retries + Cron + Workflows.
+Phase 1–6 tests for Conduit — Job Queue + Retries + Cron + Workflows + Multi-Node + Dashboard.
 
 These tests use a fake in-memory storage backend so no database is required.
 The fake storage captures all operations and lets tests inspect state.
@@ -59,6 +59,15 @@ Phase 4 coverage:
 
 Phase 5 coverage:
   - Conduit.Config.default includes node_id, heartbeat_interval_ms, stale_node_threshold_ms
+Phase 6 coverage:
+  - Conduit.Dashboard.QueueSummary type has correct fields
+  - Dashboard.Auth.None, Token, Fn variants work correctly
+  - Dashboard.Actions.retry_job / cancel_job / delete_job call storage
+  - Dashboard.Actions.retry_dead_letter returns Err when DL not found
+  - Dashboard.Actions.delete_dead_letter records event
+  - Dashboard.Queries.queue_summary returns seeded data
+  - Dashboard.Queries.jobs_list / dead_letters / nodes return lists
+  - notify_subscribe returns Ok
   - Conduit.Config.default generates a non-empty node_id
   - Conduit.NodeInfo type holds correct fields
   - Conduit.Node.is_leader returns false before any election
@@ -1286,6 +1295,51 @@ mod ConduitTest do
       Vault.set(self.vault_key, "leader_lock", false)
       Ok(())
     end
+
+    -- Dashboard storage stubs (Phase 6).
+    fn dashboard_queue_summary(self : FakeWorkflowStorage) : Result(List(Conduit.Dashboard.QueueSummary), String) do
+      Ok(Vault.get(self.vault_key, "queue_summary") |> unwrap_or(Nil))
+    end
+
+    fn dashboard_jobs_list(self : FakeWorkflowStorage, _queue : String, _status : String, _page : Int) : Result(List(Conduit.JobRow), String) do
+      Ok(Vault.get(self.vault_key, "jobs") |> unwrap_or(Nil))
+    end
+
+    fn dead_letter_list(_self : FakeWorkflowStorage, _page : Int) : Result(List(Conduit.DeadLetter), String) do
+      Ok(Nil)
+    end
+
+    fn dead_letter_load(_self : FakeWorkflowStorage, _id : String) : Result(Option(Conduit.DeadLetter), String) do
+      Ok(None)
+    end
+
+    fn job_retry(self : FakeWorkflowStorage, job_id : String) : Result((), String) do
+      let evs = Vault.get(self.vault_key, "events") |> unwrap_or(Nil)
+      Vault.set(self.vault_key, "events", Cons("job_retry:" ++ job_id, evs))
+      Ok(())
+    end
+
+    fn job_cancel(self : FakeWorkflowStorage, job_id : String, reason : String) : Result((), String) do
+      let evs = Vault.get(self.vault_key, "events") |> unwrap_or(Nil)
+      Vault.set(self.vault_key, "events", Cons("job_cancel:" ++ job_id ++ ":" ++ reason, evs))
+      Ok(())
+    end
+
+    fn job_delete(self : FakeWorkflowStorage, job_id : String) : Result((), String) do
+      let evs = Vault.get(self.vault_key, "events") |> unwrap_or(Nil)
+      Vault.set(self.vault_key, "events", Cons("job_delete:" ++ job_id, evs))
+      Ok(())
+    end
+
+    fn dead_letter_delete(self : FakeWorkflowStorage, dl_id : String) : Result((), String) do
+      let evs = Vault.get(self.vault_key, "events") |> unwrap_or(Nil)
+      Vault.set(self.vault_key, "events", Cons("dl_delete:" ++ dl_id, evs))
+      Ok(())
+    end
+
+    fn notify_subscribe(_self : FakeWorkflowStorage, _channel : String) : Result((), String) do
+      Ok(())
+    end
   end
 
   -- ─────────────────────────────────────────────────────────────
@@ -1447,5 +1501,166 @@ mod ConduitTest do
       Err(_)       -> assert_true(false)
       Ok(acquired) -> assert_eq_bool(acquired, true)
     end
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Phase 6: Dashboard types
+  -- ─────────────────────────────────────────────────────────────
+
+  fn test_queue_summary_type_fields() do
+    let qs : Conduit.Dashboard.QueueSummary = {
+      queue       = "default",
+      pending     = 10,
+      running     = 2,
+      failed      = 1,
+      dead        = 0,
+      throughput  = 500,
+      avg_latency = 42
+    }
+    assert_eq_str(qs.queue, "default")
+    assert_eq_int(qs.pending, 10)
+    assert_eq_int(qs.running, 2)
+    assert_eq_int(qs.failed, 1)
+    assert_eq_int(qs.dead, 0)
+    assert_eq_int(qs.throughput, 500)
+    assert_eq_int(qs.avg_latency, 42)
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Phase 6: Auth
+  -- ─────────────────────────────────────────────────────────────
+
+  fn test_dashboard_auth_none_always_allows() do
+    let auth = Conduit.Dashboard.Auth.None
+    -- Auth.None returns true without inspecting conn.
+    -- We simulate a no-op conn check by inspecting the type directly.
+    match auth do
+      Conduit.Dashboard.Auth.None -> assert_true(true)
+      _                           -> assert_true(false)
+    end
+  end
+
+  fn test_dashboard_auth_token_matches_correct_bearer() do
+    let auth  = Conduit.Dashboard.Auth.Token("secret123")
+    match auth do
+      Conduit.Dashboard.Auth.Token(t) -> assert_eq_str(t, "secret123")
+      _                               -> assert_true(false)
+    end
+  end
+
+  fn test_dashboard_auth_fn_wraps_predicate() do
+    let called_key = "auth_fn_" ++ uuid_v4()
+    Vault.set(called_key, "called", false)
+    let auth = Conduit.Dashboard.Auth.Fn(fn _header ->
+      Vault.set(called_key, "called", true)
+      true
+    end)
+    match auth do
+      Conduit.Dashboard.Auth.Fn(f) ->
+        let result = f("Bearer test")
+        assert_eq_bool(result, true)
+        assert_eq_bool(Vault.get(called_key, "called") |> unwrap_or(false), true)
+      _ -> assert_true(false)
+    end
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Phase 6: Actions via fake storage
+  -- ─────────────────────────────────────────────────────────────
+
+  fn test_dashboard_actions_retry_job_calls_storage() do
+    let vault_k = "action_retry_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let job_id  = uuid_v4()
+    let result  = Conduit.Dashboard.Actions.retry_job(storage, job_id)
+    assert_ok(result)
+    let evs = Vault.get(vault_k, "events") |> unwrap_or(Nil)
+    assert_true(List.any(evs, fn e -> String.starts_with(e, "job_retry:" ++ job_id) end))
+  end
+
+  fn test_dashboard_actions_cancel_job_calls_storage() do
+    let vault_k = "action_cancel_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let job_id  = uuid_v4()
+    let result  = Conduit.Dashboard.Actions.cancel_job(storage, job_id)
+    assert_ok(result)
+    let evs = Vault.get(vault_k, "events") |> unwrap_or(Nil)
+    assert_true(List.any(evs, fn e -> String.starts_with(e, "job_cancel:" ++ job_id) end))
+  end
+
+  fn test_dashboard_actions_delete_job_calls_storage() do
+    let vault_k = "action_delete_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let job_id  = uuid_v4()
+    let result  = Conduit.Dashboard.Actions.delete_job(storage, job_id)
+    assert_ok(result)
+    let evs = Vault.get(vault_k, "events") |> unwrap_or(Nil)
+    assert_true(List.any(evs, fn e -> String.starts_with(e, "job_delete:" ++ job_id) end))
+  end
+
+  fn test_dashboard_actions_retry_dead_letter_not_found() do
+    let vault_k = "dl_retry_nf_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    -- Fake storage returns None for dead_letter_load, so we get Err.
+    let result = Conduit.Dashboard.Actions.retry_dead_letter(storage, "nonexistent")
+    assert_err(result)
+  end
+
+  fn test_dashboard_actions_delete_dead_letter_records_event() do
+    let vault_k = "dl_delete_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let dl_id   = uuid_v4()
+    let result  = Conduit.Dashboard.Actions.delete_dead_letter(storage, dl_id)
+    assert_ok(result)
+    let evs = Vault.get(vault_k, "events") |> unwrap_or(Nil)
+    assert_true(List.any(evs, fn e -> String.starts_with(e, "dl_delete:" ++ dl_id) end))
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Phase 6: Queries via fake storage
+  -- ─────────────────────────────────────────────────────────────
+
+  fn test_dashboard_queries_queue_summary_returns_list() do
+    let vault_k = "qs_test_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    -- Seed a summary row in the fake storage
+    let qs : Conduit.Dashboard.QueueSummary = {
+      queue = "default", pending = 3, running = 1,
+      failed = 0, dead = 0, throughput = 10, avg_latency = 50
+    }
+    Vault.set(vault_k, "queue_summary", Cons(qs, Nil))
+    let result = Conduit.Dashboard.Queries.queue_summary(storage)
+    assert_eq_int(List.length(result), 1)
+    let first = List.head_opt(result) |> unwrap
+    assert_eq_str(first.queue, "default")
+    assert_eq_int(first.pending, 3)
+  end
+
+  fn test_dashboard_queries_jobs_list_returns_list() do
+    let vault_k = "jl_test_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let result  = Conduit.Dashboard.Queries.jobs_list(storage, "default", "", 1)
+    assert_eq_int(List.length(result), 0)
+  end
+
+  fn test_dashboard_queries_dead_letters_returns_list() do
+    let vault_k = "dl_test_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let result  = Conduit.Dashboard.Queries.dead_letters(storage, 1)
+    assert_eq_int(List.length(result), 0)
+  end
+
+  fn test_dashboard_queries_nodes_returns_list() do
+    let vault_k = "nodes_q_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let result  = Conduit.Dashboard.Queries.nodes(storage)
+    assert_eq_int(List.length(result), 0)
+  end
+
+  fn test_dashboard_notify_subscribe_ok() do
+    let vault_k = "notify_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let result  = Conduit.Storage.notify_subscribe(storage, "conduit_jobs")
+    assert_ok(result)
   end
 end

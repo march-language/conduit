@@ -1,0 +1,67 @@
+mod Conduit.Dashboard do
+  doc """
+  Conduit Dashboard — web UI for monitoring and administering Conduit.
+
+  ## Embedded in a Bastion app
+
+      -- lib/my_app_web/router.march
+      forward "/conduit", Conduit.Dashboard.Router,
+        storage: storage,
+        auth:    MyApp.AdminAuth
+
+  ## Standalone HTTP server
+
+      Conduit.Dashboard.start_standalone(
+        4001,
+        storage,
+        Conduit.Dashboard.Auth.Token(System.env("ADMIN_TOKEN"))
+      )
+
+  ## No auth (development)
+
+      Conduit.Dashboard.start_standalone(4001, storage, Conduit.Dashboard.Auth.None)
+  """
+
+  doc """
+  Start the dashboard as a standalone HTTP server on `port`.
+
+  Returns a Task handle. Call `task_await_unwrap(t)` to block until the server
+  exits (it won't under normal operation).
+
+  `port`    — TCP port to bind (e.g. 4001)
+  `storage` — any `Conduit.Storage` impl
+  `auth`    — `Auth.None | Auth.Token(t) | Auth.Fn(f)`
+  """
+  fn start_standalone(port : Int, storage, auth : Conduit.Dashboard.Auth) : Task do
+    let base_path = "/conduit"
+    task_spawn(fn () ->
+      HttpServer.new(port)
+      |> HttpServer.plug(fn conn ->
+        Conduit.Dashboard.Router.handle(storage, auth, base_path, conn)
+      end)
+      |> HttpServer.listen()
+    end)
+  end
+
+  doc """
+  Return a JSON-serialisable summary of all queues.
+
+  Used by client-side 5-second polling (GET /conduit/api/summary).
+  """
+  fn get_summary(storage) : List(Conduit.Dashboard.QueueSummary) do
+    Conduit.Dashboard.Queries.queue_summary(storage)
+  end
+
+  doc """
+  Subscribe to real-time dashboard updates via Postgres NOTIFY.
+
+  Best-effort: with a connection pool, the LISTEN command targets whichever
+  connection is borrowed. Use the 5-second polling fallback for reliability.
+  """
+  fn subscribe_to_summary(storage) : () do
+    match Conduit.Storage.notify_subscribe(storage, "conduit_jobs") do
+      Ok(())  -> ()
+      Err(e)  -> Logger.warn("conduit_dashboard: subscribe failed: " ++ e)
+    end
+  end
+end

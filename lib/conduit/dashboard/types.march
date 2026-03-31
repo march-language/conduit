@@ -1,0 +1,12 @@
+mod Conduit.Dashboard do
+  doc "Aggregated queue statistics for the dashboard overview."
+  type QueueSummary = {
+    queue       : String,
+    pending     : Int,
+    running     : Int,
+    failed      : Int,
+    dead        : Int,
+    throughput  : Int,
+    avg_latency : Int
+  }
+end

@@ -1,0 +1,63 @@
+mod Conduit.Dashboard.Pages.DeadLetters do
+  doc "Lists dead letters."
+  fn render(base_path : String, dls : List(Conduit.DeadLetter), page : Int) : String do
+    let retry_all_btn = Conduit.Dashboard.Html.action_btn(
+      base_path ++ "/dead-letters/retry-all",
+      "Retry All",
+      "Retry all dead letters?"
+    )
+    let delete_all_btn = Conduit.Dashboard.Html.action_btn(
+      base_path ++ "/dead-letters/delete-all",
+      "Delete All",
+      "Delete all dead letters? This cannot be undone."
+    )
+    let bulk_actions_html = "<div class=\"actions-bar\">" ++ retry_all_btn ++ " " ++ delete_all_btn ++ "</div>"
+
+    let headers = Cons("ID", Cons("Job Type", Cons("Queue", Cons("Attempts", Cons("Discarded At", Cons("Last Error", Cons("Actions", Nil)))))))
+
+    let rows = List.map(dls, fn dl ->
+      let last_error_str = match List.last(dl.errors) do
+        Some(e) ->
+          if string_length(e) > 80 do
+            Html.escape(string_slice(e, 0, 80)) ++ "…"
+          else
+            Html.escape(e)
+          end
+        None    -> "—"
+      end
+      let discarded_str = Html.escape(DateTime.format(dl.discarded_at, "%Y-%m-%d %H:%M:%S"))
+
+      let retry_btn = Conduit.Dashboard.Html.action_btn(
+        base_path ++ "/dead-letters/" ++ dl.id ++ "/retry",
+        "Retry",
+        ""
+      )
+      let delete_btn = Conduit.Dashboard.Html.action_btn(
+        base_path ++ "/dead-letters/" ++ dl.id ++ "/delete",
+        "Delete",
+        "Delete this dead letter?"
+      )
+      let actions = retry_btn ++ " " ++ delete_btn
+
+      Cons(
+        Html.escape(dl.id),
+        Cons(
+          Html.escape(dl.job_type),
+          Cons(
+            Html.escape(dl.queue),
+            Cons(
+              int_to_string(dl.attempts),
+              Cons(discarded_str, Cons(last_error_str, Cons(actions, Nil)))
+            )
+          )
+        )
+      )
+    )
+
+    let total_pages = if List.length(dls) < 50 do page else page + 1 end
+    let pagination_html = Conduit.Dashboard.Html.pagination(base_path ++ "/dead-letters", page, total_pages)
+
+    let content = "<h1>Dead Letters</h1><div class=\"section\">" ++ bulk_actions_html ++ Conduit.Dashboard.Html.table(headers, rows) ++ pagination_html ++ "</div>"
+    Conduit.Dashboard.Html.page_with_nav("Dead Letters", base_path, "dead-letters", content)
+  end
+end

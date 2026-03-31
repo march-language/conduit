@@ -1,0 +1,118 @@
+mod Conduit.Dashboard.Html do
+  doc "Renders a full HTML page with the shared nav injected."
+  fn page(title : String, base_path : String, content : String) : String do
+    "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>" ++ Html.escape(title) ++ " — Conduit</title><style>" ++ pcss() ++ "</style></head><body>" ++ nav(base_path, "") ++ "<main class=\"main-content\">" ++ content ++ "</main></body></html>"
+  end
+
+  doc "Renders a full HTML page with the shared nav injected, with active tab."
+  fn page_with_nav(title : String, base_path : String, current : String, content : String) : String do
+    "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>" ++ Html.escape(title) ++ " — Conduit</title><style>" ++ pcss() ++ "</style></head><body>" ++ nav(base_path, current) ++ "<main class=\"main-content\">" ++ content ++ "</main></body></html>"
+  end
+
+  doc "Renders the top navigation bar."
+  pfn nav(base_path : String, current : String) : String do
+    let links = Cons(
+      ("overview",     "Overview",     base_path),
+      Cons(
+        ("queues",       "Queues",       base_path ++ "/queues"),
+        Cons(
+          ("workflows",    "Workflows",    base_path ++ "/workflows"),
+          Cons(
+            ("crons",        "Crons",        base_path ++ "/crons"),
+            Cons(
+              ("dead-letters", "Dead Letters", base_path ++ "/dead-letters"),
+              Cons(
+                ("nodes",        "Nodes",        base_path ++ "/nodes"),
+                Nil
+              )
+            )
+          )
+        )
+      )
+    )
+    let link_html = String.join(List.map(links, fn item ->
+      let (key, label, href) = item
+      let active_class = if key == current do " active" else "" end
+      "<a href=\"" ++ href ++ "\" class=\"nav-link" ++ active_class ++ "\">" ++ label ++ "</a>"
+    ), "")
+    "<nav class=\"top-nav\"><div class=\"nav-brand\">⚡ Conduit</div><div class=\"nav-links\">" ++ link_html ++ "</div></nav>"
+  end
+
+  doc "Renders a <table> with a header row and data rows."
+  fn table(headers : List(String), rows : List(List(String))) : String do
+    let header_html = String.join(List.map(headers, fn h -> "<th>" ++ h ++ "</th>"), "")
+    let rows_html = String.join(List.map(rows, fn row ->
+      let cells = String.join(List.map(row, fn cell -> "<td>" ++ cell ++ "</td>"), "")
+      "<tr>" ++ cells ++ "</tr>"
+    ), "")
+    "<table class=\"data-table\"><thead><tr>" ++ header_html ++ "</tr></thead><tbody>" ++ rows_html ++ "</tbody></table>"
+  end
+
+  doc "Badge for job/workflow status."
+  fn status_badge(status : String) : String do
+    let cls = match status do
+      "pending"   -> "badge-pending"
+      "running"   -> "badge-running"
+      "completed" -> "badge-completed"
+      "failed"    -> "badge-failed"
+      "dead"      -> "badge-dead"
+      "cancelled" -> "badge-cancelled"
+      "timed_out" -> "badge-timed-out"
+      "enabled"   -> "badge-completed"
+      "disabled"  -> "badge-failed"
+      "stopped"   -> "badge-dead"
+      "stopping"  -> "badge-pending"
+      _           -> "badge-default"
+    end
+    "<span class=\"badge " ++ cls ++ "\">" ++ Html.escape(status) ++ "</span>"
+  end
+
+  doc "Pagination links."
+  fn pagination(base_url : String, current_page : Int, total_pages : Int) : String do
+    if total_pages <= 1 do
+      ""
+    else
+      let prev_link = if current_page > 1 do
+        "<a href=\"" ++ base_url ++ "?page=" ++ int_to_string(current_page - 1) ++ "\" class=\"page-link\">&laquo; Prev</a>"
+      else
+        "<span class=\"page-link disabled\">&laquo; Prev</span>"
+      end
+      let next_link = if current_page < total_pages do
+        "<a href=\"" ++ base_url ++ "?page=" ++ int_to_string(current_page + 1) ++ "\" class=\"page-link\">Next &raquo;</a>"
+      else
+        "<span class=\"page-link disabled\">Next &raquo;</span>"
+      end
+      "<div class=\"pagination\">" ++ prev_link ++ "<span class=\"page-info\">Page " ++ int_to_string(current_page) ++ " of " ++ int_to_string(total_pages) ++ "</span>" ++ next_link ++ "</div>"
+    end
+  end
+
+  doc "A simple flash/notice box."
+  fn flash(kind : String, message : String) : String do
+    let cls = match kind do
+      "success" -> "flash-success"
+      "error"   -> "flash-error"
+      _         -> "flash-info"
+    end
+    "<div class=\"flash " ++ cls ++ "\">" ++ Html.escape(message) ++ "</div>"
+  end
+
+  doc "Admin action button (POST form button)."
+  fn action_btn(action_url : String, label : String, confirm : String) : String do
+    let on_submit = if confirm == "" do
+      "true"
+    else
+      "confirm('" ++ Html.escape(confirm) ++ "')"
+    end
+    let btn_class = match label do
+      "Retry"  -> "btn-retry"
+      "Delete" -> "btn-delete"
+      "Cancel" -> "btn-cancel"
+      _        -> "btn-default"
+    end
+    "<form method=\"post\" action=\"" ++ action_url ++ "\" style=\"display:inline\" onsubmit=\"return " ++ on_submit ++ "\"><button type=\"submit\" class=\"btn " ++ btn_class ++ "\">" ++ Html.escape(label) ++ "</button></form>"
+  end
+
+  pfn pcss() : String do
+    "* { box-sizing: border-box; margin: 0; padding: 0; } body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f7fa; color: #333; } .top-nav { background: #1a1a2e; color: #fff; display: flex; align-items: center; padding: 0 24px; height: 52px; gap: 24px; } .nav-brand { font-size: 18px; font-weight: 700; color: #e0e0ff; white-space: nowrap; } .nav-links { display: flex; gap: 4px; } .nav-link { color: #a0a0c0; text-decoration: none; padding: 6px 14px; border-radius: 6px; font-size: 14px; transition: background 0.15s; } .nav-link:hover { background: #2a2a4e; color: #fff; } .nav-link.active { background: #3a3a6e; color: #fff; } .main-content { padding: 32px; max-width: 1400px; margin: 0 auto; } h1 { font-size: 24px; font-weight: 700; margin-bottom: 24px; color: #1a1a2e; } h2 { font-size: 18px; font-weight: 600; margin-bottom: 16px; color: #2a2a4e; margin-top: 32px; } .data-table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 4px rgba(0,0,0,0.08); } .data-table thead { background: #f0f2f8; } .data-table th { padding: 10px 16px; text-align: left; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: #555; border-bottom: 1px solid #e0e4ef; } .data-table td { padding: 10px 16px; font-size: 14px; border-bottom: 1px solid #f0f2f8; vertical-align: middle; } .data-table tbody tr:last-child td { border-bottom: none; } .data-table tbody tr:hover { background: #fafbff; } .badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; } .badge-pending { background: #fff3cd; color: #856404; } .badge-running { background: #cce5ff; color: #004085; } .badge-completed { background: #d4edda; color: #155724; } .badge-failed { background: #f8d7da; color: #721c24; } .badge-dead { background: #e2e3e5; color: #383d41; } .badge-cancelled { background: #fde8d8; color: #7d3c00; } .badge-timed-out { background: #f8d7da; color: #721c24; } .badge-default { background: #e9ecef; color: #495057; } .pagination { display: flex; align-items: center; gap: 12px; margin-top: 20px; } .page-link { display: inline-block; padding: 6px 14px; background: #fff; border: 1px solid #d0d4e8; border-radius: 6px; color: #3a3a6e; text-decoration: none; font-size: 14px; } .page-link:hover { background: #f0f2f8; } .page-link.disabled { color: #aaa; pointer-events: none; } .page-info { font-size: 14px; color: #666; } .flash { padding: 12px 16px; border-radius: 6px; margin-bottom: 20px; font-size: 14px; } .flash-info { background: #cce5ff; color: #004085; border: 1px solid #b8daff; } .flash-success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; } .flash-error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; } .btn { display: inline-block; padding: 4px 12px; border: none; border-radius: 4px; font-size: 12px; font-weight: 500; cursor: pointer; text-decoration: none; } .btn-retry { background: #cce5ff; color: #004085; } .btn-retry:hover { background: #b8daff; } .btn-delete { background: #f8d7da; color: #721c24; } .btn-delete:hover { background: #f5c6cb; } .btn-cancel { background: #fff3cd; color: #856404; } .btn-cancel:hover { background: #ffeeba; } .btn-default { background: #e9ecef; color: #495057; } .btn-default:hover { background: #dee2e6; } .section { background: #fff; border-radius: 8px; padding: 24px; margin-bottom: 24px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); } .dl-grid { display: grid; grid-template-columns: 200px 1fr; gap: 8px 16px; } .dl-label { font-size: 13px; font-weight: 600; color: #666; padding: 4px 0; } .dl-value { font-size: 13px; color: #333; padding: 4px 0; } pre.payload { background: #f8f9fa; border: 1px solid #e0e4ef; border-radius: 6px; padding: 16px; font-size: 13px; overflow-x: auto; white-space: pre-wrap; word-break: break-all; } .error-card { background: #fff5f5; border: 1px solid #f5c6cb; border-radius: 6px; padding: 12px 16px; margin-bottom: 8px; font-size: 13px; color: #721c24; font-family: monospace; } .tab-bar { display: flex; gap: 4px; margin-bottom: 20px; } .tab-link { display: inline-block; padding: 7px 18px; border-radius: 6px 6px 0 0; text-decoration: none; font-size: 14px; color: #555; background: #e9ecef; border: 1px solid #d0d4e8; border-bottom: none; } .tab-link:hover { background: #dee2e6; } .tab-link.active { background: #fff; color: #1a1a2e; font-weight: 600; border-color: #c0c4d8; } .actions-bar { display: flex; gap: 8px; margin-bottom: 20px; } .stale-row { background: #fff5f5 !important; } .leader-crown { margin-right: 4px; }"
+  end
+end

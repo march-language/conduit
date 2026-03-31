@@ -1,0 +1,59 @@
+mod Conduit.Dashboard.Pages.Jobs do
+  doc "Full job detail page."
+  fn render(base_path : String, job : Conduit.JobRow) : String do
+    let started_at_str = match job.started_at do
+      Some(dt) -> DateTime.format(dt, "%Y-%m-%d %H:%M:%S")
+      None     -> "—"
+    end
+    let completed_at_str = match job.completed_at do
+      Some(dt) -> DateTime.format(dt, "%Y-%m-%d %H:%M:%S")
+      None     -> "—"
+    end
+    let heartbeat_at_str = match job.heartbeat_at do
+      Some(dt) -> DateTime.format(dt, "%Y-%m-%d %H:%M:%S")
+      None     -> "—"
+    end
+    let worker_id_str = Option.unwrap_or(job.worker_id, "—")
+    let dead_letter_str = match job.dead_letter_queue do
+      Some(q) -> Html.escape(q)
+      None    -> "—"
+    end
+
+    let meta_html = "<div class=\"dl-grid\">" ++
+      "<span class=\"dl-label\">ID</span><span class=\"dl-value\">" ++ Html.escape(job.id) ++ "</span>" ++
+      "<span class=\"dl-label\">Queue</span><span class=\"dl-value\">" ++ Html.escape(job.queue) ++ "</span>" ++
+      "<span class=\"dl-label\">Job Type</span><span class=\"dl-value\">" ++ Html.escape(job.job_type) ++ "</span>" ++
+      "<span class=\"dl-label\">Status</span><span class=\"dl-value\">" ++ Conduit.Dashboard.Html.status_badge(job.status) ++ "</span>" ++
+      "<span class=\"dl-label\">Attempt</span><span class=\"dl-value\">" ++ int_to_string(job.attempt) ++ " / " ++ int_to_string(job.max_attempts) ++ "</span>" ++
+      "<span class=\"dl-label\">Priority</span><span class=\"dl-value\">" ++ int_to_string(job.priority) ++ "</span>" ++
+      "<span class=\"dl-label\">Backoff</span><span class=\"dl-value\">" ++ Html.escape(job.backoff) ++ "</span>" ++
+      "<span class=\"dl-label\">Dead Letter Queue</span><span class=\"dl-value\">" ++ dead_letter_str ++ "</span>" ++
+      "<span class=\"dl-label\">Inserted At</span><span class=\"dl-value\">" ++ Html.escape(DateTime.format(job.inserted_at, "%Y-%m-%d %H:%M:%S")) ++ "</span>" ++
+      "<span class=\"dl-label\">Scheduled At</span><span class=\"dl-value\">" ++ Html.escape(DateTime.format(job.scheduled_at, "%Y-%m-%d %H:%M:%S")) ++ "</span>" ++
+      "<span class=\"dl-label\">Run At</span><span class=\"dl-value\">" ++ Html.escape(DateTime.format(job.run_at, "%Y-%m-%d %H:%M:%S")) ++ "</span>" ++
+      "<span class=\"dl-label\">Started At</span><span class=\"dl-value\">" ++ Html.escape(started_at_str) ++ "</span>" ++
+      "<span class=\"dl-label\">Completed At</span><span class=\"dl-value\">" ++ Html.escape(completed_at_str) ++ "</span>" ++
+      "<span class=\"dl-label\">Heartbeat At</span><span class=\"dl-value\">" ++ Html.escape(heartbeat_at_str) ++ "</span>" ++
+      "<span class=\"dl-label\">Worker ID</span><span class=\"dl-value\">" ++ Html.escape(worker_id_str) ++ "</span>" ++
+      "</div>"
+
+    let payload_html = "<div class=\"section\"><h2>Payload</h2><pre class=\"payload\">" ++ Html.escape(job.payload) ++ "</pre></div>"
+
+    let errors_html = if List.is_empty(job.errors) do
+      ""
+    else
+      let cards = String.join(List.map(job.errors, fn e -> "<div class=\"error-card\">" ++ Html.escape(e) ++ "</div>"), "")
+      "<div class=\"section\"><h2>Errors</h2>" ++ cards ++ "</div>"
+    end
+
+    let retry_btn = Conduit.Dashboard.Html.action_btn(base_path ++ "/jobs/" ++ job.id ++ "/retry", "Retry", "")
+    let cancel_btn = Conduit.Dashboard.Html.action_btn(base_path ++ "/jobs/" ++ job.id ++ "/cancel", "Cancel", "Cancel this job?")
+    let delete_btn = Conduit.Dashboard.Html.action_btn(base_path ++ "/jobs/" ++ job.id ++ "/delete", "Delete", "Delete this job?")
+
+    let actions_html = "<div class=\"section\"><h2>Actions</h2><div class=\"actions-bar\">" ++ retry_btn ++ cancel_btn ++ delete_btn ++ "</div></div>"
+
+    let content = "<h1>Job: " ++ Html.escape(job.id) ++ "</h1><div class=\"section\"><h2>Details</h2>" ++ meta_html ++ "</div>" ++ payload_html ++ errors_html ++ actions_html
+
+    Conduit.Dashboard.Html.page_with_nav("Job: " ++ job.id, base_path, "queues", content)
+  end
+end

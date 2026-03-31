@@ -1,0 +1,109 @@
+mod Conduit.Dashboard.Pages.Workflows do
+  doc "List workflows."
+  fn render_list(base_path : String, workflows : List(Conduit.WorkflowRow), status_filter : String, page : Int) : String do
+    let statuses = Cons("running", Cons("completed", Cons("failed", Cons("", Nil))))
+    let tab_labels = Cons("Running", Cons("Completed", Cons("Failed", Cons("All", Nil))))
+
+    let tabs = List.zip(statuses, tab_labels)
+    let tab_html = String.join(List.map(tabs, fn pair ->
+      let (s, label) = pair
+      let active_cls = if s == status_filter do " active" else "" end
+      let href = base_path ++ "/workflows?status=" ++ s ++ "&page=1"
+      "<a href=\"" ++ href ++ "\" class=\"tab-link" ++ active_cls ++ "\">" ++ label ++ "</a>"
+    ), "")
+
+    let headers = Cons("ID", Cons("Type", Cons("Status", Cons("Started At", Cons("Completed At", Nil)))))
+
+    let rows = List.map(workflows, fn wf ->
+      let wf_link = "<a href=\"" ++ base_path ++ "/workflows/" ++ Html.escape(wf.id) ++ "\">" ++ Html.escape(wf.id) ++ "</a>"
+      let completed_at_str = match wf.completed_at do
+        Some(dt) -> Html.escape(DateTime.format(dt, "%Y-%m-%d %H:%M:%S"))
+        None     -> "—"
+      end
+      Cons(
+        wf_link,
+        Cons(
+          Html.escape(wf.workflow_type),
+          Cons(
+            Conduit.Dashboard.Html.status_badge(wf.status),
+            Cons(
+              Html.escape(DateTime.format(wf.started_at, "%Y-%m-%d %H:%M:%S")),
+              Cons(completed_at_str, Nil)
+            )
+          )
+        )
+      )
+    )
+
+    let base_pagination_url = base_path ++ "/workflows?status=" ++ status_filter
+    let total_pages = if List.length(workflows) < 50 do page else page + 1 end
+    let pagination_html = Conduit.Dashboard.Html.pagination(base_pagination_url, page, total_pages)
+
+    let content = "<h1>Workflows</h1><div class=\"section\"><div class=\"tab-bar\">" ++ tab_html ++ "</div>" ++ Conduit.Dashboard.Html.table(headers, rows) ++ pagination_html ++ "</div>"
+    Conduit.Dashboard.Html.page_with_nav("Workflows", base_path, "workflows", content)
+  end
+
+  doc "Workflow detail: show checkpoints and signals."
+  fn render_detail(base_path : String, wf : Conduit.WorkflowRow, checkpoints : List(Conduit.WorkflowCheckpoint), signals : List(Conduit.WorkflowSignal)) : String do
+    let parent_id_str = match wf.parent_id do
+      Some(pid) -> "<a href=\"" ++ base_path ++ "/workflows/" ++ Html.escape(pid) ++ "\">" ++ Html.escape(pid) ++ "</a>"
+      None      -> "—"
+    end
+    let completed_at_str = match wf.completed_at do
+      Some(dt) -> Html.escape(DateTime.format(dt, "%Y-%m-%d %H:%M:%S"))
+      None     -> "—"
+    end
+    let error_str = match wf.error do
+      Some(e) -> Html.escape(e)
+      None    -> "—"
+    end
+
+    let meta_html = "<div class=\"dl-grid\">" ++
+      "<span class=\"dl-label\">ID</span><span class=\"dl-value\">" ++ Html.escape(wf.id) ++ "</span>" ++
+      "<span class=\"dl-label\">Type</span><span class=\"dl-value\">" ++ Html.escape(wf.workflow_type) ++ "</span>" ++
+      "<span class=\"dl-label\">Parent</span><span class=\"dl-value\">" ++ parent_id_str ++ "</span>" ++
+      "<span class=\"dl-label\">Status</span><span class=\"dl-value\">" ++ Conduit.Dashboard.Html.status_badge(wf.status) ++ "</span>" ++
+      "<span class=\"dl-label\">Started At</span><span class=\"dl-value\">" ++ Html.escape(DateTime.format(wf.started_at, "%Y-%m-%d %H:%M:%S")) ++ "</span>" ++
+      "<span class=\"dl-label\">Completed At</span><span class=\"dl-value\">" ++ completed_at_str ++ "</span>" ++
+      "<span class=\"dl-label\">Error</span><span class=\"dl-value\">" ++ error_str ++ "</span>" ++
+      "</div>"
+
+    let cp_headers = Cons("Name", Cons("Value (truncated)", Cons("Duration (ms)", Cons("Created At", Nil))))
+    let cp_rows = List.map(checkpoints, fn cp ->
+      let val_truncated = if string_length(cp.value) > 80 do
+        Html.escape(string_slice(cp.value, 0, 80)) ++ "…"
+      else
+        Html.escape(cp.value)
+      end
+      let dur_str = match cp.duration_ms do
+        Some(d) -> int_to_string(d)
+        None    -> "—"
+      end
+      Cons(
+        Html.escape(cp.name),
+        Cons(val_truncated, Cons(dur_str, Cons(Html.escape(DateTime.format(cp.created_at, "%Y-%m-%d %H:%M:%S")), Nil)))
+      )
+    )
+
+    let sig_headers = Cons("Type", Cons("Status", Cons("Sent At", Nil)))
+    let sig_rows = List.map(signals, fn sig ->
+      Cons(
+        Html.escape(sig.signal_type),
+        Cons(
+          Conduit.Dashboard.Html.status_badge(sig.status),
+          Cons(Html.escape(DateTime.format(sig.sent_at, "%Y-%m-%d %H:%M:%S")), Nil)
+        )
+      )
+    )
+
+    let cancel_btn = if wf.status == "running" do
+      "<div class=\"section\"><h2>Actions</h2><div class=\"actions-bar\">" ++ Conduit.Dashboard.Html.action_btn(base_path ++ "/workflows/" ++ wf.id ++ "/cancel", "Cancel", "Cancel this workflow?") ++ "</div></div>"
+    else
+      ""
+    end
+
+    let content = "<h1>Workflow: " ++ Html.escape(wf.id) ++ "</h1><div class=\"section\"><h2>Details</h2>" ++ meta_html ++ "</div><div class=\"section\"><h2>Checkpoints</h2>" ++ Conduit.Dashboard.Html.table(cp_headers, cp_rows) ++ "</div><div class=\"section\"><h2>Signals</h2>" ++ Conduit.Dashboard.Html.table(sig_headers, sig_rows) ++ "</div>" ++ cancel_btn
+
+    Conduit.Dashboard.Html.page_with_nav("Workflow: " ++ wf.id, base_path, "workflows", content)
+  end
+end

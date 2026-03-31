@@ -1,0 +1,42 @@
+mod Conduit.Dashboard.Pages.Overview do
+  doc "Renders the overview page."
+  fn render(base_path : String, summary : List(Conduit.Dashboard.QueueSummary), nodes : List(Conduit.NodeInfo), leader : Option(String)) : String do
+    let leader_id = Option.unwrap_or(leader, "none")
+    let node_count = List.length(nodes)
+
+    let summary_rows = List.map(summary, fn s ->
+      Cons(
+        Html.escape(s.queue),
+        Cons(
+          int_to_string(s.pending),
+          Cons(
+            int_to_string(s.running),
+            Cons(
+              int_to_string(s.failed),
+              Cons(
+                int_to_string(s.dead),
+                Cons(
+                  int_to_string(s.throughput),
+                  Cons(
+                    int_to_string(s.avg_latency),
+                    Nil
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    )
+
+    let summary_headers = Cons("Queue", Cons("Pending", Cons("Running", Cons("Failed", Cons("Dead", Cons("Throughput (24h)", Cons("Avg Latency (ms)", Nil)))))))
+
+    let cluster_html = "<div class=\"section\"><h2>Cluster</h2><p style=\"font-size:14px;color:#555;\">Active Nodes: <strong>" ++ int_to_string(node_count) ++ "</strong> &nbsp;&nbsp; Leader: <strong>" ++ Html.escape(leader_id) ++ "</strong></p></div>"
+
+    let poll_script = "<script>setInterval(function(){ fetch(window.location.href).then(function(r){ if(r.ok) window.location.reload() }) }, 5000)</script>"
+
+    let content = "<h1>Overview</h1><div class=\"section\"><h2>Queue Summary</h2>" ++ Conduit.Dashboard.Html.table(summary_headers, summary_rows) ++ "</div>" ++ cluster_html ++ poll_script
+
+    Conduit.Dashboard.Html.page_with_nav("Overview", base_path, "overview", content)
+  end
+end
