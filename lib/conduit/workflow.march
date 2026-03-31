@@ -1,0 +1,227 @@
+doc """
+Conduit workflow types, interface, and in-process registry.
+
+Two interfaces:
+
+  Conduit.Workflow(w) — implement to define a durable multi-step workflow.
+
+Workflows are sequential March code that uses `Conduit.WorkflowContext.checkpoint`
+to make steps durable. On a crash, the runner re-executes from the beginning but
+every completed checkpoint is a no-op (value returned from DB, fn not called).
+
+Static registration at startup:
+
+  Conduit.register_workflow(
+    "OnboardUserWorkflow",
+    fn input_json -> fn ctx -> OnboardUserWorkflow.run(OnboardUserWorkflow, input_json, ctx) end end,
+    OnboardUserWorkflow.config(OnboardUserWorkflow)
+  )
+"""
+
+-- ─────────────────────────────────────────────────────────────
+-- Error types
+-- ─────────────────────────────────────────────────────────────
+
+mod Conduit do
+  doc """
+  WorkflowError — returned from workflow run() to control disposition.
+
+    Failed(msg)    — permanent failure; workflow moves to failed status
+    Cancelled(msg) — explicit cancellation (via cancel_workflow)
+    TimedOut       — workflow exceeded its configured timeout
+    StorageError(msg) — transient storage failure; runner retries
+  """
+  type WorkflowError =
+    Failed(String)
+    | Cancelled(String)
+    | TimedOut
+    | StorageError(String)
+
+  doc "Execution mode for workflow instances."
+  type ExecutionMode =
+    Checkpoint           -- at-least-once checkpoint semantics (default)
+    | DeterministicReplay  -- full event sourcing (Phase 8)
+
+  doc "Per-workflow configuration."
+  type WorkflowConfig = {
+    execution_mode : Conduit.ExecutionMode,
+    timeout        : Option(Duration),
+    tags           : List(String)
+  }
+
+  doc """
+  A handle returned by Conduit.start_workflow.
+  Use id to query status, send signals, or cancel.
+  """
+  type WorkflowHandle = {
+    id            : String,
+    workflow_type : String,
+    started_at    : DateTime
+  }
+
+  doc "Internal DB row for conduit_workflows table."
+  type WorkflowRow = {
+    id            : String,
+    workflow_type : String,
+    parent_id     : Option(String),
+    input         : String,            -- JSON-serialized Input
+    output        : Option(String),    -- JSON-serialized Output (set on completion)
+    status        : String,            -- running | completed | failed | cancelled | timed_out
+    started_at    : DateTime,
+    completed_at  : Option(DateTime),
+    timeout_at    : Option(DateTime),
+    error         : Option(String),
+    error_at      : Option(DateTime),
+    tags          : List(String),
+    meta          : String             -- JSON freeform metadata
+  }
+
+  doc "An in-DB checkpoint row (conduit_checkpoints)."
+  type WorkflowCheckpoint = {
+    id          : Int,
+    workflow_id : String,
+    name        : String,
+    value       : String,    -- JSON-serialized result
+    created_at  : DateTime,
+    duration_ms : Option(Int)
+  }
+
+  doc "A signal sent to a running workflow (conduit_workflow_signals)."
+  type WorkflowSignal = {
+    id           : Int,
+    workflow_id  : String,
+    signal_type  : String,
+    payload      : String,   -- JSON
+    status       : String,   -- pending | delivered | expired
+    sent_at      : DateTime,
+    delivered_at : Option(DateTime),
+    expires_at   : Option(DateTime),
+    sent_by      : Option(String)
+  }
+
+  doc """
+  Runtime context passed to workflow run() functions.
+
+  `workflow_id`    — the unique id of this workflow instance
+  `parent_id`      — set when this is a sub-workflow
+  `namespace`      — checkpoint name prefix; "" for root ctx,
+                     "parallel:N:" for parallel branch N
+  `checkpoint_key` — Vault namespace for in-memory checkpoint cache
+                     (populated by warm_cache before run() is called)
+  """
+  type WorkflowContext = {
+    workflow_id    : String,
+    parent_id      : Option(String),
+    namespace      : String,
+    checkpoint_key : String
+  }
+end
+
+-- ─────────────────────────────────────────────────────────────
+-- Interface
+-- ─────────────────────────────────────────────────────────────
+
+doc """
+Conduit.Workflow — implement to define a durable multi-step workflow.
+
+Input and Output are serialized as JSON strings for storage. The runner
+function registered via `Conduit.register_workflow` is responsible for
+deserializing Input and serializing Output.
+
+Example:
+
+  mod FulfillOrderWorkflow do
+    impl Conduit.Workflow(FulfillOrderWorkflow) do
+      fn run(_self, input_json : String, ctx : Conduit.WorkflowContext)
+              : Result(String, Conduit.WorkflowError) do
+        let order_id = JSON.get_string(input_json, "order_id") |> unwrap_or("")
+
+        let _reserve = match Conduit.WorkflowContext.checkpoint(storage, ctx, "reserve_stock", fn () ->
+          Inventory.reserve(order_id)
+        end) do
+          Err(e)  -> return Err(e)
+          Ok(val) -> val
+        end
+
+        let _charge = match Conduit.WorkflowContext.checkpoint(storage, ctx, "charge_card", fn () ->
+          Payments.charge(order_id)
+        end) do
+          Err(e)  -> return Err(e)
+          Ok(val) -> val
+        end
+
+        Ok("{\"fulfilled\": true}")
+      end
+    end
+  end
+"""
+interface Conduit.Workflow(w) do
+  fn run : w -> String -> Conduit.WorkflowContext -> Result(String, Conduit.WorkflowError)
+
+  fn config : w -> Conduit.WorkflowConfig do
+    Conduit.WorkflowConfig.default()
+  end
+end
+
+-- ─────────────────────────────────────────────────────────────
+-- WorkflowConfig helpers
+-- ─────────────────────────────────────────────────────────────
+
+mod Conduit.WorkflowConfig do
+  doc "Default workflow configuration."
+  fn default() : Conduit.WorkflowConfig do
+    {
+      execution_mode = Conduit.ExecutionMode.Checkpoint,
+      timeout        = None,
+      tags           = Nil
+    }
+  end
+end
+
+-- ─────────────────────────────────────────────────────────────
+-- Workflow registry
+-- ─────────────────────────────────────────────────────────────
+
+doc """
+Conduit.WorkflowRegistry — in-process map from workflow_type to runner function.
+Populated at startup via Conduit.register_workflow.
+"""
+mod Conduit.WorkflowRegistry do
+  ptype Entry = Entry({
+    config : Conduit.WorkflowConfig,
+    runner : fn String -> fn Conduit.WorkflowContext -> Result(String, Conduit.WorkflowError)
+  })
+
+  doc "Register a workflow runner. Idempotent — safe to call multiple times."
+  fn register(
+    workflow_type : String,
+    runner        : fn String -> fn Conduit.WorkflowContext -> Result(String, Conduit.WorkflowError),
+    config        : Conduit.WorkflowConfig
+  ) : () do
+    Vault.set(registry_key(), workflow_type, Entry({ config = config, runner = runner }))
+  end
+
+  doc "Look up a registered workflow's config and runner."
+  fn lookup(workflow_type : String) : Option({ config : Conduit.WorkflowConfig, runner : fn String -> fn Conduit.WorkflowContext -> Result(String, Conduit.WorkflowError) }) do
+    match Vault.get(registry_key(), workflow_type) do
+      None           -> None
+      Some(Entry(e)) -> Some({ config = e.config, runner = e.runner })
+    end
+  end
+
+  doc "Execute a registered workflow with the given input and context."
+  fn run(
+    workflow_type : String,
+    input_json    : String,
+    ctx           : Conduit.WorkflowContext
+  ) : Result(String, Conduit.WorkflowError) do
+    match Vault.get(registry_key(), workflow_type) do
+      None           -> Err(Conduit.WorkflowError.Failed("No workflow registered for type: " ++ workflow_type))
+      Some(Entry(e)) -> e.runner(input_json)(ctx)
+    end
+  end
+
+  pfn registry_key() : String do
+    "conduit_workflow_registry"
+  end
+end

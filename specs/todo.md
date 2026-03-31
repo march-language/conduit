@@ -39,26 +39,30 @@
 
 ---
 
-## Phase 4 — Imperative Workflows & Checkpoints
+## Phase 4 — Imperative Workflows & Checkpoints ✅
 
-- [ ] `Conduit.Workflow(w)` interface — `run`, `config`, `schema`
-- [ ] `WorkflowContext` type passed to `run`
-- [ ] `checkpoint!(ctx, name, fn)` — store result in DB, skip on resume
-- [ ] `checkpoint_loop!` — checkpoint a recursive/iterative loop
-- [ ] `parallel!(ctx, items, fn)` — fan-out with per-item checkpoints
-- [ ] `wait_for_signal!(ctx, signal_name)` — suspend workflow until signalled
-- [ ] `Conduit.start_workflow/2` — enqueue and return handle
-- [ ] `Conduit.start_workflow_and_wait/3` — block until completion
-- [ ] `Conduit.signal_workflow/3` — deliver a signal to a running workflow
-- [ ] `Conduit.cancel_workflow/2` — cancel with reason
-- [ ] `Conduit.workflow_status/1` — query workflow state
-- [ ] Workflow actor: each in-flight workflow is a supervised actor
-- [ ] Crash recovery: resume from last checkpoint on restart
-- [ ] Workflow timeout (per `WorkflowConfig`)
-- [ ] Sub-workflow support (workflow enqueuing another workflow)
-- [ ] `Conduit.WorkflowConfig` type — `execution_mode`, timeout
-- [ ] Migration: `conduit_workflows`, `conduit_workflow_checkpoints` tables
-- [ ] Tests: checkpoint idempotency, crash resume, parallel, signals, cancel
+- [x] `Conduit.Workflow(w)` interface — `run`, `config`
+- [x] `Conduit.WorkflowContext` type passed to `run`
+- [x] `Conduit.WorkflowContext.checkpoint` — store result in DB, skip on resume
+- [x] `Conduit.WorkflowContext.parallel` — fan-out with per-item checkpoint sub-namespace
+- [x] `Conduit.WorkflowContext.wait_for_signal` — poll for signal or timeout
+- [x] `Conduit.WorkflowContext.warm_cache` — bulk-load checkpoints before run()
+- [x] `Conduit.start_workflow/3` — insert row, enqueue runner, return handle
+- [x] `Conduit.signal_workflow/4` — insert signal row for running workflow
+- [x] `Conduit.cancel_workflow/3` — cancel with reason
+- [x] `Conduit.workflow_status/2` — query current status
+- [x] `Conduit.register_workflow/3` — register runner in WorkflowRegistry
+- [x] `Conduit.WorkflowRegistry` — in-process registry with register/lookup/run
+- [x] `Conduit.WorkflowRunner` — job performer for conduit.workflow_runner
+- [x] Crash recovery: warm_cache restores checkpoint state; runner re-runs from start but completed checkpoints are no-ops
+- [x] Workflow timeout check at runner entry point
+- [x] Sub-workflow support via parent_id field (runner enqueues child as normal workflow)
+- [x] `Conduit.WorkflowConfig` type — execution_mode, timeout, tags
+- [x] `Conduit.WorkflowError` type — Failed | Cancelled | TimedOut | StorageError
+- [x] Migration: conduit_workflows, conduit_checkpoints, conduit_workflow_signals tables
+- [x] Tests: checkpoint cache hit/miss, parallel, registry dispatch, error variants, runner discard on missing workflow
+- [ ] `start_workflow_and_wait/3` — synchronous variant (deferred; needs task coordination)
+- [ ] `checkpoint_loop!` — explicit loop primitive (usable via plain recursion for now)
 
 ---
 

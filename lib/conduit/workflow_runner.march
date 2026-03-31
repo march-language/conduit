@@ -1,0 +1,141 @@
+doc """
+Conduit.WorkflowRunner — executes workflow instances as durable jobs.
+
+The runner is registered as a regular Conduit job with type
+`"conduit.workflow_runner"`. When enqueued, its payload is:
+  {"workflow_id": "<uuid>"}
+
+Execution sequence:
+
+  1. Parse workflow_id from payload.
+  2. Load the workflow row from DB (conduit_workflows).
+  3. If already completed/cancelled/timed_out: finish (no-op).
+  4. Check workflow timeout_at; if exceeded: mark timed_out, finish.
+  5. Build WorkflowContext; warm checkpoint cache from DB.
+  6. Look up registered runner in WorkflowRegistry.
+  7. Call runner(input_json)(ctx).
+  8. On Ok(output_json): mark workflow completed.
+     On Err(Failed):     mark workflow failed (no retry).
+     On Err(Cancelled):  mark workflow cancelled.
+     On Err(TimedOut):   mark workflow timed_out.
+     On Err(StorageError): propagate as ConduitError.Retry.
+
+Crash recovery: if the runner job dies mid-execution, the job retries
+(heartbeat stale detection from Phase 2). On retry, warm_cache repopulates
+the checkpoint cache from DB — completed checkpoints are skipped, and
+execution resumes from the first incomplete step.
+"""
+
+mod Conduit.WorkflowRunner do
+  -- The job_type string used for all workflow runner jobs.
+  ptype RunnerJobType = "conduit.workflow_runner"
+
+  doc "The job_type constant (public so callers can use it in tests)."
+  fn job_type() : String do
+    RunnerJobType
+  end
+
+  doc """
+  Execute a workflow by id. This is called by the registered performer.
+
+  Delegates to prun after loading and validating the workflow row.
+  """
+  fn execute(storage, payload : String) : Result((), ConduitError) do
+    let workflow_id = pparse_workflow_id(payload)
+    if String.is_empty(workflow_id) do
+      Err(ConduitError.Discard("workflow_runner: missing workflow_id in payload: " ++ payload))
+    else
+      match Conduit.Storage.workflow_load(storage, workflow_id) do
+        Err(e)      -> Err(ConduitError.Retry("workflow_runner: storage error: " ++ e))
+        Ok(None)    -> Err(ConduitError.Discard("workflow_runner: workflow not found: " ++ workflow_id))
+        Ok(Some(row)) ->
+          -- Already in a terminal state — nothing to do.
+          if pis_terminal(row.status) do
+            Ok(())
+          else
+            prun(storage, row)
+          end
+      end
+    end
+  end
+
+  doc """
+  Enqueue a workflow_runner job for the given workflow_id.
+  Called immediately after inserting a new workflow row.
+  """
+  fn enqueue(storage, workflow_id : String, config : Conduit.WorkflowConfig) : Result(String, String) do
+    let job_config = {
+      ..Conduit.JobConfig.default(),
+      tags = config.tags
+    }
+    let payload = "{\"workflow_id\": \"" ++ workflow_id ++ "\"}"
+    Conduit.Queue.enqueue(storage, RunnerJobType, payload, job_config)
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Private: execution
+  -- ─────────────────────────────────────────────────────────────
+
+  pfn prun(storage, row : Conduit.WorkflowRow) : Result((), ConduitError) do
+    -- Check timeout.
+    let timed_out = match row.timeout_at do
+      None    -> false
+      Some(t) -> DateTime.to_timestamp(DateTime.now()) >= DateTime.to_timestamp(t)
+    end
+    if timed_out do
+      pmark_status(storage, row.id, "timed_out", None, Some("Workflow exceeded timeout"))
+      Ok(())
+    else
+      -- Build context and warm checkpoint cache.
+      let ctx = Conduit.WorkflowContext.new(row.id)
+      match Conduit.WorkflowContext.warm_cache(storage, ctx) do
+        Err(e) -> Err(ConduitError.Retry("workflow_runner: cache warm failed: " ++ e))
+        Ok(()) ->
+          -- Look up and run the registered workflow.
+          match Conduit.WorkflowRegistry.run(row.workflow_type, row.input, ctx) do
+            Ok(output_json) ->
+              pmark_status(storage, row.id, "completed", Some(output_json), None)
+              Ok(())
+            Err(Conduit.WorkflowError.Failed(msg)) ->
+              pmark_status(storage, row.id, "failed", None, Some(msg))
+              Err(ConduitError.Discard("workflow failed: " ++ msg))
+            Err(Conduit.WorkflowError.Cancelled(msg)) ->
+              pmark_status(storage, row.id, "cancelled", None, Some(msg))
+              Ok(())
+            Err(Conduit.WorkflowError.TimedOut) ->
+              pmark_status(storage, row.id, "timed_out", None, Some("Timed out during execution"))
+              Ok(())
+            Err(Conduit.WorkflowError.StorageError(msg)) ->
+              -- Transient — let the job retry via normal backoff.
+              Err(ConduitError.Retry("workflow_runner: storage error: " ++ msg))
+          end
+      end
+    end
+  end
+
+  pfn pmark_status(storage, workflow_id : String, status : String, output : Option(String), error : Option(String)) : () do
+    match Conduit.Storage.workflow_update_status(storage, workflow_id, status, output, error) do
+      Ok(())  -> ()
+      Err(e)  -> Logger.error("workflow_runner: failed to mark " ++ workflow_id ++ " as " ++ status ++ ": " ++ e)
+    end
+  end
+
+  pfn pis_terminal(status : String) : Bool do
+    status == "completed" || status == "failed" || status == "cancelled" || status == "timed_out"
+  end
+
+  -- Extract workflow_id from payload JSON.
+  -- Payload is: {"workflow_id": "..."}
+  pfn pparse_workflow_id(payload : String) : String do
+    -- Simple extraction: find "workflow_id": "VALUE" in the JSON string.
+    let key = "\"workflow_id\": \""
+    match String.split_first(payload, key) do
+      None          -> ""
+      Some((_, rest)) ->
+        match String.split_first(rest, "\"") do
+          None            -> ""
+          Some((value, _)) -> value
+        end
+    end
+  end
+end

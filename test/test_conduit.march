@@ -1,5 +1,5 @@
 doc """
-Phase 1, 2 & 3 tests for Conduit — Simple Job Queue + Retries & Dead Letters + Cron Scheduling.
+Phase 1, 2, 3 & 4 tests for Conduit — Job Queue + Retries + Cron + Workflows.
 
 These tests use a fake in-memory storage backend so no database is required.
 The fake storage captures all operations and lets tests inspect state.
@@ -40,6 +40,22 @@ Phase 3 coverage:
   - CronRegistry.fire calls the registered performer
   - CronRegistry.fire returns Discard for unknown type
   - CronOverlap round-trip via overlap_to_string / overlap_from_string
+
+Phase 4 coverage:
+  - WorkflowContext.new builds context with correct workflow_id
+  - WorkflowContext.child adds namespace prefix
+  - WorkflowContext.checkpoint executes fn and caches result on first call
+  - WorkflowContext.checkpoint returns cached result without calling fn on replay
+  - WorkflowContext.checkpoint returns StorageError on storage failure
+  - WorkflowContext.parallel runs all items and collects results
+  - WorkflowContext.parallel propagates first error
+  - WorkflowRegistry.register and lookup round-trip
+  - WorkflowRegistry.run dispatches to registered runner
+  - WorkflowRegistry.run returns Failed for unregistered workflow
+  - WorkflowConfig.default has Checkpoint execution mode
+  - WorkflowRunner.job_type returns correct string
+  - WorkflowRunner.execute discards on missing workflow_id
+  - WorkflowError variants carry correct payloads
 """
 
 mod ConduitTest do
@@ -876,5 +892,354 @@ mod ConduitTest do
       Conduit.CronOverlap.Skip -> assert_true(true)
       _                        -> assert_true(false)
     end
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Phase 4: WorkflowContext
+  -- ─────────────────────────────────────────────────────────────
+
+  fn test_workflow_context_new_sets_workflow_id() do
+    let wf_id = uuid_v4()
+    let ctx   = Conduit.WorkflowContext.new(wf_id)
+    assert_eq_str(ctx.workflow_id, wf_id)
+    assert_eq_str(ctx.namespace, "")
+    assert_none(ctx.parent_id)
+  end
+
+  fn test_workflow_context_child_adds_namespace() do
+    let ctx   = Conduit.WorkflowContext.new(uuid_v4())
+    let child = Conduit.WorkflowContext.child(ctx, "parallel:0:")
+    assert_eq_str(child.namespace, "parallel:0:")
+    assert_eq_str(child.workflow_id, ctx.workflow_id)
+  end
+
+  fn test_workflow_context_child_nests_namespace() do
+    let ctx    = Conduit.WorkflowContext.new(uuid_v4())
+    let child1 = Conduit.WorkflowContext.child(ctx, "parallel:0:")
+    let child2 = Conduit.WorkflowContext.child(child1, "parallel:1:")
+    assert_eq_str(child2.namespace, "parallel:0:parallel:1:")
+  end
+
+  fn test_workflow_context_checkpoint_executes_fn_on_first_call() do
+    -- Use a fake storage that always returns None (no prior checkpoint).
+    let wf_id    = uuid_v4()
+    let ctx      = Conduit.WorkflowContext.new(wf_id)
+    let vault_key = "phase4_test_" ++ uuid_v4()
+    Vault.set(vault_key, "call_count", 0)
+
+    let storage = fake_workflow_storage_new(vault_key)
+
+    let result = Conduit.WorkflowContext.checkpoint(storage, ctx, "step1", fn () ->
+      let count = Vault.get(vault_key, "call_count") |> unwrap_or(0)
+      Vault.set(vault_key, "call_count", count + 1)
+      "\"result_a\""
+    end)
+
+    assert_ok(result)
+    match result do
+      Err(_)  -> assert_true(false)
+      Ok(val) -> assert_eq_str(val, "\"result_a\"")
+    end
+    let calls = Vault.get(vault_key, "call_count") |> unwrap_or(-1)
+    assert_eq_int(calls, 1)
+  end
+
+  fn test_workflow_context_checkpoint_skips_fn_on_replay() do
+    -- Pre-populate the checkpoint in the context cache (simulating resumed workflow).
+    let wf_id = uuid_v4()
+    let ctx   = Conduit.WorkflowContext.new(wf_id)
+    -- Seed the cache directly in Vault (simulates warm_cache having run).
+    Vault.set(ctx.checkpoint_key, "step1", "\"cached_value\"")
+
+    let vault_key = "phase4_replay_" ++ uuid_v4()
+    Vault.set(vault_key, "fn_called", false)
+    let storage = fake_workflow_storage_new(vault_key)
+
+    let result = Conduit.WorkflowContext.checkpoint(storage, ctx, "step1", fn () ->
+      Vault.set(vault_key, "fn_called", true)
+      "\"should_not_be_called\""
+    end)
+
+    assert_ok(result)
+    match result do
+      Err(_)  -> assert_true(false)
+      Ok(val) -> assert_eq_str(val, "\"cached_value\"")
+    end
+    assert_eq_bool(Vault.get(vault_key, "fn_called") |> unwrap_or(true), false)
+  end
+
+  fn test_workflow_context_checkpoint_storage_error() do
+    let wf_id   = uuid_v4()
+    let ctx     = Conduit.WorkflowContext.new(wf_id)
+    let storage = fake_workflow_storage_with_error("simulated DB error")
+
+    let result = Conduit.WorkflowContext.checkpoint(storage, ctx, "step1", fn () -> "value" end)
+    assert_err(result)
+    match result do
+      Ok(_)                                     -> assert_true(false)
+      Err(Conduit.WorkflowError.StorageError(_)) -> assert_true(true)
+      Err(_)                                    -> assert_true(false)
+    end
+  end
+
+  fn test_workflow_context_parallel_collects_all_results() do
+    let wf_id   = uuid_v4()
+    let ctx     = Conduit.WorkflowContext.new(wf_id)
+    let vault_k = "parallel_test_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+
+    let items = Cons("a", Cons("b", Cons("c", Nil)))
+    let result = Conduit.WorkflowContext.parallel(storage, ctx, items, fn (item, _branch_ctx) ->
+      Ok("result_" ++ item)
+    end)
+
+    assert_ok(result)
+    match result do
+      Err(_)     -> assert_true(false)
+      Ok(results) ->
+        assert_eq_int(List.length(results), 3)
+        assert_true(List.member(results, "result_a"))
+        assert_true(List.member(results, "result_b"))
+        assert_true(List.member(results, "result_c"))
+    end
+  end
+
+  fn test_workflow_context_parallel_propagates_first_error() do
+    let wf_id   = uuid_v4()
+    let ctx     = Conduit.WorkflowContext.new(wf_id)
+    let vault_k = "parallel_err_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+
+    let items = Cons("x", Cons("y", Nil))
+    let result = Conduit.WorkflowContext.parallel(storage, ctx, items, fn (item, _branch_ctx) ->
+      if item == "x" do
+        Err(Conduit.WorkflowError.Failed("item x failed"))
+      else
+        Ok("ok_" ++ item)
+      end
+    end)
+
+    assert_err(result)
+    match result do
+      Ok(_) -> assert_true(false)
+      Err(Conduit.WorkflowError.Failed(msg)) -> assert_eq_str(msg, "item x failed")
+      Err(_) -> assert_true(false)
+    end
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Phase 4: WorkflowRegistry
+  -- ─────────────────────────────────────────────────────────────
+
+  fn test_workflow_registry_register_and_lookup() do
+    let wf_type = "TestWorkflow_" ++ uuid_v4()
+    let config  = Conduit.WorkflowConfig.default()
+    Conduit.WorkflowRegistry.register(wf_type, fn _input -> fn _ctx -> Ok("{}") end, config)
+
+    let result = Conduit.WorkflowRegistry.lookup(wf_type)
+    assert_some(result)
+    match result do
+      None    -> assert_true(false)
+      Some(e) ->
+        match e.config.execution_mode do
+          Conduit.ExecutionMode.Checkpoint -> assert_true(true)
+          _                                -> assert_true(false)
+        end
+    end
+  end
+
+  fn test_workflow_registry_lookup_none_for_unknown() do
+    let result = Conduit.WorkflowRegistry.lookup("__no_such_workflow__")
+    assert_none(result)
+  end
+
+  fn test_workflow_registry_run_dispatches_to_runner() do
+    let wf_type = "RunDispatch_" ++ uuid_v4()
+    let vault_k = "wf_run_" ++ uuid_v4()
+    Vault.set(vault_k, "ran", false)
+
+    Conduit.WorkflowRegistry.register(wf_type, fn _input -> fn _ctx ->
+      Vault.set(vault_k, "ran", true)
+      Ok("{\"ok\": true}")
+    end end, Conduit.WorkflowConfig.default())
+
+    let ctx    = Conduit.WorkflowContext.new(uuid_v4())
+    let result = Conduit.WorkflowRegistry.run(wf_type, "{}", ctx)
+    assert_ok(result)
+    assert_eq_bool(Vault.get(vault_k, "ran") |> unwrap_or(false), true)
+  end
+
+  fn test_workflow_registry_run_returns_failed_for_unregistered() do
+    let ctx    = Conduit.WorkflowContext.new(uuid_v4())
+    let result = Conduit.WorkflowRegistry.run("__no_such_wf__", "{}", ctx)
+    assert_err(result)
+    match result do
+      Err(Conduit.WorkflowError.Failed(_)) -> assert_true(true)
+      _                                    -> assert_true(false)
+    end
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Phase 4: WorkflowConfig and WorkflowError
+  -- ─────────────────────────────────────────────────────────────
+
+  fn test_workflow_config_default_is_checkpoint_mode() do
+    let cfg = Conduit.WorkflowConfig.default()
+    match cfg.execution_mode do
+      Conduit.ExecutionMode.Checkpoint -> assert_true(true)
+      _                                -> assert_true(false)
+    end
+    assert_none(cfg.timeout)
+  end
+
+  fn test_workflow_error_failed_carries_message() do
+    let e = Conduit.WorkflowError.Failed("something broke")
+    match e do
+      Conduit.WorkflowError.Failed(msg) -> assert_eq_str(msg, "something broke")
+      _                                  -> assert_true(false)
+    end
+  end
+
+  fn test_workflow_error_cancelled_carries_reason() do
+    let e = Conduit.WorkflowError.Cancelled("user request")
+    match e do
+      Conduit.WorkflowError.Cancelled(r) -> assert_eq_str(r, "user request")
+      _                                   -> assert_true(false)
+    end
+  end
+
+  fn test_workflow_error_timed_out_has_no_payload() do
+    let e = Conduit.WorkflowError.TimedOut
+    match e do
+      Conduit.WorkflowError.TimedOut -> assert_true(true)
+      _                               -> assert_true(false)
+    end
+  end
+
+  fn test_workflow_error_storage_error_carries_message() do
+    let e = Conduit.WorkflowError.StorageError("db unreachable")
+    match e do
+      Conduit.WorkflowError.StorageError(m) -> assert_eq_str(m, "db unreachable")
+      _                                      -> assert_true(false)
+    end
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Phase 4: WorkflowRunner
+  -- ─────────────────────────────────────────────────────────────
+
+  fn test_workflow_runner_job_type_is_correct() do
+    assert_eq_str(Conduit.WorkflowRunner.job_type(), "conduit.workflow_runner")
+  end
+
+  fn test_workflow_runner_discards_on_empty_workflow_id() do
+    -- A payload with no workflow_id should result in Discard (not Retry).
+    let storage = fake_workflow_storage_new("runner_test_" ++ uuid_v4())
+    let result  = Conduit.WorkflowRunner.execute(storage, "{}")
+    assert_err(result)
+    match result do
+      Err(ConduitError.Discard(_)) -> assert_true(true)
+      _                            -> assert_true(false)
+    end
+  end
+
+  fn test_workflow_runner_discards_on_unknown_workflow_id() do
+    -- Payload has a valid workflow_id format but the workflow doesn't exist in storage.
+    let vault_k = "runner_unk_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let payload = "{\"workflow_id\": \"" ++ uuid_v4() ++ "\"}"
+    let result  = Conduit.WorkflowRunner.execute(storage, payload)
+    assert_err(result)
+    match result do
+      Err(ConduitError.Discard(_)) -> assert_true(true)
+      _                            -> assert_true(false)
+    end
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Phase 4: Fake workflow storage helpers
+  -- ─────────────────────────────────────────────────────────────
+
+  -- A fake storage that supports checkpoint_get/checkpoint_set/workflow_load,
+  -- with all other methods delegating to the in-memory job storage.
+  -- vault_key is used to isolate state between tests.
+
+  ptype FakeWorkflowStorage = FakeWorkflowStorage({
+    vault_key  : String,
+    error      : Option(String)
+  })
+
+  pfn fake_workflow_storage_new(vault_key : String) : FakeWorkflowStorage do
+    Vault.set(vault_key, "checkpoints", Nil)
+    FakeWorkflowStorage({ vault_key = vault_key, error = None })
+  end
+
+  pfn fake_workflow_storage_with_error(error_msg : String) : FakeWorkflowStorage do
+    let key = "fake_err_" ++ uuid_v4()
+    FakeWorkflowStorage({ vault_key = key, error = Some(error_msg) })
+  end
+
+  impl Conduit.Storage(FakeWorkflowStorage) do
+    -- Job methods — unused in Phase 4 tests, return stubs.
+    fn enqueue(_self, job : Conduit.JobRow) : Result(String, String) do Ok(job.id) end
+    fn fetch_next(_self, _queue : String) : Result(Option(Conduit.JobRow), String) do Ok(None) end
+    fn mark_running(_self, _id : String, _wid : String) : Result((), String) do Ok(()) end
+    fn mark_completed(_self, _id : String) : Result((), String) do Ok(()) end
+    fn heartbeat(_self, _id : String) : Result((), String) do Ok(()) end
+    fn schedule_retry(_self, _id : String, _msg : String, _at : DateTime) : Result((), String) do Ok(()) end
+    fn discard(_self, _id : String, _msg : String) : Result((), String) do Ok(()) end
+    fn move_to_dead_letter(_self, _dl : Conduit.DeadLetter) : Result((), String) do Ok(()) end
+    fn rescue_stale(_self, _secs : Int) : Result(List(String), String) do Ok(Nil) end
+
+    -- Cron stubs.
+    fn cron_upsert(_self, _s : Conduit.CronSchedule) : Result((), String) do Ok(()) end
+    fn cron_load_due(_self) : Result(List(Conduit.CronSchedule), String) do Ok(Nil) end
+    fn cron_load_by_id(_self, _id : String) : Result(Option(Conduit.CronSchedule), String) do Ok(None) end
+    fn cron_mark_fired(_self, _id : String, _jid : String, _next : Option(DateTime)) : Result((), String) do Ok(()) end
+    fn cron_job_active(_self, _id : String) : Result(Bool, String) do Ok(false) end
+    fn cron_cancel_job(_self, _id : String) : Result((), String) do Ok(()) end
+    fn cron_delete(_self, _id : String) : Result((), String) do Ok(()) end
+    fn cron_advisory_lock(_self, _id : Int) : Result(Bool, String) do Ok(true) end
+    fn cron_advisory_unlock(_self, _id : Int) : Result((), String) do Ok(()) end
+
+    -- Workflow methods.
+    fn workflow_insert(_self, row : Conduit.WorkflowRow) : Result(String, String) do Ok(row.id) end
+
+    fn workflow_load(self : FakeWorkflowStorage, _wf_id : String) : Result(Option(Conduit.WorkflowRow), String) do
+      match self.error do
+        Some(e) -> Err(e)
+        None    -> Ok(None)    -- no workflow found (tests that need one create it differently)
+      end
+    end
+
+    fn workflow_update_status(_self, _id : String, _status : String, _out : Option(String), _err : Option(String)) : Result((), String) do Ok(()) end
+    fn workflow_cancel(_self, _id : String, _reason : String) : Result((), String) do Ok(()) end
+
+    fn checkpoint_get(self : FakeWorkflowStorage, _wf_id : String, _name : String) : Result(Option(String), String) do
+      match self.error do
+        Some(e) -> Err(e)
+        None    -> Ok(None)
+      end
+    end
+
+    fn checkpoint_set(self : FakeWorkflowStorage, wf_id : String, name : String, value : String, _dur : Int) : Result((), String) do
+      match self.error do
+        Some(e) -> Err(e)
+        None    ->
+          let checkpoints = Vault.get(self.vault_key, "checkpoints") |> unwrap_or(Nil)
+          Vault.set(self.vault_key, "checkpoints", Cons((wf_id, name, value), checkpoints))
+          Ok(())
+      end
+    end
+
+    fn checkpoint_load_all(_self, _wf_id : String) : Result(List(Conduit.WorkflowCheckpoint), String) do Ok(Nil) end
+
+    fn signal_insert(_self, sig : Conduit.WorkflowSignal) : Result(Int, String) do
+      let _ = sig
+      Ok(1)
+    end
+
+    fn signal_peek(_self, _wf_id : String, _type : String) : Result(Option(Conduit.WorkflowSignal), String) do Ok(None) end
+    fn signal_mark_delivered(_self, _id : Int) : Result((), String) do Ok(()) end
   end
 end

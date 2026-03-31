@@ -80,6 +80,18 @@ interface Conduit.Storage(s) do
   fn cron_delete          : s -> String -> Result((), String)
   fn cron_advisory_lock   : s -> Int -> Result(Bool, String)
   fn cron_advisory_unlock : s -> Int -> Result((), String)
+
+  -- Workflow storage methods (Phase 4)
+  fn workflow_insert        : s -> Conduit.WorkflowRow -> Result(String, String)
+  fn workflow_load          : s -> String -> Result(Option(Conduit.WorkflowRow), String)
+  fn workflow_update_status : s -> String -> String -> Option(String) -> Option(String) -> Result((), String)
+  fn workflow_cancel        : s -> String -> String -> Result((), String)
+  fn checkpoint_get         : s -> String -> String -> Result(Option(String), String)
+  fn checkpoint_set         : s -> String -> String -> String -> Int -> Result((), String)
+  fn checkpoint_load_all    : s -> String -> Result(List(Conduit.WorkflowCheckpoint), String)
+  fn signal_insert          : s -> Conduit.WorkflowSignal -> Result(Int, String)
+  fn signal_peek            : s -> String -> String -> Result(Option(Conduit.WorkflowSignal), String)
+  fn signal_mark_delivered  : s -> Int -> Result((), String)
 end
 
 doc """
@@ -409,6 +421,179 @@ mod Conduit.Storage.Postgres do
         Err(e) -> Err(e)
       end
     end
+
+    -- ─────────────────────────────────────────────────────────────
+    -- Workflow storage methods (Phase 4)
+    -- ─────────────────────────────────────────────────────────────
+
+    fn workflow_insert(_self, row : Conduit.WorkflowRow) : Result(String, String) do
+      let sql = "
+        INSERT INTO conduit_workflows
+          (id, workflow_type, parent_id, input, status, started_at, timeout_at, tags, meta)
+        VALUES ($1, $2, $3, $4, 'running', NOW(), $5, $6, '{}')
+        ON CONFLICT (id) DO NOTHING
+      "
+      let parent = Option.unwrap_or(row.parent_id, "")
+      let toa    = Option.map(row.timeout_at, fn d -> DateTime.format(d, "%Y-%m-%dT%H:%M:%SZ") end) |> Option.unwrap_or("")
+      let params = Cons(row.id,
+                   Cons(row.workflow_type,
+                   Cons(parent,
+                   Cons(row.input,
+                   Cons(toa,
+                   Cons(string_join(row.tags, ","),
+                   Nil))))))
+      match Depot.Repo.query(sql, params) do
+        Ok(_)  -> Ok(row.id)
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn workflow_load(_self, workflow_id : String) : Result(Option(Conduit.WorkflowRow), String) do
+      let sql = "
+        SELECT id, workflow_type, parent_id, input, output, status,
+               started_at, completed_at, timeout_at, error, error_at, tags, meta
+        FROM conduit_workflows
+        WHERE id = $1
+        LIMIT 1
+      "
+      match Depot.Repo.query(sql, Cons(workflow_id, Nil)) do
+        Ok(rows) ->
+          match rows do
+            Nil        -> Ok(None)
+            Cons(r, _) -> Ok(Some(prow_to_workflow(r)))
+          end
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn workflow_update_status(_self, workflow_id : String, status : String, output : Option(String), error : Option(String)) : Result((), String) do
+      let sql = "
+        UPDATE conduit_workflows
+        SET status       = $2,
+            output       = CASE WHEN $3 != '' THEN $3::jsonb ELSE output END,
+            error        = CASE WHEN $4 != '' THEN $4 ELSE error END,
+            error_at     = CASE WHEN $4 != '' THEN NOW() ELSE error_at END,
+            completed_at = CASE WHEN $2 IN ('completed','failed','cancelled','timed_out') THEN NOW() ELSE completed_at END
+        WHERE id = $1
+      "
+      let out_s = Option.unwrap_or(output, "")
+      let err_s = Option.unwrap_or(error, "")
+      match Depot.Repo.query(sql, Cons(workflow_id, Cons(status, Cons(out_s, Cons(err_s, Nil))))) do
+        Ok(_)  -> Ok(())
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn workflow_cancel(_self, workflow_id : String, reason : String) : Result((), String) do
+      let sql = "
+        UPDATE conduit_workflows
+        SET status = 'cancelled', error = $2, completed_at = NOW()
+        WHERE id = $1
+          AND status = 'running'
+      "
+      match Depot.Repo.query(sql, Cons(workflow_id, Cons(reason, Nil))) do
+        Ok(_)  -> Ok(())
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn checkpoint_get(_self, workflow_id : String, name : String) : Result(Option(String), String) do
+      let sql = "
+        SELECT value
+        FROM conduit_checkpoints
+        WHERE workflow_id = $1 AND name = $2
+        LIMIT 1
+      "
+      match Depot.Repo.query(sql, Cons(workflow_id, Cons(name, Nil))) do
+        Ok(rows) ->
+          match rows do
+            Nil        -> Ok(None)
+            Cons(r, _) -> Ok(Some(Map.get(r, "value") |> unwrap_or("{}")))
+          end
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn checkpoint_set(_self, workflow_id : String, name : String, value : String, duration_ms : Int) : Result((), String) do
+      let sql = "
+        INSERT INTO conduit_checkpoints (workflow_id, name, value, duration_ms)
+        VALUES ($1, $2, $3::jsonb, $4)
+        ON CONFLICT (workflow_id, name) DO NOTHING
+      "
+      let params = Cons(workflow_id, Cons(name, Cons(value, Cons(int_to_string(duration_ms), Nil))))
+      match Depot.Repo.query(sql, params) do
+        Ok(_)  -> Ok(())
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn checkpoint_load_all(_self, workflow_id : String) : Result(List(Conduit.WorkflowCheckpoint), String) do
+      let sql = "
+        SELECT id, workflow_id, name, value, created_at, duration_ms
+        FROM conduit_checkpoints
+        WHERE workflow_id = $1
+        ORDER BY id ASC
+      "
+      match Depot.Repo.query(sql, Cons(workflow_id, Nil)) do
+        Ok(rows) -> Ok(List.map(rows, fn r -> prow_to_checkpoint(r) end))
+        Err(e)   -> Err(e)
+      end
+    end
+
+    fn signal_insert(_self, sig : Conduit.WorkflowSignal) : Result(Int, String) do
+      let sql = "
+        INSERT INTO conduit_workflow_signals
+          (workflow_id, signal_type, payload, status, sent_at, expires_at, sent_by)
+        VALUES ($1, $2, $3::jsonb, 'pending', NOW(), $4, $5)
+        RETURNING id
+      "
+      let expires = Option.map(sig.expires_at, fn d -> DateTime.format(d, "%Y-%m-%dT%H:%M:%SZ") end) |> Option.unwrap_or("")
+      let sent_by = Option.unwrap_or(sig.sent_by, "")
+      let params  = Cons(sig.workflow_id, Cons(sig.signal_type, Cons(sig.payload, Cons(expires, Cons(sent_by, Nil)))))
+      match Depot.Repo.query(sql, params) do
+        Ok(rows) ->
+          let id = match rows do
+            Cons(r, _) -> Map.get(r, "id") |> Option.flat_map(fn s -> String.to_int(s) end) |> unwrap_or(0)
+            Nil        -> 0
+          end
+          Ok(id)
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn signal_peek(_self, workflow_id : String, signal_type : String) : Result(Option(Conduit.WorkflowSignal), String) do
+      let sql = "
+        SELECT id, workflow_id, signal_type, payload, status,
+               sent_at, delivered_at, expires_at, sent_by
+        FROM conduit_workflow_signals
+        WHERE workflow_id = $1
+          AND signal_type = $2
+          AND status = 'pending'
+          AND (expires_at IS NULL OR expires_at > NOW())
+        ORDER BY id ASC
+        LIMIT 1
+      "
+      match Depot.Repo.query(sql, Cons(workflow_id, Cons(signal_type, Nil))) do
+        Ok(rows) ->
+          match rows do
+            Nil        -> Ok(None)
+            Cons(r, _) -> Ok(Some(prow_to_signal(r)))
+          end
+        Err(e) -> Err(e)
+      end
+    end
+
+    fn signal_mark_delivered(_self, signal_id : Int) : Result((), String) do
+      let sql = "
+        UPDATE conduit_workflow_signals
+        SET status = 'delivered', delivered_at = NOW()
+        WHERE id = $1
+      "
+      match Depot.Repo.query(sql, Cons(int_to_string(signal_id), Nil)) do
+        Ok(_)  -> Ok(())
+        Err(e) -> Err(e)
+      end
+    end
   end
 
   pfn prow_to_cron_schedule(row : Map) : Conduit.CronSchedule do
@@ -458,7 +643,54 @@ mod Conduit.Storage.Postgres do
     DateTime.parse(s, "%Y-%m-%dT%H:%M:%SZ") |> unwrap
   end
 
+  pfn pparse_dt_opt(s : String) : Option(DateTime) do
+    if String.is_empty(s) do None else Some(pparse_dt(s)) end
+  end
+
   pfn perror_json(msg : String) : String do
     "[{\"error\": \"" ++ msg ++ "\", \"at\": \"" ++ DateTime.format(DateTime.now(), "%Y-%m-%dT%H:%M:%SZ") ++ "\"}]"
+  end
+
+  pfn prow_to_workflow(row : Map) : Conduit.WorkflowRow do
+    {
+      id            = Map.get(row, "id")            |> unwrap,
+      workflow_type = Map.get(row, "workflow_type") |> unwrap,
+      parent_id     = Map.get(row, "parent_id")     |> Option.flat_map(fn s -> if String.is_empty(s) do None else Some(s) end end),
+      input         = Map.get(row, "input")         |> unwrap_or("{}"),
+      output        = Map.get(row, "output")        |> Option.flat_map(fn s -> if String.is_empty(s) do None else Some(s) end end),
+      status        = Map.get(row, "status")        |> unwrap_or("running"),
+      started_at    = Map.get(row, "started_at")    |> unwrap |> pparse_dt,
+      completed_at  = Map.get(row, "completed_at")  |> Option.flat_map(fn s -> pparse_dt_opt(s) end),
+      timeout_at    = Map.get(row, "timeout_at")    |> Option.flat_map(fn s -> pparse_dt_opt(s) end),
+      error         = Map.get(row, "error")         |> Option.flat_map(fn s -> if String.is_empty(s) do None else Some(s) end end),
+      error_at      = Map.get(row, "error_at")      |> Option.flat_map(fn s -> pparse_dt_opt(s) end),
+      tags          = Map.get(row, "tags")          |> Option.map(fn s -> if String.is_empty(s) do Nil else String.split(s, ",") end end) |> unwrap_or(Nil),
+      meta          = Map.get(row, "meta")          |> unwrap_or("{}")
+    }
+  end
+
+  pfn prow_to_checkpoint(row : Map) : Conduit.WorkflowCheckpoint do
+    {
+      id          = Map.get(row, "id")          |> Option.flat_map(fn s -> String.to_int(s) end) |> unwrap_or(0),
+      workflow_id = Map.get(row, "workflow_id") |> unwrap,
+      name        = Map.get(row, "name")        |> unwrap,
+      value       = Map.get(row, "value")       |> unwrap_or("{}"),
+      created_at  = Map.get(row, "created_at")  |> unwrap |> pparse_dt,
+      duration_ms = Map.get(row, "duration_ms") |> Option.flat_map(fn s -> String.to_int(s) end)
+    }
+  end
+
+  pfn prow_to_signal(row : Map) : Conduit.WorkflowSignal do
+    {
+      id           = Map.get(row, "id")          |> Option.flat_map(fn s -> String.to_int(s) end) |> unwrap_or(0),
+      workflow_id  = Map.get(row, "workflow_id") |> unwrap,
+      signal_type  = Map.get(row, "signal_type") |> unwrap,
+      payload      = Map.get(row, "payload")     |> unwrap_or("{}"),
+      status       = Map.get(row, "status")      |> unwrap_or("pending"),
+      sent_at      = Map.get(row, "sent_at")     |> unwrap |> pparse_dt,
+      delivered_at = Map.get(row, "delivered_at") |> Option.flat_map(fn s -> pparse_dt_opt(s) end),
+      expires_at   = Map.get(row, "expires_at")  |> Option.flat_map(fn s -> pparse_dt_opt(s) end),
+      sent_by      = Map.get(row, "sent_by")     |> Option.flat_map(fn s -> if String.is_empty(s) do None else Some(s) end end)
+    }
   end
 end

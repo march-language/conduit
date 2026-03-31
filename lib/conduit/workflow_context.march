@@ -1,0 +1,196 @@
+doc """
+Conduit.WorkflowContext — durable execution primitives for workflows.
+
+This module provides the three core workflow operations:
+
+  checkpoint(storage, ctx, name, f)
+    — run f() once and persist the result; on re-execution (after crash)
+      return the stored value without calling f again.
+
+  parallel(storage, ctx, items, f)
+    — execute f for each item with its own checkpoint sub-namespace;
+      returns results in order. Phase 4: sequential execution in-process.
+      Phase 5+ will spawn true parallel tasks.
+
+  wait_for_signal(storage, ctx, signal_type, timeout)
+    — check DB for a pending signal of the given type; if none exists,
+      poll until one arrives or the timeout fires.
+
+  warm_cache(storage, ctx)
+    — load all checkpoints for this workflow from the DB into Vault
+      so subsequent checkpoint() calls hit the in-memory cache first.
+
+Checkpoint values are stored as plain strings (JSON-serialized by the caller).
+The checkpoint cache is stored in Vault under the key
+  "conduit_wf_" ++ workflow_id
+with the full checkpoint name (namespace ++ name) as the Vault field.
+"""
+
+mod Conduit.WorkflowContext do
+  doc "Create a root context for a new or resuming workflow execution."
+  fn new(workflow_id : String) : Conduit.WorkflowContext do
+    {
+      workflow_id    = workflow_id,
+      parent_id      = None,
+      namespace      = "",
+      checkpoint_key = pvault_key(workflow_id)
+    }
+  end
+
+  doc "Create a sub-context for a parallel branch (namespaced checkpoints)."
+  fn child(ctx : Conduit.WorkflowContext, branch_prefix : String) : Conduit.WorkflowContext do
+    {
+      workflow_id    = ctx.workflow_id,
+      parent_id      = ctx.parent_id,
+      namespace      = ctx.namespace ++ branch_prefix,
+      checkpoint_key = ctx.checkpoint_key
+    }
+  end
+
+  doc """
+  Execute a durable checkpoint.
+
+  1. Check in-memory Vault cache for `namespace ++ name`.
+  2. If cached: return immediately — fn is NOT called.
+  3. Check DB: `conduit_checkpoints` for (workflow_id, full_name).
+  4. If found in DB: populate cache and return.
+  5. Otherwise: call fn(), record duration, persist to DB, cache, return.
+
+  `f` must return a String (typically JSON-serialized). The return value
+  is the stored string on success or a WorkflowError on failure.
+  """
+  fn checkpoint(storage, ctx : Conduit.WorkflowContext, name : String, f : fn () -> String) : Result(String, Conduit.WorkflowError) do
+    let full_name = ctx.namespace ++ name
+    -- 1. In-memory cache hit
+    match pvault_get(ctx.checkpoint_key, full_name) do
+      Some(v) -> Ok(v)
+      None    ->
+        -- 2. DB lookup
+        match Conduit.Storage.checkpoint_get(storage, ctx.workflow_id, full_name) do
+          Err(e)      -> Err(Conduit.WorkflowError.StorageError(e))
+          Ok(Some(v)) ->
+            pvault_set(ctx.checkpoint_key, full_name, v)
+            Ok(v)
+          Ok(None) ->
+            -- 3. Execute
+            let started = DateTime.to_timestamp(DateTime.now())
+            let value   = f()
+            let dur_ms  = (DateTime.to_timestamp(DateTime.now()) - started) * 1000
+            -- 4. Persist
+            match Conduit.Storage.checkpoint_set(storage, ctx.workflow_id, full_name, value, dur_ms) do
+              Err(e) -> Err(Conduit.WorkflowError.StorageError(e))
+              Ok(()) ->
+                pvault_set(ctx.checkpoint_key, full_name, value)
+                Ok(value)
+            end
+        end
+    end
+  end
+
+  doc """
+  Fan-out over a list of items, each with its own checkpoint sub-namespace.
+
+  Each item gets a child context `"parallel:N:"` so its checkpoints are
+  isolated and resumable independently. Execution is sequential in Phase 4.
+
+  `f` takes (item, sub_ctx) and returns Result(String, WorkflowError).
+  Returns Ok(List(String)) with results in order, or Err on first failure.
+  """
+  fn parallel(storage, ctx : Conduit.WorkflowContext, items : List(a), f : fn (a, Conduit.WorkflowContext) -> Result(String, Conduit.WorkflowError)) : Result(List(String), Conduit.WorkflowError) do
+    pparallel_loop(storage, ctx, items, 0, Nil)
+  end
+
+  pfn pparallel_loop(storage, ctx : Conduit.WorkflowContext, items : List(a), index : Int, acc : List(String)) : Result(List(String), Conduit.WorkflowError) do
+    match items do
+      Nil -> Ok(List.reverse(acc))
+      Cons(item, rest) ->
+        let branch_prefix = "parallel:" ++ int_to_string(index) ++ ":"
+        let branch_ctx    = child(ctx, branch_prefix)
+        match f((item, branch_ctx)) do
+          Err(e)  -> Err(e)
+          Ok(val) -> pparallel_loop(storage, ctx, rest, index + 1, Cons(val, acc))
+        end
+    end
+  end
+
+  doc """
+  Wait for a signal of `signal_type` to arrive for this workflow.
+
+  Checks the DB immediately for a pending/undelivered signal. If found,
+  marks it delivered and returns its payload. If not found, polls every
+  second until a signal arrives or the timeout fires.
+
+  Returns Ok(payload_json) or Err(WorkflowError.TimedOut).
+  """
+  fn wait_for_signal(storage, ctx : Conduit.WorkflowContext, signal_type : String, timeout : Option(Duration)) : Result(String, Conduit.WorkflowError) do
+    let deadline = Option.map(timeout, fn dur -> DateTime.to_timestamp(DateTime.add(DateTime.now(), dur)) end)
+    pwait_loop(storage, ctx.workflow_id, signal_type, deadline)
+  end
+
+  pfn pwait_loop(storage, workflow_id : String, signal_type : String, deadline : Option(Int)) : Result(String, Conduit.WorkflowError) do
+    let now_ts = DateTime.to_timestamp(DateTime.now())
+    let timed_out = match deadline do
+      None    -> false
+      Some(d) -> now_ts >= d
+    end
+    if timed_out do
+      Err(Conduit.WorkflowError.TimedOut)
+    else
+      match Conduit.Storage.signal_peek(storage, workflow_id, signal_type) do
+        Err(e)        -> Err(Conduit.WorkflowError.StorageError(e))
+        Ok(Some(sig)) ->
+          match Conduit.Storage.signal_mark_delivered(storage, sig.id) do
+            Err(e) -> Err(Conduit.WorkflowError.StorageError(e))
+            Ok(()) -> Ok(sig.payload)
+          end
+        Ok(None) ->
+          psleep_ms(1000)
+          pwait_loop(storage, workflow_id, signal_type, deadline)
+      end
+    end
+  end
+
+  doc """
+  Load all checkpoints for this workflow from the DB into Vault.
+  Call this once before run() to avoid redundant DB lookups during execution.
+  """
+  fn warm_cache(storage, ctx : Conduit.WorkflowContext) : Result((), String) do
+    match Conduit.Storage.checkpoint_load_all(storage, ctx.workflow_id) do
+      Err(e)          -> Err(e)
+      Ok(checkpoints) ->
+        List.each(checkpoints, fn cp ->
+          pvault_set(ctx.checkpoint_key, cp.name, cp.value)
+        end)
+        Ok(())
+    end
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Private helpers
+  -- ─────────────────────────────────────────────────────────────
+
+  pfn pvault_key(workflow_id : String) : String do
+    "conduit_wf_" ++ workflow_id
+  end
+
+  pfn pvault_get(vault_key : String, name : String) : Option(String) do
+    Vault.get(vault_key, name)
+  end
+
+  pfn pvault_set(vault_key : String, name : String, value : String) : () do
+    Vault.set(vault_key, name, value)
+  end
+
+  pfn psleep_ms(ms : Int) : () do
+    psleep_loop(int_div(ms, 10))
+  end
+
+  pfn psleep_loop(n : Int) : () do
+    if n <= 0 do
+      ()
+    else
+      task_yield()
+      psleep_loop(n - 1)
+    end
+  end
+end

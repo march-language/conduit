@@ -132,3 +132,59 @@
 ### Known gaps
 - Full IANA timezone support — scheduler stores timezone in DB but applies it as a UTC offset approximation; full TZ database support deferred to Phase 5+
 - `LISTEN/NOTIFY` push for instant cron tick — still polling
+
+---
+
+## Phase 4 — Imperative Workflows & Checkpoints ✅
+
+**Merged:** 2026-03-31
+
+### New types
+- `Conduit.WorkflowError` — `Failed(String) | Cancelled(String) | TimedOut | StorageError(String)`
+- `Conduit.ExecutionMode` — `Checkpoint | DeterministicReplay`
+- `Conduit.WorkflowConfig` — `execution_mode`, `timeout`, `tags`
+- `Conduit.WorkflowHandle` — returned by `start_workflow`; carries `id`, `workflow_type`, `started_at`
+- `Conduit.WorkflowRow` — internal DB row for `conduit_workflows`
+- `Conduit.WorkflowCheckpoint` — row in `conduit_checkpoints`
+- `Conduit.WorkflowSignal` — row in `conduit_workflow_signals`
+- `Conduit.WorkflowContext` — runtime context passed to `run()`
+
+### New interface
+- `Conduit.Workflow(w)` — `run : w -> String -> WorkflowContext -> Result(String, WorkflowError)` and defaulted `config`
+
+### New modules
+- `Conduit.WorkflowConfig.default/0`
+- `Conduit.WorkflowRegistry` — in-process Vault map; `register/3`, `lookup/1`, `run/3`
+- `Conduit.WorkflowContext` — durable execution primitives:
+  - `new/1` — create root context
+  - `child/2` — create namespaced sub-context for parallel branches
+  - `checkpoint/4` — check cache → DB → execute fn → persist → return; on re-run skips fn
+  - `parallel/4` — sequential fan-out with per-item checkpoint sub-namespace
+  - `wait_for_signal/4` — poll DB for pending signal, sleep 1s between checks, respect timeout
+  - `warm_cache/2` — bulk-load all checkpoints from DB into Vault before run()
+- `Conduit.WorkflowRunner` — job performer registered as `"conduit.workflow_runner"`:
+  - `execute/2` — load workflow, warm cache, run, handle all WorkflowError variants
+  - `enqueue/3` — enqueue a runner job for a given workflow_id
+  - `job_type/0` — returns `"conduit.workflow_runner"`
+
+### Storage additions (interface + Postgres impl)
+- `workflow_insert`, `workflow_load`, `workflow_update_status`, `workflow_cancel`
+- `checkpoint_get`, `checkpoint_set`, `checkpoint_load_all`
+- `signal_insert`, `signal_peek`, `signal_mark_delivered`
+
+### Public API (`lib/conduit.march`)
+- `Conduit.start/2` — now registers `conduit.workflow_runner` performer at startup
+- `Conduit.register_workflow/3` — register workflow at startup
+- `Conduit.start_workflow/3` — insert row + enqueue runner, return `WorkflowHandle`
+- `Conduit.workflow_status/2` — query current status string
+- `Conduit.signal_workflow/4` — insert signal row
+- `Conduit.cancel_workflow/3` — cancel a running workflow
+
+### Migration
+- `priv/migrations/20260401000004_conduit_workflows.sql` — three new tables + `workflow_id` FK on `conduit_jobs`
+
+### Known gaps
+- `start_workflow_and_wait` (synchronous variant) — deferred; needs task coordination
+- `checkpoint_loop!` macro — usable via plain recursion today
+- `parallel!` runs sequentially in-process; true concurrent fan-out deferred to Phase 5+
+- Checkpoint values are plain Strings (JSON by convention); typed serialization deferred
