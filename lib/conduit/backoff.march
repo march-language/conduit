@@ -1,4 +1,5 @@
 mod Conduit.Backoff do
+  import Conduit
   fn delay(strat : Conduit.Backoff, attempt : Int) : Duration do
     match strat do
       Linear ->

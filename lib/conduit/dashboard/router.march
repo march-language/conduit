@@ -1,4 +1,5 @@
 mod Conduit.Dashboard.Router do
+  import Conduit
   doc """
   HTTP request handler for the Conduit Dashboard.
 
@@ -85,14 +86,14 @@ mod Conduit.Dashboard.Router do
       -- Job retry
       (:post, Cons("jobs", Cons(job_id, Cons("retry", Nil)))) ->
         match Conduit.Dashboard.Actions.retry_job(storage, job_id) do
-          Ok(())  -> conn |> HttpServer.redirect(base_path ++ "/jobs/" ++ job_id)
+          Ok(_)   -> conn |> HttpServer.redirect(base_path ++ "/jobs/" ++ job_id)
           Err(e)  -> conn |> HttpServer.text(500, "Error: " ++ e)
         end
 
       -- Job cancel
       (:post, Cons("jobs", Cons(job_id, Cons("cancel", Nil)))) ->
         match Conduit.Dashboard.Actions.cancel_job(storage, job_id) do
-          Ok(())  -> conn |> HttpServer.redirect(base_path ++ "/jobs/" ++ job_id)
+          Ok(_)   -> conn |> HttpServer.redirect(base_path ++ "/jobs/" ++ job_id)
           Err(e)  -> conn |> HttpServer.text(500, "Error: " ++ e)
         end
 
@@ -128,7 +129,7 @@ mod Conduit.Dashboard.Router do
       -- Workflow cancel
       (:post, Cons("workflows", Cons(wf_id, Cons("cancel", Nil)))) ->
         match Conduit.Dashboard.Actions.cancel_workflow(storage, wf_id) do
-          Ok(())  -> conn |> HttpServer.redirect(base_path ++ "/workflows/" ++ wf_id)
+          Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/workflows/" ++ wf_id)
           Err(e)  -> conn |> HttpServer.text(500, "Error: " ++ e)
         end
 
@@ -148,21 +149,21 @@ mod Conduit.Dashboard.Router do
       -- Pause cron
       (:post, Cons("crons", Cons(cron_id, Cons("pause", Nil)))) ->
         match Conduit.Dashboard.Actions.pause_cron(storage, cron_id) do
-          Ok(())  -> conn |> HttpServer.redirect(base_path ++ "/crons")
+          Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/crons")
           Err(e)  -> conn |> HttpServer.text(500, "Error: " ++ e)
         end
 
       -- Resume cron
       (:post, Cons("crons", Cons(cron_id, Cons("resume", Nil)))) ->
         match Conduit.Dashboard.Actions.resume_cron(storage, cron_id) do
-          Ok(())  -> conn |> HttpServer.redirect(base_path ++ "/crons")
+          Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/crons")
           Err(e)  -> conn |> HttpServer.text(500, "Error: " ++ e)
         end
 
       -- Delete cron
       (:post, Cons("crons", Cons(cron_id, Cons("delete", Nil)))) ->
         match Conduit.Dashboard.Actions.delete_cron(storage, cron_id) do
-          Ok(())  -> conn |> HttpServer.redirect(base_path ++ "/crons")
+          Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/crons")
           Err(e)  -> conn |> HttpServer.text(500, "Error: " ++ e)
         end
 
@@ -189,7 +190,7 @@ mod Conduit.Dashboard.Router do
       -- Delete one dead letter
       (:post, Cons("dead-letters", Cons(dl_id, Cons("delete", Nil)))) ->
         match Conduit.Dashboard.Actions.delete_dead_letter(storage, dl_id) do
-          Ok(())  -> conn |> HttpServer.redirect(base_path ++ "/dead-letters")
+          Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/dead-letters")
           Err(e)  -> conn |> HttpServer.text(500, "Error: " ++ e)
         end
 
@@ -221,13 +222,7 @@ mod Conduit.Dashboard.Router do
       ""
     else
       let pairs = String.split(qs, "&")
-      let found = List.find(pairs, fn pair -> do
-        let parts = String.split(pair, "=")
-        match parts do
-          Cons(k, _) -> k == key
-          Nil        -> false
-        end
-      end)
+      let found = List.find(pairs, fn pair -> ppair_matches_key(pair, key))
       match found do
         None      -> ""
         Some(pair) ->
@@ -259,15 +254,26 @@ mod Conduit.Dashboard.Router do
     end
   end
 
+  pfn ppair_matches_key(pair : String, key : String) : Bool do
+    let parts = String.split(pair, "=")
+    match parts do
+      Cons(k, _) -> k == key
+      Nil        -> false
+    end
+  end
+
   pfn psummary_to_json(summary : List(Conduit.Dashboard.QueueSummary)) : String do
-    let items = List.map(summary, fn s ->
-      "{\"queue\":\"" ++ Html.escape(s.queue) ++ "\""
-      ++ ",\"pending\":"    ++ int_to_string(s.pending)
-      ++ ",\"running\":"    ++ int_to_string(s.running)
-      ++ ",\"failed\":"     ++ int_to_string(s.failed)
-      ++ ",\"dead\":"       ++ int_to_string(s.dead)
-      ++ ",\"throughput\":" ++ int_to_string(s.throughput)
-      ++ "}")
+    let items = List.map(summary, fn s -> psummary_item_to_json(s))
     "[" ++ String.join(items, ",") ++ "]"
+  end
+
+  pfn psummary_item_to_json(s : Conduit.Dashboard.QueueSummary) : String do
+    "{\"queue\":\"" ++ Html.escape(s.queue) ++ "\""
+    ++ ",\"pending\":"    ++ int_to_string(s.pending)
+    ++ ",\"running\":"    ++ int_to_string(s.running)
+    ++ ",\"failed\":"     ++ int_to_string(s.failed)
+    ++ ",\"dead\":"       ++ int_to_string(s.dead)
+    ++ ",\"throughput\":" ++ int_to_string(s.throughput)
+    ++ "}"
   end
 end

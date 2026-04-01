@@ -1,4 +1,5 @@
 mod Conduit.Worker do
+  import Conduit
   doc """
   Start `count` worker tasks for the given queue, plus one stale-rescue task.
   Returns all task handles.
@@ -173,12 +174,12 @@ mod Conduit.Worker do
   -- Stale-rescue loop: periodically finds crashed workers' jobs and requeues them.
   -- Runs every `interval_ms`. Timeout: 2× the default job timeout (60s default).
   pfn rescue_loop(storage, interval_ms : Int) : () do
-    psleep_ms(interval_ms)
-    match Conduit.Storage.rescue_stale(storage, 60) do
+    let _ = psleep_ms(interval_ms)
+    let _ = match Conduit.Storage.rescue_stale(storage, 60) do
       Ok(ids) ->
         if not (is_nil(ids)) do
           Logger.info("conduit: rescued " ++ int_to_string(length(ids)) ++ " stale job(s)")
-        end
+        else () end
       Err(e) ->
         Logger.error("conduit: rescue_stale error: " ++ e)
     end

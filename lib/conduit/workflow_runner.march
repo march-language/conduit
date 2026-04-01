@@ -1,4 +1,5 @@
 mod Conduit.WorkflowRunner do
+  import Conduit
   doc "The job_type constant (public so callers can use it in tests)."
   fn job_type() : String do
     "conduit.workflow_runner"
@@ -62,14 +63,14 @@ mod Conduit.WorkflowRunner do
       Some(t) -> DateTime.to_timestamp(DateTime.now()) >= DateTime.to_timestamp(t)
     end
     if timed_out do
-      pmark_status(storage, row.id, "timed_out", None, Some("Workflow exceeded timeout"))
+      let _ = pmark_status(storage, row.id, "timed_out", None, Some("Workflow exceeded timeout"))
       Ok(())
     else
       -- Build context and warm checkpoint cache.
       let ctx = Conduit.WorkflowContext.new(row.id)
       match Conduit.WorkflowContext.warm_cache(storage, ctx) do
         Err(e) -> Err(ConduitError.Retry("workflow_runner: cache warm failed: " ++ e))
-        Ok(()) ->
+        Ok(_) ->
           -- If DeterministicReplay mode, warm the event replay cache.
           let wf_config = match Conduit.WorkflowRegistry.lookup(row.workflow_type) do
             None    -> Conduit.WorkflowConfig.default()
@@ -82,20 +83,20 @@ mod Conduit.WorkflowRunner do
           end
           match replay_warm_result do
             Err(e) -> Err(ConduitError.Retry("workflow_runner: event warm failed: " ++ e))
-            Ok(()) ->
+            Ok(_) ->
               -- Look up and run the registered workflow.
               match Conduit.WorkflowRegistry.run(row.workflow_type, row.input, ctx) do
                 Ok(output_json) ->
-                  pmark_status(storage, row.id, "completed", Some(output_json), None)
+                  let _ = pmark_status(storage, row.id, "completed", Some(output_json), None)
                   Ok(())
                 Err(Failed(msg)) ->
-                  pmark_status(storage, row.id, "failed", None, Some(msg))
+                  let _ = pmark_status(storage, row.id, "failed", None, Some(msg))
                   Err(ConduitError.Discard("workflow failed: " ++ msg))
                 Err(Cancelled(msg)) ->
-                  pmark_status(storage, row.id, "cancelled", None, Some(msg))
+                  let _ = pmark_status(storage, row.id, "cancelled", None, Some(msg))
                   Ok(())
                 Err(TimedOut) ->
-                  pmark_status(storage, row.id, "timed_out", None, Some("Timed out during execution"))
+                  let _ = pmark_status(storage, row.id, "timed_out", None, Some("Timed out during execution"))
                   Ok(())
                 Err(StorageError(msg)) ->
                   -- Transient — let the job retry via normal backoff.
@@ -108,7 +109,7 @@ mod Conduit.WorkflowRunner do
 
   pfn pmark_status(storage, workflow_id : String, status : String, output : Option(String), error : Option(String)) : () do
     match Conduit.Storage.workflow_update_status(storage, workflow_id, status, output, error) do
-      Ok(())  -> ()
+      Ok(_)   -> ()
       Err(e)  -> Logger.error("workflow_runner: failed to mark " ++ workflow_id ++ " as " ++ status ++ ": " ++ e)
     end
   end

@@ -1,4 +1,5 @@
 mod Conduit.WorkflowContext do
+  import Conduit
   doc "Create a root context for a new or resuming workflow execution."
   fn new(workflow_id : String) : Conduit.WorkflowContext do
     {

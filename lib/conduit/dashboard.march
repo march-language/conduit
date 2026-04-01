@@ -1,26 +1,24 @@
 mod Conduit.Dashboard do
-  doc """
-  Conduit Dashboard — web UI for monitoring and administering Conduit.
-
-  ## Embedded in a Bastion app
-
-      -- lib/my_app_web/router.march
-      forward "/conduit", Conduit.Dashboard.Router,
-        storage: storage,
-        auth:    MyApp.AdminAuth
-
-  ## Standalone HTTP server
-
-      Conduit.Dashboard.start_standalone(
-        4001,
-        storage,
-        Conduit.Dashboard.Auth.Token(System.env("ADMIN_TOKEN"))
-      )
-
-  ## No auth (development)
-
-      Conduit.Dashboard.start_standalone(4001, storage, Conduit.Dashboard.Auth.None)
-  """
+  import Conduit
+  -- Conduit Dashboard — web UI for monitoring and administering Conduit.
+  --
+  -- ## Embedded in a Bastion app
+  --
+  --     forward "/conduit", Conduit.Dashboard.Router,
+  --       storage: storage,
+  --       auth:    MyApp.AdminAuth
+  --
+  -- ## Standalone HTTP server
+  --
+  --     Conduit.Dashboard.start_standalone(
+  --       4001,
+  --       storage,
+  --       Conduit.Dashboard.Auth.Token(System.env("ADMIN_TOKEN"))
+  --     )
+  --
+  -- ## No auth (development)
+  --
+  --     Conduit.Dashboard.start_standalone(4001, storage, Conduit.Dashboard.Auth.None)
 
   doc """
   Start the dashboard as a standalone HTTP server on `port`.
@@ -34,11 +32,13 @@ mod Conduit.Dashboard do
   """
   fn start_standalone(port : Int, storage, auth : Conduit.Dashboard.Auth) : Task do
     let base_path = "/conduit"
-    task_spawn(fn () ->
-      HttpServer.new(port)
-      |> HttpServer.plug(fn conn ->
-        Conduit.Dashboard.Router.handle(storage, auth, base_path, conn))
-      |> HttpServer.listen())
+    task_spawn(fn () -> prun_server(port, storage, auth, base_path))
+  end
+
+  pfn prun_server(port : Int, storage, auth : Conduit.Dashboard.Auth, base_path : String) : () do
+    HttpServer.new(port)
+    |> HttpServer.plug(fn conn -> Conduit.Dashboard.Router.handle(storage, auth, base_path, conn))
+    |> HttpServer.listen()
   end
 
   doc """
@@ -58,7 +58,7 @@ mod Conduit.Dashboard do
   """
   fn subscribe_to_summary(storage) : () do
     match Conduit.Storage.notify_subscribe(storage, "conduit_jobs") do
-      Ok(())  -> ()
+      Ok(_)  -> ()
       Err(e)  -> Logger.warn("conduit_dashboard: subscribe failed: " ++ e)
     end
   end

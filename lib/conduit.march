@@ -1,430 +1,218 @@
 mod Conduit do
-  doc """
-  Start the Conduit worker pool, cron scheduler, and workflow runner.
+  type ConduitError = Retry(String) | Discard(String) | Snooze(Int) | WorkerError(String)
 
-  `config`  — application config (queues, worker count, poll interval, cron tick)
-  `storage` — storage backend (e.g. Conduit.Storage.Postgres.Config)
+  type Schema(a) = { validator : Option(a -> Result((), String)) }
 
-  Spawns `workers_per_queue` worker tasks per queue and one cron scheduler task.
-  Also registers the built-in `conduit.workflow_runner` performer so workers
-  can execute workflow jobs.
+  type Backoff =
+    Linear
+    | Exponential
+    | Fibonacci
+    | Custom(Int -> Int)
 
-  Static crons registered via `Conduit.register_cron` are upserted into the DB
-  during startup so they survive node restarts.
+  type UniqueConstraint = {
+    duration : Int,
+    fields   : List(String)
+  }
 
-  Returns a list of all task handles. In production, wrap this in a supervisor
-  for auto-restart.
+  type UniqueConflict = Ignore | Replace | Raise
 
-  Example:
+  type PerKeyRateLimit = {
+    key_fn : String -> String,
+    limit  : Int
+  }
 
-    let storage = { repo: MyApp.Repo }
-    Conduit.start(Conduit.Config.default(), storage)
-  """
-  fn start(config : Conduit.Config, storage) : List(Task) do
-    -- Register the built-in workflow runner performer (closes over storage).
-    Conduit.Queue.register_performer(
-      Conduit.WorkflowRunner.job_type(),
-      fn payload -> Conduit.WorkflowRunner.execute(storage, payload),
-      Conduit.JobConfig.default()
-    )
+  type RateLimit = {
+    max_per_second : Int,
+    per_key        : Option(Conduit.PerKeyRateLimit)
+  }
 
-    -- Register this node and start heartbeat / stale-detection / leader-election tasks.
-    let node_tasks = Conduit.Node.start(storage, config)
+  type JobConfig = {
+    queue             : String,
+    max_attempts      : Int,
+    timeout           : Int,
+    backoff           : Conduit.Backoff,
+    dead_letter_queue : Option(String),
+    unique_for        : Option(Conduit.UniqueConstraint),
+    on_conflict       : Conduit.UniqueConflict,
+    rate_limit        : Option(Conduit.RateLimit),
+    on_dead_letter    : Option(Conduit.JobInfo -> ()),
+    priority          : Int,
+    tags              : List(String),
+    discard_after     : Option(Int)
+  }
 
-    -- Upsert all registered static crons into the DB.
-    Conduit.CronRegistry.all()
-    |> List.each(fn entry ->
-      match Conduit.CronScheduler.upsert_static(storage, entry.cron_type, entry.config) do
-        Ok(_)  -> ()
-        Err(e)  -> Logger.warn("conduit: upsert_static failed for " ++ entry.cron_type ++ ": " ++ e)
-      end
-    )
+  type JobInfo = {
+    id           : String,
+    queue        : String,
+    job_type     : String,
+    attempt      : Int,
+    max_attempts : Int,
+    tags         : List(String),
+    inserted_at  : DateTime,
+    errors       : List(String)
+  }
 
-    let worker_tasks =
-      config.queues
-      |> List.flat_map(fn queue ->
-        Conduit.Worker.start_workers(
-          storage,
-          queue,
-          config.workers_per_queue,
-          config.poll_interval_ms
-        )
-      )
+  type Config = {
+    queues                  : List(String),
+    workers_per_queue       : Int,
+    poll_interval_ms        : Int,
+    cron_tick_interval_ms   : Int,
+    node_id                 : String,
+    heartbeat_interval_ms   : Int,
+    stale_node_threshold_ms : Int
+  }
 
-    let cron_task = Conduit.CronScheduler.start(storage, config.cron_tick_interval_ms)
+  type CronOverlap = Skip | Allow | Replace
 
-    List.append(node_tasks, Cons(cron_task, worker_tasks))
-  end
+  type CronConfig = {
+    schedule : String,
+    timezone : String,
+    queue    : String,
+    overlap  : Conduit.CronOverlap,
+    tags     : List(String)
+  }
 
-  doc """
-  Enqueue a job for immediate execution. Returns the job id on success.
+  type CronSchedule = {
+    id          : String,
+    job_type    : String,
+    schedule    : String,
+    timezone    : String,
+    queue       : String,
+    payload     : String,
+    overlap     : String,
+    enabled     : Bool,
+    last_run_at : Option(DateTime),
+    last_job_id : Option(String),
+    next_run_at : Option(DateTime),
+    tags        : List(String)
+  }
 
-  `_job`     — the job module (used only to fetch config; conventionally passed
-               as the module value, e.g. `SendWelcomeEmail`)
-  `job_type` — string name of the job module ("SendWelcomeEmail")
-  `payload`  — serialised args string (Phase 1: use `show(args)`)
-  `storage`  — storage backend
+  type JobRow = {
+    id                : String,
+    queue             : String,
+    job_type          : String,
+    payload           : String,
+    status            : String,
+    attempt           : Int,
+    max_attempts      : Int,
+    priority          : Int,
+    backoff           : String,
+    dead_letter_queue : Option(String),
+    inserted_at       : DateTime,
+    scheduled_at      : DateTime,
+    run_at            : DateTime,
+    started_at        : Option(DateTime),
+    completed_at      : Option(DateTime),
+    heartbeat_at      : Option(DateTime),
+    worker_id         : Option(String),
+    unique_key        : Option(String),
+    errors            : List(String),
+    tags              : List(String)
+  }
 
-  Phase 2 will provide a typed wrapper:
-    Conduit.enqueue(SendWelcomeEmail, args)
-  """
-  fn enqueue(_job, job_type : String, payload : String, storage) : Result(String, String) do
-    let config = Conduit.JobConfig.default()
-    Conduit.Queue.enqueue(storage, job_type, payload, config)
-  end
+  type DeadLetter = {
+    id                 : String,
+    job_id             : String,
+    queue              : String,
+    job_type           : String,
+    payload            : String,
+    errors             : List(String),
+    attempts           : Int,
+    first_attempted_at : Option(DateTime),
+    last_attempted_at  : Option(DateTime),
+    discarded_at       : DateTime,
+    reviewed           : Bool,
+    reviewed_by        : Option(String),
+    reviewed_at        : Option(DateTime),
+    retry_count        : Int
+  }
 
-  doc """
-  Enqueue a job with an explicit JobConfig. Use this when you need to
-  override queue, priority, max_attempts, etc.
-  """
-  fn enqueue_with(job_type : String, payload : String, config : Conduit.JobConfig, storage) : Result(String, String) do
-    Conduit.Queue.enqueue(storage, job_type, payload, config)
-  end
+  type NodeInfo = {
+    id           : String,
+    hostname     : String,
+    pid          : Int,
+    queues       : List(String),
+    pool_size    : Int,
+    started_at   : DateTime,
+    last_seen_at : DateTime,
+    status       : String
+  }
 
-  doc """
-  Enqueue a job to run after `delay`. Returns the job id on success.
-  """
-  fn enqueue_in(_job, job_type : String, payload : String, delay : Duration, storage) : Result(String, String) do
-    let config = Conduit.JobConfig.default()
-    Conduit.Queue.enqueue_in(storage, job_type, payload, delay, config)
-  end
+  type WorkflowError =
+    Failed(String)
+    | Cancelled(String)
+    | TimedOut
+    | StorageError(String)
 
-  doc """
-  Enqueue a job to run after `delay` with explicit config.
-  """
-  fn enqueue_in_with(job_type : String, payload : String, delay : Duration, config : Conduit.JobConfig, storage) : Result(String, String) do
-    Conduit.Queue.enqueue_in(storage, job_type, payload, delay, config)
-  end
+  type ExecutionMode = Checkpoint | DeterministicReplay
 
-  doc """
-  Register a job performer and its config in the in-process registry.
-  Must be called before any worker can execute jobs of that type.
+  type WorkflowConfig = {
+    execution_mode : Conduit.ExecutionMode,
+    timeout        : Option(Int),
+    tags           : List(String)
+  }
 
-  `job_type`  — string name of the job module (e.g. "SendWelcomeEmail")
-  `performer` — fn (payload_string) -> Result((), ConduitError)
-  `config`    — the job's JobConfig (used for backoff, DLQ, callbacks at runtime)
-
-  Call this at application startup for each job type:
-
-    Conduit.register("SendWelcomeEmail",
-      fn payload ->
-        let args = todo("deserialise payload into SendWelcomeEmail.Args")
-        SendWelcomeEmail.perform(SendWelcomeEmail, args)
-      end,
-      SendWelcomeEmail.config(SendWelcomeEmail)
-    )
-  """
-  fn register(job_type : String, performer : String -> Result((), ConduitError), config : Conduit.JobConfig) : () do
-    Conduit.Queue.register_performer(job_type, performer, config)
-  end
-
-  doc """
-  Register a job performer using default config. Convenience wrapper for jobs
-  that don't override fn config.
-  """
-  fn register_default(job_type : String, performer : String -> Result((), ConduitError)) : () do
-    Conduit.Queue.register_performer(job_type, performer, Conduit.JobConfig.default())
-  end
-
-  -- ─────────────────────────────────────────────────────────────
-  -- Cron API (Phase 3)
-  -- ─────────────────────────────────────────────────────────────
-
-  doc """
-  Register a static cron at startup.
-
-  Static crons are defined in code; their schedule is upserted into the DB
-  each time `Conduit.start` is called, so they survive node restarts and
-  config changes.
-
-  `cron_type` — unique string name (e.g. "HourlyCleanupJob")
-  `config`    — CronConfig with schedule, timezone, queue, overlap
-  `performer` — fn(payload_string) -> Result((), ConduitError)
-
-  Example:
-
-    Conduit.register_cron("HourlyCleanupJob",
-      HourlyCleanupJob.config(HourlyCleanupJob),
-      fn _payload -> HourlyCleanupJob.perform(HourlyCleanupJob) end
-    )
-  """
-  fn register_cron(cron_type : String, config : Conduit.CronConfig, performer : String -> Result((), ConduitError)) : () do
-    Conduit.CronRegistry.register(cron_type, config, performer)
-  end
-
-  doc """
-  Insert or update a dynamic cron schedule in the DB at runtime.
-
-  Unlike static crons, dynamic crons are not registered in code; they are
-  created, modified, or removed via this API at runtime.
-
-  `storage` — storage backend
-  `sched`   — full CronSchedule row to upsert
-  """
-  fn schedule_cron(storage, sched : Conduit.CronSchedule) : Result((), String) do
-    Conduit.Storage.cron_upsert(storage, sched)
-  end
-
-  doc "Disable a cron schedule by id."
-  fn pause_cron(storage, cron_id : String) : Result((), String) do
-    Conduit.Storage.cron_upsert(storage, pcron_set_enabled(storage, cron_id, false))
-    |> Result.map(fn _ -> ())
-  end
-
-  doc "Re-enable a paused cron schedule by id."
-  fn resume_cron(storage, cron_id : String) : Result((), String) do
-    Conduit.Storage.cron_upsert(storage, pcron_set_enabled(storage, cron_id, true))
-    |> Result.map(fn _ -> ())
-  end
-
-  doc "Cancel a cron schedule permanently (deletes the DB row)."
-  fn cancel_cron(storage, cron_id : String) : Result((), String) do
-    Conduit.Storage.cron_delete(storage, cron_id)
-  end
-
-  -- ─────────────────────────────────────────────────────────────
-  -- Workflow API (Phase 4)
-  -- ─────────────────────────────────────────────────────────────
-
-  doc """
-  Register a workflow at startup.
-
-  `workflow_type` — unique string name (e.g. "OnboardUserWorkflow")
-  `runner`        — curried fn: input_json -> ctx -> Result(output_json, WorkflowError)
-  `config`        — WorkflowConfig (execution_mode, timeout, tags)
-
-  Example:
-
-    Conduit.register_workflow(
-      "OnboardUserWorkflow",
-      fn input -> fn ctx -> OnboardUserWorkflow.run(OnboardUserWorkflow, input, ctx) end end,
-      OnboardUserWorkflow.config(OnboardUserWorkflow)
-    )
-  """
-  fn register_workflow(
+  type WorkflowHandle = {
+    id            : String,
     workflow_type : String,
-    runner,
-    config        : Conduit.WorkflowConfig
-  ) : () do
-    Conduit.WorkflowRegistry.register(workflow_type, runner, config)
-  end
+    started_at    : DateTime
+  }
 
-  doc """
-  Start a workflow and return a handle immediately.
+  type WorkflowRow = {
+    id            : String,
+    workflow_type : String,
+    parent_id     : Option(String),
+    input         : String,
+    output        : Option(String),
+    status        : String,
+    started_at    : DateTime,
+    completed_at  : Option(DateTime),
+    timeout_at    : Option(DateTime),
+    error         : Option(String),
+    error_at      : Option(DateTime),
+    tags          : List(String),
+    meta          : String
+  }
 
-  Inserts a row in conduit_workflows, enqueues a conduit.workflow_runner job,
-  and returns a WorkflowHandle with the workflow id.
+  type WorkflowCheckpoint = {
+    id          : Int,
+    workflow_id : String,
+    name        : String,
+    value       : String,
+    created_at  : DateTime,
+    duration_ms : Option(Int)
+  }
 
-  `workflow_type` — must match a registered workflow
-  `input_json`    — JSON-serialized input
-  `storage`       — storage backend
-  """
-  fn start_workflow(workflow_type : String, input_json : String, storage) : Result(Conduit.WorkflowHandle, String) do
-    let id      = uuid_v4()
-    let now     = DateTime.now()
-    let config  = match Conduit.WorkflowRegistry.lookup(workflow_type) do
-      None    -> Conduit.WorkflowConfig.default()
-      Some(e) -> e.config
-    end
-    let timeout_at = Option.map(config.timeout, fn dur -> DateTime.add(now, dur))
-    let row = {
-      id            = id,
-      workflow_type = workflow_type,
-      parent_id     = None,
-      input         = input_json,
-      output        = None,
-      status        = "running",
-      started_at    = now,
-      completed_at  = None,
-      timeout_at    = timeout_at,
-      error         = None,
-      error_at      = None,
-      tags          = config.tags,
-      meta          = "{}"
-    }
-    match Conduit.Storage.workflow_insert(storage, row) do
-      Err(e)  -> Err(e)
-      Ok(_)   ->
-        match Conduit.WorkflowRunner.enqueue(storage, id, config) do
-          Err(e) -> Err(e)
-          Ok(_)  ->
-            Ok({ id = id, workflow_type = workflow_type, started_at = now })
-        end
-    end
-  end
+  type WorkflowSignal = {
+    id           : Int,
+    workflow_id  : String,
+    signal_type  : String,
+    payload      : String,
+    status       : String,
+    sent_at      : DateTime,
+    delivered_at : Option(DateTime),
+    expires_at   : Option(DateTime),
+    sent_by      : Option(String)
+  }
 
-  doc """
-  Query the current status of a workflow.
+  type WorkflowContext = {
+    workflow_id    : String,
+    parent_id      : Option(String),
+    namespace      : String,
+    checkpoint_key : String
+  }
 
-  Returns the workflow status string (running | completed | failed | cancelled | timed_out)
-  or None if the workflow does not exist.
-  """
-  fn workflow_status(workflow_id : String, storage) : Result(Option(String), String) do
-    match Conduit.Storage.workflow_load(storage, workflow_id) do
-      Err(e)          -> Err(e)
-      Ok(None)        -> Ok(None)
-      Ok(Some(row))   -> Ok(Some(row.status))
-    end
-  end
+  type WorkflowEvent = {
+    id          : Int,
+    workflow_id : String,
+    sequence    : Int,
+    event_type  : String,
+    payload     : String,
+    recorded_at : DateTime
+  }
 
-  doc """
-  Send a signal to a running workflow.
-
-  The signal is stored in conduit_workflow_signals immediately. If the workflow
-  is blocked in wait_for_signal, it will pick it up on the next poll cycle.
-
-  `workflow_id`  — the workflow to signal
-  `signal_type`  — must match the signal type the workflow is waiting for
-  `payload_json` — JSON payload carried with the signal
-  `storage`      — storage backend
-  """
-  fn signal_workflow(workflow_id : String, signal_type : String, payload_json : String, storage) : Result(Int, String) do
-    Err("not implemented")
-  end
-
-  doc "Cancel a running workflow with a reason."
-  fn cancel_workflow(workflow_id : String, reason : String, storage) : Result((), String) do
-    Conduit.Storage.workflow_cancel(storage, workflow_id, reason)
-  end
-
-  -- ─────────────────────────────────────────────────────────────
-  -- Cluster API (Phase 5)
-  -- ─────────────────────────────────────────────────────────────
-
-  doc """
-  Return all currently active cluster nodes.
-
-  Queries `conduit_workers` for nodes with status='running'.
-  Useful for dashboards and monitoring.
-  """
-  fn cluster_nodes(storage) : Result(List(Conduit.NodeInfo), String) do
-    Conduit.Storage.node_list_active(storage)
-  end
-
-  doc """
-  Return the node_id of the current leader from this node's perspective.
-
-  The leader is the node that holds the Postgres advisory leader lock
-  (lock id 8473625). This value is updated in Vault by the local leader-election
-  background task — it reflects the most recent election result this node observed.
-  Returns None if the leader is unknown or this node has not yet run an election tick.
-  """
-  fn cluster_leader() : Option(String) do
-    Conduit.Node.leader_node_id()
-  end
-
-  doc """
-  Return true if this node is currently the cluster leader.
-
-  Fast in-process check — reads from Vault, no DB round-trip.
-  """
-  fn is_cluster_leader() : Bool do
-    Conduit.Node.is_leader()
-  end
-
-  doc """
-  Gracefully stop this Conduit node.
-
-  Deregisters the node from `conduit_workers` and releases the leader advisory
-  lock if held. Call this during application shutdown before the process exits.
-  """
-  fn stop(storage, config : Conduit.Config) : () do
-    Conduit.Node.stop(storage, config.node_id)
-  end
-
-  -- ─────────────────────────────────────────────────────────────
-  -- Replay API (Phase 8)
-  -- ─────────────────────────────────────────────────────────────
-
-  doc """
-  Replay a completed or failed workflow using its recorded event history.
-
-  Loads all events from the event store, sets up deterministic replay mode
-  in Vault, then re-runs the workflow function. Checkpoints whose events
-  are already recorded return the recorded value without calling the fn;
-  if the workflow has new checkpoints beyond the recorded events, those
-  execute normally and append new events.
-
-  Returns the workflow output or error.
-  """
-  fn replay_workflow(workflow_id : String, storage) : Result(String, String) do
-    match Conduit.Storage.workflow_load(storage, workflow_id) do
-      Err(e)      -> Err("replay: load failed: " ++ e)
-      Ok(None)    -> Err("replay: workflow not found: " ++ workflow_id)
-      Ok(Some(row)) ->
-        let ctx = Conduit.WorkflowContext.new(row.id)
-        match Conduit.WorkflowContext.warm_cache(storage, ctx) do
-          Err(e) -> Err("replay: cache warm failed: " ++ e)
-          Ok(()) ->
-            match Conduit.EventStore.warm_replay(storage, row.id) do
-              Err(e) -> Err("replay: event warm failed: " ++ e)
-              Ok(()) ->
-                match Conduit.WorkflowRegistry.run(row.workflow_type, row.input, ctx) do
-                  Ok(output) -> Ok(output)
-                  Err(Conduit.WorkflowError.Failed(msg))       -> Err("replay failed: " ++ msg)
-                  Err(Conduit.WorkflowError.Cancelled(msg))    -> Err("replay cancelled: " ++ msg)
-                  Err(Conduit.WorkflowError.TimedOut)          -> Err("replay timed out")
-                  Err(Conduit.WorkflowError.StorageError(msg)) -> Err("replay storage error: " ++ msg)
-                end
-            end
-        end
-    end
-  end
-
-  doc """
-  Replay a workflow up to a specific event sequence (point-in-time replay).
-
-  Only events with sequence <= max_sequence are loaded. The workflow
-  re-executes from the start: recorded events are replayed, and the first
-  checkpoint beyond max_sequence will execute its fn normally.
-
-  Useful for debugging: "show me what the workflow saw at step N".
-  """
-  fn replay_workflow_to(workflow_id : String, max_sequence : Int, storage) : Result(String, String) do
-    match Conduit.Storage.workflow_load(storage, workflow_id) do
-      Err(e)      -> Err("replay_to: load failed: " ++ e)
-      Ok(None)    -> Err("replay_to: workflow not found: " ++ workflow_id)
-      Ok(Some(row)) ->
-        let ctx = Conduit.WorkflowContext.new(row.id)
-        match Conduit.WorkflowContext.warm_cache(storage, ctx) do
-          Err(e) -> Err("replay_to: cache warm failed: " ++ e)
-          Ok(()) ->
-            match Conduit.EventStore.warm_replay_to(storage, row.id, max_sequence) do
-              Err(e) -> Err("replay_to: event warm failed: " ++ e)
-              Ok(()) ->
-                match Conduit.WorkflowRegistry.run(row.workflow_type, row.input, ctx) do
-                  Ok(output) -> Ok(output)
-                  Err(Conduit.WorkflowError.Failed(msg))       -> Err("replay_to failed: " ++ msg)
-                  Err(Conduit.WorkflowError.Cancelled(msg))    -> Err("replay_to cancelled: " ++ msg)
-                  Err(Conduit.WorkflowError.TimedOut)          -> Err("replay_to timed out")
-                  Err(Conduit.WorkflowError.StorageError(msg)) -> Err("replay_to storage error: " ++ msg)
-                end
-            end
-        end
-    end
-  end
-
-  doc """
-  Query the event history for a workflow. Returns all events in sequence order.
-  """
-  fn workflow_events(workflow_id : String, storage) : Result(List(Conduit.WorkflowEvent), String) do
-    Conduit.EventStore.load_all(storage, workflow_id)
-  end
-
-  pfn pcron_set_enabled(storage, cron_id : String, enabled : Bool) : Conduit.CronSchedule do
-    {
-      id          = cron_id,
-      job_type    = cron_id,
-      schedule    = "* * * * *",
-      timezone    = "UTC",
-      queue       = "default",
-      payload     = "{}",
-      overlap     = "skip",
-      enabled     = enabled,
-      last_run_at = None,
-      last_job_id = None,
-      next_run_at = None,
-      tags        = Nil
-    }
-  end
+  type Auth =
+    None
+    | Token(String)
+    | Fn(String -> Bool)
 end

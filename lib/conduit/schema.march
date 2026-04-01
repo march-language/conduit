@@ -1,4 +1,5 @@
 mod Conduit.Schema do
+  import Conduit
   fn none() : Conduit.Schema(a) do
     { validator = None }
   end

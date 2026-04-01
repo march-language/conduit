@@ -1,4 +1,5 @@
 mod Conduit.EventStore do
+  import Conduit
   doc "The Vault namespace key used for replay state of a given workflow."
   fn replay_key(workflow_id : String) : String do
     "conduit_wf_replay_" ++ workflow_id

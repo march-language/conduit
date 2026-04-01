@@ -1,4 +1,5 @@
 mod Conduit.CronRegistry do
+  import Conduit
   ptype Entry = {
     config    : Conduit.CronConfig,
     performer : String -> Result((), Conduit.ConduitError)

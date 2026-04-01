@@ -1,4 +1,5 @@
 mod Conduit.Dashboard.Html do
+  import Conduit
   doc "Renders a full HTML page with the shared nav injected."
   fn page(title : String, base_path : String, content : String) : String do
     ~H"""
@@ -58,11 +59,7 @@ mod Conduit.Dashboard.Html do
         )
       )
     )
-    let link_html = String.join(List.map(links, fn item ->
-      let (key, label, href) = item
-      let active_class = if key == current do " active" else "" end
-      ~H"""<a href="#{href}" class="nav-link#{active_class}">#{label}</a>"""
-    ), "")
+    let link_html = String.join(List.map(links, fn item -> prender_nav_link(item, current)), "")
     ~H"""
     <nav class="top-nav">
       <div class="nav-brand">⚡ Conduit</div>
@@ -71,13 +68,21 @@ mod Conduit.Dashboard.Html do
     """
   end
 
+  pfn prender_nav_link(item : (String, String, String), current : String) : String do
+    let (key, label, href) = item
+    let cls = if key == current do "nav-link active" else "nav-link" end
+    ~H"""<a href="#{href}" class="#{cls}">#{label}</a>"""
+  end
+
+  pfn prender_table_row(row : List(String)) : String do
+    let cells = String.join(List.map(row, fn cell -> ~H"""<td>#{cell}</td>"""), "")
+    ~H"""<tr>#{cells}</tr>"""
+  end
+
   doc "Renders a <table> with a header row and data rows."
   fn table(headers : List(String), rows : List(List(String))) : String do
     let header_html = String.join(List.map(headers, fn h -> ~H"""<th>#{h}</th>"""), "")
-    let rows_html = String.join(List.map(rows, fn row ->
-      let cells = String.join(List.map(row, fn cell -> ~H"""<td>#{cell}</td>"""), "")
-      ~H"""<tr>#{cells}</tr>"""
-    ), "")
+    let rows_html = String.join(List.map(rows, fn row -> prender_table_row(row)), "")
     ~H"""
     <table class="data-table">
       <thead><tr>#{header_html}</tr></thead>

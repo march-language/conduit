@@ -1,54 +1,26 @@
 mod Conduit.Dashboard.Pages.Queues do
+  import Conduit
   doc "Lists all queues from summary."
   fn render_list(base_path : String, summary : List(Conduit.Dashboard.QueueSummary)) : String do
     let headers = Cons("Queue", Cons("Pending", Cons("Running", Cons("Failed", Cons("Dead", Nil)))))
-    let rows = List.map(summary, fn s ->
-      let queue_link = "<a href=\"" ++ base_path ++ "/queues/" ++ Html.escape(s.queue) ++ "\">" ++ Html.escape(s.queue) ++ "</a>"
-      Cons(queue_link, Cons(int_to_string(s.pending), Cons(int_to_string(s.running), Cons(int_to_string(s.failed), Cons(int_to_string(s.dead), Nil)))))
-    )
+    let rows = List.map(summary, fn s -> prender_queue_row(base_path, s))
     let content = "<h1>Queues</h1><div class=\"section\">" ++ Conduit.Dashboard.Html.table(headers, rows) ++ "</div>"
     Conduit.Dashboard.Html.page_with_nav("Queues", base_path, "queues", content)
+  end
+
+  pfn prender_queue_row(base_path : String, s : Conduit.Dashboard.QueueSummary) : List(String) do
+    let queue_link = "<a href=\"" ++ base_path ++ "/queues/" ++ Html.escape(s.queue) ++ "\">" ++ Html.escape(s.queue) ++ "</a>"
+    Cons(queue_link, Cons(int_to_string(s.pending), Cons(int_to_string(s.running), Cons(int_to_string(s.failed), Cons(int_to_string(s.dead), Nil)))))
   end
 
   doc "Shows jobs in a queue with a given status filter and page."
   fn render_detail(base_path : String, queue : String, status_filter : String, jobs : List(Conduit.JobRow), page : Int) : String do
     let statuses = Cons("pending", Cons("running", Cons("failed", Cons("dead", Nil))))
-    let tab_html = String.join(List.map(statuses, fn s ->
-      let active_cls = if s == status_filter do " active" else "" end
-      let href = base_path ++ "/queues/" ++ Html.escape(queue) ++ "?status=" ++ s ++ "&page=1"
-      "<a href=\"" ++ href ++ "\" class=\"tab-link" ++ active_cls ++ "\">" ++ s ++ "</a>"
-    ), "")
+    let tab_html = String.join(List.map(statuses, fn s -> prender_status_tab(base_path, queue, status_filter, s)), "")
 
     let headers = Cons("ID", Cons("Type", Cons("Status", Cons("Attempt", Cons("Enqueued", Cons("Run At", Cons("Actions", Nil)))))))
 
-    let rows = List.map(jobs, fn job ->
-      let job_link = "<a href=\"" ++ base_path ++ "/jobs/" ++ Html.escape(job.id) ++ "\">" ++ Html.escape(job.id) ++ "</a>"
-      let retry_btn = Conduit.Dashboard.Html.action_btn(base_path ++ "/jobs/" ++ job.id ++ "/retry", "Retry", "")
-      let cancel_btn = Conduit.Dashboard.Html.action_btn(base_path ++ "/jobs/" ++ job.id ++ "/cancel", "Cancel", "Cancel this job?")
-      let delete_btn = Conduit.Dashboard.Html.action_btn(base_path ++ "/jobs/" ++ job.id ++ "/delete", "Delete", "Delete this job?")
-      let actions = retry_btn ++ " " ++ cancel_btn ++ " " ++ delete_btn
-      let enqueued = DateTime.format(job.inserted_at, "%Y-%m-%d %H:%M:%S")
-      let run_at = DateTime.format(job.run_at, "%Y-%m-%d %H:%M:%S")
-      Cons(
-        job_link,
-        Cons(
-          Html.escape(job.job_type),
-          Cons(
-            Conduit.Dashboard.Html.status_badge(job.status),
-            Cons(
-              int_to_string(job.attempt) ++ "/" ++ int_to_string(job.max_attempts),
-              Cons(
-                Html.escape(enqueued),
-                Cons(
-                  Html.escape(run_at),
-                  Cons(actions, Nil)
-                )
-              )
-            )
-          )
-        )
-      )
-    )
+    let rows = List.map(jobs, fn job -> prender_job_row(base_path, job))
 
     let base_pagination_url = base_path ++ "/queues/" ++ Html.escape(queue) ++ "?status=" ++ status_filter
     let total_pages = if List.length(jobs) < 50 do page else page + 1 end
@@ -56,5 +28,40 @@ mod Conduit.Dashboard.Pages.Queues do
 
     let content = "<h1>Queue: " ++ Html.escape(queue) ++ "</h1><div class=\"section\"><div class=\"tab-bar\">" ++ tab_html ++ "</div>" ++ Conduit.Dashboard.Html.table(headers, rows) ++ pagination_html ++ "</div>"
     Conduit.Dashboard.Html.page_with_nav("Queue: " ++ queue, base_path, "queues", content)
+  end
+
+  pfn prender_status_tab(base_path : String, queue : String, status_filter : String, s : String) : String do
+    let active_cls = if s == status_filter do " active" else "" end
+    let href = base_path ++ "/queues/" ++ Html.escape(queue) ++ "?status=" ++ s ++ "&page=1"
+    "<a href=\"" ++ href ++ "\" class=\"tab-link" ++ active_cls ++ "\">" ++ s ++ "</a>"
+  end
+
+  pfn prender_job_row(base_path : String, job : Conduit.JobRow) : List(String) do
+    let job_link = "<a href=\"" ++ base_path ++ "/jobs/" ++ Html.escape(job.id) ++ "\">" ++ Html.escape(job.id) ++ "</a>"
+    let retry_btn = Conduit.Dashboard.Html.action_btn(base_path ++ "/jobs/" ++ job.id ++ "/retry", "Retry", "")
+    let cancel_btn = Conduit.Dashboard.Html.action_btn(base_path ++ "/jobs/" ++ job.id ++ "/cancel", "Cancel", "Cancel this job?")
+    let delete_btn = Conduit.Dashboard.Html.action_btn(base_path ++ "/jobs/" ++ job.id ++ "/delete", "Delete", "Delete this job?")
+    let actions = retry_btn ++ " " ++ cancel_btn ++ " " ++ delete_btn
+    let enqueued = DateTime.format(job.inserted_at, "%Y-%m-%d %H:%M:%S")
+    let run_at = DateTime.format(job.run_at, "%Y-%m-%d %H:%M:%S")
+    Cons(
+      job_link,
+      Cons(
+        Html.escape(job.job_type),
+        Cons(
+          Conduit.Dashboard.Html.status_badge(job.status),
+          Cons(
+            int_to_string(job.attempt) ++ "/" ++ int_to_string(job.max_attempts),
+            Cons(
+              Html.escape(enqueued),
+              Cons(
+                Html.escape(run_at),
+                Cons(actions, Nil)
+              )
+            )
+          )
+        )
+      )
+    )
   end
 end

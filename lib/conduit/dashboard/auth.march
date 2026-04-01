@@ -1,4 +1,5 @@
 mod Conduit.Dashboard.Auth do
+  import Conduit
   fn check(auth : Conduit.Auth, conn) : Bool do
     match auth do
       None      -> true

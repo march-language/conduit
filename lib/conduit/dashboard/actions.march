@@ -1,4 +1,5 @@
 mod Conduit.Dashboard.Actions do
+  import Conduit
   doc "Retry a job: reset to pending with attempt = 0."
   fn retry_job(storage, job_id : String) : Result((), String) do
     Conduit.Storage.job_retry(storage, job_id)
@@ -46,7 +47,7 @@ mod Conduit.Dashboard.Actions do
               Err(e) ->
                 Logger.warn("conduit_dashboard: retry_dead_letter: could not delete DL " ++ dl_id ++ ": " ++ e)
                 Ok(new_id)    -- job was re-enqueued; deletion failure is non-fatal
-              Ok(()) -> Ok(new_id)
+              Ok(_) -> Ok(new_id)
             end
         end
     end
@@ -70,13 +71,16 @@ mod Conduit.Dashboard.Actions do
         Logger.warn("conduit_dashboard: retry_all: load failed: " ++ e)
         Nil
     end
-    List.filter_map(dls, fn dl ->
-      match retry_dead_letter(storage, dl.id) do
-        Ok(new_id) -> Some(new_id)
-        Err(e) ->
-          Logger.warn("conduit_dashboard: retry_all: skipping " ++ dl.id ++ ": " ++ e)
-          None
-      end)
+    List.filter_map(dls, fn dl -> pretry_one_dl(storage, dl))
+  end
+
+  pfn pretry_one_dl(storage, dl : Conduit.DeadLetter) : Option(String) do
+    match retry_dead_letter(storage, dl.id) do
+      Ok(new_id) -> Some(new_id)
+      Err(e) ->
+        let _ = Logger.warn("conduit_dashboard: retry_all: skipping " ++ dl.id ++ ": " ++ e)
+        None
+    end
   end
 
   doc "Trigger a cron job immediately (bypasses the schedule)."

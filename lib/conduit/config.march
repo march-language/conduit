@@ -1,4 +1,5 @@
 mod Conduit.JobConfig do
+  import Conduit
   fn default() : Conduit.JobConfig do
     {
       queue             = "default",

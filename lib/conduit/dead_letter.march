@@ -1,4 +1,5 @@
 mod Conduit.DeadLetter do
+  import Conduit
   fn from_job(job : Conduit.JobRow, final_error : String) : Conduit.DeadLetter do
     {
       id                 = uuid_v4(),

@@ -1,4 +1,5 @@
 mod Conduit.Node do
+  import Conduit
   let leader_lock_id = 8473625
 
   fn start(storage, config : Conduit.Config) : List(Task) do
@@ -28,9 +29,9 @@ mod Conduit.Node do
       Err(e)  -> Logger.warn("conduit_node: deregister failed for " ++ node_id ++ ": " ++ e)
     end
     if is_leader() do
-      Conduit.Storage.node_release_leader_lock(storage, leader_lock_id)
+      let _ = Conduit.Storage.node_release_leader_lock(storage, leader_lock_id)
       Vault.set("conduit_cluster", "is_leader", false)
-    end
+    else () end
   end
 
   fn is_leader() : Bool do
@@ -56,14 +57,14 @@ mod Conduit.Node do
       Ok(ids) ->
         if not (List.is_empty(ids)) do
           Logger.info("conduit_node: reclaimed " ++ int_to_string(List.length(ids)) ++ " stale job(s)")
-        end
+        else () end
       Err(e) -> Logger.warn("conduit_node: stale reclaim error: " ++ e)
     end
     match Conduit.Storage.node_cleanup_stale(storage, threshold_s) do
       Ok(n)  ->
         if n > 0 do
           Logger.info("conduit_node: marked " ++ int_to_string(n) ++ " stale node(s) as stopped")
-        end
+        else () end
       Err(e) -> Logger.warn("conduit_node: stale cleanup error: " ++ e)
     end
     psleep_ms(interval_ms)

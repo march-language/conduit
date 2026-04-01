@@ -1,4 +1,5 @@
 mod Conduit.Dashboard.Pages.Jobs do
+  import Conduit
   doc "Full job detail page."
   fn render(base_path : String, job : Conduit.JobRow) : String do
     let started_at_str = match job.started_at do

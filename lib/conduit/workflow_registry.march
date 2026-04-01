@@ -1,4 +1,5 @@
 mod Conduit.WorkflowRegistry do
+  import Conduit
   ptype Entry = {
     config : Conduit.WorkflowConfig,
     runner : String -> Conduit.WorkflowContext -> Result(String, Conduit.WorkflowError)

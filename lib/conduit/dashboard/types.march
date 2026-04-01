@@ -1,5 +1,6 @@
 mod Conduit.Dashboard do
-  doc "Aggregated queue statistics for the dashboard overview."
+  import Conduit
+  -- Aggregated queue statistics for the dashboard overview.
   type QueueSummary = {
     queue       : String,
     pending     : Int,

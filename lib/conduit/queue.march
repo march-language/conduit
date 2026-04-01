@@ -1,4 +1,5 @@
 mod Conduit.Queue do
+  import Conduit
   ptype Entry = {
     performer : String -> Result((), Conduit.ConduitError),
     config    : Conduit.JobConfig

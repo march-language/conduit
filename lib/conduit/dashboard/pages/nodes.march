@@ -1,4 +1,5 @@
 mod Conduit.Dashboard.Pages.Nodes do
+  import Conduit
   doc "Lists cluster nodes."
   fn render(base_path : String, nodes : List(Conduit.NodeInfo), leader : Option(String)) : String do
     let leader_id = Option.unwrap_or(leader, "")
@@ -6,22 +7,24 @@ mod Conduit.Dashboard.Pages.Nodes do
     let header_cells = Cons("ID", Cons("Hostname", Cons("PID", Cons("Queues", Cons("Pool Size", Cons("Started At", Cons("Last Seen", Cons("Status", Nil))))))))
     let header_html = String.join(List.map(header_cells, fn h -> "<th>" ++ h ++ "</th>"), "")
 
-    let body_html = String.join(List.map(nodes, fn node ->
-      let is_leader = node.id == leader_id
-      let id_cell = if is_leader do
-        "<span class=\"leader-crown\">&#x1F451;</span>" ++ Html.escape(node.id)
-      else
-        Html.escape(node.id)
-      end
-      let queues_str = String.join(node.queues, ", ")
-      let is_stale = node.status != "running"
-      let row_class = if is_stale do " class=\"stale-row\"" else "" end
-      "<tr" ++ row_class ++ "><td>" ++ id_cell ++ "</td><td>" ++ Html.escape(node.hostname) ++ "</td><td>" ++ int_to_string(node.pid) ++ "</td><td>" ++ Html.escape(queues_str) ++ "</td><td>" ++ int_to_string(node.pool_size) ++ "</td><td>" ++ Html.escape(DateTime.format(node.started_at, "%Y-%m-%d %H:%M:%S")) ++ "</td><td>" ++ Html.escape(DateTime.format(node.last_seen_at, "%Y-%m-%d %H:%M:%S")) ++ "</td><td>" ++ Conduit.Dashboard.Html.status_badge(node.status) ++ "</td></tr>"
-    ), "")
+    let body_html = String.join(List.map(nodes, fn node -> prender_node_row(leader_id, node)), "")
 
     let table_html = "<table class=\"data-table\"><thead><tr>" ++ header_html ++ "</tr></thead><tbody>" ++ body_html ++ "</tbody></table>"
 
     let content = "<h1>Nodes</h1><div class=\"section\">" ++ table_html ++ "</div>"
     Conduit.Dashboard.Html.page_with_nav("Nodes", base_path, "nodes", content)
+  end
+
+  pfn prender_node_row(leader_id : String, node : Conduit.NodeInfo) : String do
+    let is_leader = node.id == leader_id
+    let id_cell = if is_leader do
+      "<span class=\"leader-crown\">&#x1F451;</span>" ++ Html.escape(node.id)
+    else
+      Html.escape(node.id)
+    end
+    let queues_str = String.join(node.queues, ", ")
+    let is_stale = node.status != "running"
+    let row_class = if is_stale do " class=\"stale-row\"" else "" end
+    "<tr" ++ row_class ++ "><td>" ++ id_cell ++ "</td><td>" ++ Html.escape(node.hostname) ++ "</td><td>" ++ int_to_string(node.pid) ++ "</td><td>" ++ Html.escape(queues_str) ++ "</td><td>" ++ int_to_string(node.pool_size) ++ "</td><td>" ++ Html.escape(DateTime.format(node.started_at, "%Y-%m-%d %H:%M:%S")) ++ "</td><td>" ++ Html.escape(DateTime.format(node.last_seen_at, "%Y-%m-%d %H:%M:%S")) ++ "</td><td>" ++ Conduit.Dashboard.Html.status_badge(node.status) ++ "</td></tr>"
   end
 end

@@ -1,4 +1,5 @@
 mod Conduit.CronParser do
+  import Conduit
   -- A parsed cron field: either "match any" or a sorted list of valid integers.
   ptype Field = Any | Values(List(Int))
 
@@ -66,30 +67,58 @@ mod Conduit.CronParser do
   pfn pparse_field(s : String, lo : Int, hi : Int) : Result(Field, String) do
     if s == "*" do
       Ok(Any)
-    else if String.starts_with(s, "*/") do
+    else
+      pparse_field_non_star(s, lo, hi)
+    end
+  end
+
+  pfn pparse_field_non_star(s : String, lo : Int, hi : Int) : Result(Field, String) do
+    if String.starts_with(s, "*/") do
       let step_str = String.slice(s, 2, String.byte_size(s) - 2)
-      match String.to_int(step_str) do
-        None    -> Err("invalid step in */N: " ++ s)
-        Some(n) ->
-          if n <= 0 do Err("step must be > 0: " ++ s)
-          else Ok(Values(pstep_values(lo, hi, n)))
-          end
-      end
-    else if String.contains(s, ",") do
+      pparse_step_field(step_str, s, lo, hi)
+    else
+      pparse_field_no_step(s, lo, hi)
+    end
+  end
+
+  pfn pparse_step_field(step_str : String, s : String, lo : Int, hi : Int) : Result(Field, String) do
+    match String.to_int(step_str) do
+      None    -> Err("invalid step in */N: " ++ s)
+      Some(n) ->
+        if n <= 0 do
+          Err("step must be > 0: " ++ s)
+        else
+          Ok(Values(pstep_values(lo, hi, n)))
+        end
+    end
+  end
+
+  pfn pparse_field_no_step(s : String, lo : Int, hi : Int) : Result(Field, String) do
+    if String.contains(s, ",") do
       let items = String.split(s, ",")
       pparse_list(items, lo, hi, Nil)
-    else if String.contains(s, "-") do
+    else
+      pparse_field_no_comma(s, lo, hi)
+    end
+  end
+
+  pfn pparse_field_no_comma(s : String, lo : Int, hi : Int) : Result(Field, String) do
+    if String.contains(s, "-") do
       pparse_range_or_step(s, lo, hi)
     else
-      match String.to_int(s) do
-        None    -> Err("invalid field value: " ++ s)
-        Some(n) ->
-          if n < lo || n > hi do
-            Err("value " ++ int_to_string(n) ++ " out of range [" ++ int_to_string(lo) ++ "," ++ int_to_string(hi) ++ "]")
-          else
-            Ok(Values(Cons(n, Nil)))
-          end
-      end
+      pparse_literal_field(s, lo, hi)
+    end
+  end
+
+  pfn pparse_literal_field(s : String, lo : Int, hi : Int) : Result(Field, String) do
+    match String.to_int(s) do
+      None    -> Err("invalid field value: " ++ s)
+      Some(n) ->
+        if n < lo || n > hi do
+          Err("value " ++ int_to_string(n) ++ " out of range [" ++ int_to_string(lo) ++ "," ++ int_to_string(hi) ++ "]")
+        else
+          Ok(Values(Cons(n, Nil)))
+        end
     end
   end
 
@@ -172,10 +201,12 @@ mod Conduit.CronParser do
   pfn pfind_next(expr : Expr, candidate : DateTime, count : Int) : Option(DateTime) do
     if count > 527040 do
       None
-    else if pmatches(expr, candidate) do
-      Some(candidate)
     else
-      pfind_next(expr, pnext_minute(candidate), count + 1)
+      if pmatches(expr, candidate) do
+        Some(candidate)
+      else
+        pfind_next(expr, pnext_minute(candidate), count + 1)
+      end
     end
   end
 

@@ -1,4 +1,5 @@
 mod Conduit.Dashboard.Pages.Overview do
+  import Conduit
   doc "Renders the overview page."
   fn render(base_path : String, summary : List(Conduit.Dashboard.QueueSummary), nodes : List(Conduit.NodeInfo), leader : Option(String)) : String do
     let leader_id = Option.unwrap_or(leader, "none")

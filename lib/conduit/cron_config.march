@@ -1,4 +1,5 @@
 mod Conduit.CronConfig do
+  import Conduit
   fn default() : Conduit.CronConfig do
     {
       schedule = "* * * * *",
