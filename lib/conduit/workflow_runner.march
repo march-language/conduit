@@ -37,7 +37,7 @@ mod Conduit.WorkflowRunner do
     let job_config = {
       queue             = "default",
       max_attempts      = 3,
-      timeout           = Duration.seconds(30),
+      timeout           = 30000,
       backoff           = Conduit.Backoff.Exponential,
       dead_letter_queue = None,
       unique_for        = None,

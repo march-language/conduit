@@ -10,11 +10,15 @@ mod Conduit.RateLimiter do
 
   When Ok(false) is returned, call `snooze_duration/1` to compute how long
   to wait before retrying.
+
+  The backend in `config` controls how tokens are tracked:
+  - `StorageBacked`: Postgres token bucket via the storage interface (default)
+  - `Custom(f)`: user-supplied function, e.g. for Redis or in-process buckets
   """
   fn acquire(storage, job_type : String, config : Conduit.RateLimit, payload : String) : Result(Bool, String) do
     -- Check the global per-job-type bucket first.
     let global_key = "conduit_rl:" ++ job_type
-    match pacquire_token(storage, global_key, config.max_per_second) do
+    match pacquire_token(storage, config.backend, global_key, config.max_per_second) do
       Err(e)      -> Err(e)
       Ok(false)   -> Ok(false)
       Ok(true)    ->
@@ -23,7 +27,7 @@ mod Conduit.RateLimiter do
           None -> Ok(true)
           Some(pk) ->
             let user_key = "conduit_rl:" ++ job_type ++ ":" ++ pk.key_fn(payload)
-            pacquire_token(storage, user_key, pk.limit)
+            pacquire_token(storage, config.backend, user_key, pk.limit)
         end
     end
   end
@@ -34,15 +38,17 @@ mod Conduit.RateLimiter do
   For a rate of N tokens/second, the minimum wait is 1000/N ms.
   We add a small jitter (0–100ms) to avoid thundering herd.
   """
-  fn snooze_duration(rate : Int) : Duration do
+  fn snooze_duration(rate : Int) : Int do
     let base_ms = if rate > 0 do int_div(1000, rate) else 1000 end
     let jitter  = Random.int(0, 100)
-    Duration.milliseconds(base_ms + jitter)
+    base_ms + jitter
   end
 
-  -- Atomically refill and consume one token from a bucket.
-  -- rate: tokens added per second.
-  pfn pacquire_token(storage, key : String, rate : Int) : Result(Bool, String) do
-    Conduit.Storage.rate_limit_acquire(storage, key, rate)
+  -- Dispatch token acquisition to the configured backend.
+  pfn pacquire_token(storage, backend : Conduit.RateLimiterBackend, key : String, rate : Int) : Result(Bool, String) do
+    match backend do
+      StorageBacked -> Conduit.Storage.rate_limit_acquire(storage, key, rate)
+      Custom(f)     -> f(key, rate)
+    end
   end
 end

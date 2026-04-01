@@ -1,21 +1,29 @@
 mod Conduit.Unique do
   import Conduit
   doc """
-  Compute a unique fingerprint for a job based on its type and the configured
-  fields extracted from the payload string.
+  Compute a unique fingerprint for a job.
 
-  The fingerprint is: SHA-256 hex of (job_type ++ ":" ++ field1=val1 ++ "," ++ ...).
+  Scope controls the uniqueness boundary:
+  - `PerQueue` (default): fingerprint includes the queue name, so the same job
+    type+payload is unique per queue but can be enqueued in different queues.
+  - `Global`: fingerprint excludes the queue, so only one active job with this
+    type+payload may exist across all queues.
 
+  The fingerprint is: SHA-256 hex of (prefix ++ ":" ++ field1=val1 ++ "," ++ ...).
   If `fields` is empty, the entire payload is included.
   """
-  fn fingerprint(job_type : String, payload : String, fields : List(String)) : String do
+  fn fingerprint(job_type : String, queue : String, payload : String, fields : List(String), scope : Conduit.UniqueScope) : String do
+    let prefix = match scope do
+      PerQueue -> queue ++ ":" ++ job_type
+      Global   -> job_type
+    end
     let extracted = if is_nil(fields) do
       payload
     else
       let pairs = List.map(fields, fn field -> field ++ "=" ++ pextract_json_field(payload, field))
       String.join(pairs, ",")
     end
-    let input = job_type ++ ":" ++ extracted
+    let input = prefix ++ ":" ++ extracted
     Crypto.sha256(input) |> Bytes.to_hex
   end
 

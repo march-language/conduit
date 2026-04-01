@@ -1,0 +1,106 @@
+doc """
+Phase 4 migration: imperative workflows and checkpoints.
+
+Creates `conduit_workflows`, `conduit_checkpoints`, and
+`conduit_workflow_signals`. Also adds a `workflow_id` FK column to
+`conduit_jobs` and a stored procedure for expiring stale signals.
+"""
+
+mod Conduit.Migrations.CreateConduitWorkflows do
+
+import Migration
+
+fn up() do
+  [
+    CreateTable({
+      name    = "conduit_workflows",
+      columns = [
+        { name = "id",            col_type = "text",        nullable = false, default_ = None,           primary_key = true,  unique_ = false, references = None },
+        { name = "workflow_type", col_type = "text",        nullable = false, default_ = None,           primary_key = false, unique_ = false, references = None },
+        { name = "parent_id",     col_type = "text",        nullable = true,  default_ = None,           primary_key = false, unique_ = false, references = Some(("conduit_workflows", "id")) },
+        { name = "input",         col_type = "jsonb",       nullable = false, default_ = Some("'{}'"),   primary_key = false, unique_ = false, references = None },
+        { name = "output",        col_type = "jsonb",       nullable = true,  default_ = None,           primary_key = false, unique_ = false, references = None },
+        { name = "status",        col_type = "text",        nullable = false, default_ = Some("'running'"), primary_key = false, unique_ = false, references = None },
+        { name = "started_at",    col_type = "timestamptz", nullable = false, default_ = Some("NOW()"),  primary_key = false, unique_ = false, references = None },
+        { name = "completed_at",  col_type = "timestamptz", nullable = true,  default_ = None,           primary_key = false, unique_ = false, references = None },
+        { name = "timeout_at",    col_type = "timestamptz", nullable = true,  default_ = None,           primary_key = false, unique_ = false, references = None },
+        { name = "error",         col_type = "text",        nullable = true,  default_ = None,           primary_key = false, unique_ = false, references = None },
+        { name = "error_at",      col_type = "timestamptz", nullable = true,  default_ = None,           primary_key = false, unique_ = false, references = None },
+        { name = "tags",          col_type = "text",        nullable = false, default_ = Some("''"),     primary_key = false, unique_ = false, references = None },
+        { name = "meta",          col_type = "jsonb",       nullable = false, default_ = Some("'{}'"),   primary_key = false, unique_ = false, references = None }
+      ],
+      pk = None
+    }),
+    CreateTable({
+      name    = "conduit_checkpoints",
+      columns = [
+        { name = "id",          col_type = "bigserial",   nullable = false, default_ = None,         primary_key = true,  unique_ = false, references = None },
+        { name = "workflow_id", col_type = "text",        nullable = false, default_ = None,         primary_key = false, unique_ = false, references = Some(("conduit_workflows", "id")) },
+        { name = "name",        col_type = "text",        nullable = false, default_ = None,         primary_key = false, unique_ = false, references = None },
+        { name = "value",       col_type = "jsonb",       nullable = false, default_ = None,         primary_key = false, unique_ = false, references = None },
+        { name = "created_at",  col_type = "timestamptz", nullable = false, default_ = Some("NOW()"), primary_key = false, unique_ = false, references = None },
+        { name = "duration_ms", col_type = "integer",     nullable = true,  default_ = None,         primary_key = false, unique_ = false, references = None }
+      ],
+      pk = None
+    }),
+    -- Unique checkpoint per workflow+name.
+    RawSql("ALTER TABLE conduit_checkpoints ADD CONSTRAINT conduit_checkpoints_workflow_name_key UNIQUE (workflow_id, name)"),
+    CreateTable({
+      name    = "conduit_workflow_signals",
+      columns = [
+        { name = "id",           col_type = "bigserial",   nullable = false, default_ = None,            primary_key = true,  unique_ = false, references = None },
+        { name = "workflow_id",  col_type = "text",        nullable = false, default_ = None,            primary_key = false, unique_ = false, references = Some(("conduit_workflows", "id")) },
+        { name = "signal_type",  col_type = "text",        nullable = false, default_ = None,            primary_key = false, unique_ = false, references = None },
+        { name = "payload",      col_type = "jsonb",       nullable = false, default_ = Some("'{}'"),    primary_key = false, unique_ = false, references = None },
+        { name = "status",       col_type = "text",        nullable = false, default_ = Some("'pending'"), primary_key = false, unique_ = false, references = None },
+        { name = "sent_at",      col_type = "timestamptz", nullable = false, default_ = Some("NOW()"),   primary_key = false, unique_ = false, references = None },
+        { name = "delivered_at", col_type = "timestamptz", nullable = true,  default_ = None,            primary_key = false, unique_ = false, references = None },
+        { name = "expires_at",   col_type = "timestamptz", nullable = true,  default_ = None,            primary_key = false, unique_ = false, references = None },
+        { name = "sent_by",      col_type = "text",        nullable = true,  default_ = None,            primary_key = false, unique_ = false, references = None }
+      ],
+      pk = None
+    }),
+    -- Associate jobs with the workflow that spawned them.
+    AddColumn("conduit_jobs", { name = "workflow_id", col_type = "text", nullable = true, default_ = None, primary_key = false, unique_ = false, references = Some(("conduit_workflows", "id")) }),
+    AddIndex({ name = "idx_conduit_workflows_status",   table = "conduit_workflows",        columns = ["status", "started_at"],        unique_ = false }),
+    AddIndex({ name = "idx_conduit_workflows_type",     table = "conduit_workflows",        columns = ["workflow_type", "status"],      unique_ = false }),
+    AddIndex({ name = "idx_conduit_checkpoints_workflow", table = "conduit_checkpoints",    columns = ["workflow_id"],                  unique_ = false }),
+    AddIndex({ name = "idx_conduit_signals_workflow",   table = "conduit_workflow_signals", columns = ["workflow_id", "status"],        unique_ = false }),
+    RawSql("CREATE INDEX idx_conduit_signals_pending ON conduit_workflow_signals (workflow_id, signal_type) WHERE status = 'pending'"),
+    -- Expire stale signals stored procedure.
+    RawSql("""CREATE OR REPLACE FUNCTION conduit_expire_signals()
+RETURNS INTEGER LANGUAGE plpgsql AS $$
+DECLARE
+  cnt INTEGER;
+BEGIN
+  WITH expired AS (
+    UPDATE conduit_workflow_signals
+    SET status = 'expired'
+    WHERE status = 'pending'
+      AND expires_at IS NOT NULL
+      AND expires_at < NOW()
+    RETURNING id
+  )
+  SELECT COUNT(*) INTO cnt FROM expired;
+  RETURN cnt;
+END;
+$$""")
+  ]
+end
+
+fn down() do
+  [
+    RawSql("DROP FUNCTION IF EXISTS conduit_expire_signals()"),
+    DropIndex("idx_conduit_signals_pending"),
+    DropIndex("idx_conduit_signals_workflow"),
+    DropIndex("idx_conduit_checkpoints_workflow"),
+    DropIndex("idx_conduit_workflows_type"),
+    DropIndex("idx_conduit_workflows_status"),
+    RemoveColumn("conduit_jobs", "workflow_id"),
+    DropTable("conduit_workflow_signals"),
+    DropTable("conduit_checkpoints"),
+    DropTable("conduit_workflows")
+  ]
+end
+
+end

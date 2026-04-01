@@ -1724,7 +1724,8 @@ mod ConduitTest do
   fn test_rate_limit_type_fields() do
     let rl : Conduit.RateLimit = {
       max_per_second = 10,
-      per_key        = None
+      per_key        = None,
+      backend        = Conduit.RateLimiterBackend.StorageBacked
     }
     assert_eq_int(rl.max_per_second, 10)
     assert_none(rl.per_key)
@@ -1737,7 +1738,8 @@ mod ConduitTest do
     }
     let rl : Conduit.RateLimit = {
       max_per_second = 10,
-      per_key        = Some(pk)
+      per_key        = Some(pk),
+      backend        = Conduit.RateLimiterBackend.StorageBacked
     }
     assert_eq_int(rl.max_per_second, 10)
     assert_some(rl.per_key)
@@ -1760,7 +1762,7 @@ mod ConduitTest do
   end
 
   fn test_job_config_with_rate_limit() do
-    let rl : Conduit.RateLimit = { max_per_second = 5, per_key = None }
+    let rl : Conduit.RateLimit = { max_per_second = 5, per_key = None, backend = Conduit.RateLimiterBackend.StorageBacked }
     let cfg = { ..Conduit.JobConfig.default(), rate_limit = Some(rl) }
     assert_some(cfg.rate_limit)
     match cfg.rate_limit do
@@ -1774,28 +1776,39 @@ mod ConduitTest do
   -- ─────────────────────────────────────────────────────────────
 
   fn test_unique_fingerprint_deterministic() do
-    let fp1 = Conduit.Unique.fingerprint("TestJob", "{\"id\":1}", Nil)
-    let fp2 = Conduit.Unique.fingerprint("TestJob", "{\"id\":1}", Nil)
+    let fp1 = Conduit.Unique.fingerprint("TestJob", "default", "{\"id\":1}", Nil, Conduit.UniqueScope.PerQueue)
+    let fp2 = Conduit.Unique.fingerprint("TestJob", "default", "{\"id\":1}", Nil, Conduit.UniqueScope.PerQueue)
     assert_eq_str(fp1, fp2)
   end
 
   fn test_unique_fingerprint_differs_by_job_type() do
-    let fp1 = Conduit.Unique.fingerprint("JobA", "{}", Nil)
-    let fp2 = Conduit.Unique.fingerprint("JobB", "{}", Nil)
+    let fp1 = Conduit.Unique.fingerprint("JobA", "default", "{}", Nil, Conduit.UniqueScope.PerQueue)
+    let fp2 = Conduit.Unique.fingerprint("JobB", "default", "{}", Nil, Conduit.UniqueScope.PerQueue)
     assert_true(fp1 != fp2)
   end
 
   fn test_unique_fingerprint_differs_by_payload() do
-    let fp1 = Conduit.Unique.fingerprint("Job", "{\"id\":1}", Nil)
-    let fp2 = Conduit.Unique.fingerprint("Job", "{\"id\":2}", Nil)
+    let fp1 = Conduit.Unique.fingerprint("Job", "default", "{\"id\":1}", Nil, Conduit.UniqueScope.PerQueue)
+    let fp2 = Conduit.Unique.fingerprint("Job", "default", "{\"id\":2}", Nil, Conduit.UniqueScope.PerQueue)
     assert_true(fp1 != fp2)
   end
 
   fn test_unique_fingerprint_with_by_fields() do
-    let fp1 = Conduit.Unique.fingerprint("Job", "{\"user_id\":1,\"other\":\"a\"}", Cons("user_id", Nil))
-    let fp2 = Conduit.Unique.fingerprint("Job", "{\"user_id\":1,\"other\":\"b\"}", Cons("user_id", Nil))
+    let fp1 = Conduit.Unique.fingerprint("Job", "default", "{\"user_id\":1,\"other\":\"a\"}", Cons("user_id", Nil), Conduit.UniqueScope.PerQueue)
+    let fp2 = Conduit.Unique.fingerprint("Job", "default", "{\"user_id\":1,\"other\":\"b\"}", Cons("user_id", Nil), Conduit.UniqueScope.PerQueue)
     -- Same user_id → same fingerprint (only user_id is in `by`)
     assert_eq_str(fp1, fp2)
+  end
+
+  fn test_unique_fingerprint_per_queue_vs_global() do
+    -- Same job+payload but different queues: PerQueue → different fingerprints.
+    let fp_q1 = Conduit.Unique.fingerprint("Job", "default",  "{}", Nil, Conduit.UniqueScope.PerQueue)
+    let fp_q2 = Conduit.Unique.fingerprint("Job", "critical", "{}", Nil, Conduit.UniqueScope.PerQueue)
+    assert_true(fp_q1 != fp_q2)
+    -- Global scope → same fingerprint regardless of queue.
+    let fp_g1 = Conduit.Unique.fingerprint("Job", "default",  "{}", Nil, Conduit.UniqueScope.Global)
+    let fp_g2 = Conduit.Unique.fingerprint("Job", "critical", "{}", Nil, Conduit.UniqueScope.Global)
+    assert_eq_str(fp_g1, fp_g2)
   end
 
   fn test_unique_conflict_ignore_variant() do
@@ -1860,7 +1873,7 @@ mod ConduitTest do
   fn test_rate_limiter_acquire_allowed_by_default() do
     let vault_k = "rl_acq_" ++ uuid_v4()
     let storage = fake_workflow_storage_new(vault_k)
-    let rl : Conduit.RateLimit = { max_per_second = 10, per_key = None }
+    let rl : Conduit.RateLimit = { max_per_second = 10, per_key = None, backend = Conduit.RateLimiterBackend.StorageBacked }
     let result = Conduit.RateLimiter.acquire(storage, "TestJob", rl, "{}")
     assert_ok(result)
     match result do
@@ -1874,7 +1887,7 @@ mod ConduitTest do
     let storage = fake_workflow_storage_new(vault_k)
     -- Block the global key.
     Vault.set(vault_k, "rl_blocked:conduit_rl:TestJob", true)
-    let rl : Conduit.RateLimit = { max_per_second = 10, per_key = None }
+    let rl : Conduit.RateLimit = { max_per_second = 10, per_key = None, backend = Conduit.RateLimiterBackend.StorageBacked }
     let result = Conduit.RateLimiter.acquire(storage, "TestJob", rl, "{}")
     assert_ok(result)
     match result do
@@ -1884,8 +1897,7 @@ mod ConduitTest do
   end
 
   fn test_rate_limiter_snooze_duration_positive() do
-    let dur = Conduit.RateLimiter.snooze_duration(10)
-    let ms  = Duration.to_milliseconds(dur)
+    let ms = Conduit.RateLimiter.snooze_duration(10)
     -- Should be at least 100ms (1000/10) and at most ~200ms (100 + 100 jitter)
     assert_true(ms >= 100)
     assert_true(ms <= 300)

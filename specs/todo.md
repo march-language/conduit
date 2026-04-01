@@ -117,8 +117,8 @@
 - [x] `Queue.enqueue/enqueue_in` enforce unique constraints via `punique_guard`
 - [x] Migration: `unique_key` column + partial unique index + `conduit_rate_limit_buckets` table
 - [x] Tests: RateLimit/PerKeyRateLimit types, UniqueConflict variants, fingerprint determinism, unique check/release, rate limiter acquire/block/snooze, priority ordering, on_dead_letter callback
-- [ ] Pluggable rate limiter backend (in-process default for single-node) — Postgres only for now
-- [ ] Unique scope per-queue vs global — currently global only
+- [x] Pluggable rate limiter backend — `RateLimiterBackend.StorageBacked` (Postgres default) + `Custom(fn)` for user-supplied backends
+- [x] Unique scope per-queue vs global — per-queue default, global opt-in via `UniqueScope.Global`
 
 ---
 
@@ -140,17 +140,17 @@
 
 ---
 
-## Open Questions
+## Resolved Design Questions
 
-See `specs/conduit.md` § Appendix for full discussion. Short list:
+All open questions have been decided. See `specs/conduit.md` § Appendix for full discussion.
 
-- **Q1** Checkpoint retention policy (default: 24h after completion)
-- **Q2** Workflow versioning strategy (leaning: version field, new code = new instances)
-- **Q3** `parallel!` granularity — actor-level vs job-level (leaning: configurable)
-- **Q4** Checkpoint serialisation format (leaning: pluggable, JSON default)
-- **Q5** Dashboard auth — session vs token (leaning: both, adapter sees full request)
-- **Q6** Workflow output size limit (leaning: soft 1MB warn, hard 10MB)
-- **Q7** Cron expression validation — compile-time vs runtime (leaning: runtime)
-- **Q8** Unique job lock scope — per-queue vs global (leaning: per-queue default)
-- **Q9** Rate limiter backend (leaning: pluggable, in-process default)
-- **Q10** Migration directory default (leaning: `priv/migrations/`)
+- **Q1** Checkpoint retention — Configurable per-workflow, 24h default after completion
+- **Q2** Workflow versioning — CAS-based: module content hash determines version; in-flight instances keep original version
+- **Q3** `parallel!` granularity — Configurable: actor-level default, job-level opt-in
+- **Q4** Checkpoint serialization — Pluggable: JSON default (human-readable), March native types opt-in (typed round-tripping)
+- **Q5** Dashboard auth — Both session and token; `Auth.Fn` adapter receives full request
+- **Q6** Workflow output size — 1MB soft limit (warn), 10MB hard limit (reject)
+- **Q7** Cron expression validation — Runtime now; compile-time as future enhancement
+- **Q8** Unique job lock scope — Per-queue default, global opt-in
+- **Q9** Rate limiter backend — Pluggable: Postgres default (already implemented), in-process optimization later
+- **Q10** Migration directory — `priv/migrations/` matching Depot conventions

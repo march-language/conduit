@@ -40,10 +40,8 @@ mod Conduit.Worker do
           |> Option.unwrap_or(Conduit.JobConfig.default())
 
         -- Heartbeat interval: one third of the job timeout, minimum 5s.
-        let heartbeat_interval_ms = int_div(
-          Duration.to_seconds(config.timeout) * 1000,
-          3
-        ) |> pmax_int(5000)
+        let heartbeat_interval_ms = int_div(config.timeout, 3)
+          |> pmax_int(5000)
 
         let hb_task = task_spawn(fn () ->
           heartbeat_loop(storage, job.id, heartbeat_interval_ms))
@@ -64,7 +62,7 @@ mod Conduit.Worker do
           Ok(false) ->
             -- Rate-limited: snooze the job.
             let snooze_dur = match config.rate_limit do
-              None     -> Duration.seconds(1)
+              None     -> 1000
               Some(rl) -> Conduit.RateLimiter.snooze_duration(rl.max_per_second)
             end
             kill(task_await_unwrap(hb_task))
@@ -120,7 +118,7 @@ mod Conduit.Worker do
       let jitter_ms   = Random.int(0, 1000)
       let run_at      = DateTime.add(
                           DateTime.add(DateTime.now(), base_delay),
-                          Duration.milliseconds(jitter_ms)
+                          jitter_ms
                         )
       Logger.debug("conduit: scheduling retry for " ++ job.id ++ " at attempt " ++ int_to_string(attempt + 1))
       match Conduit.Storage.schedule_retry(storage, job.id, error_msg, run_at) do
