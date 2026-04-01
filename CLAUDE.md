@@ -10,6 +10,18 @@ Conduit is a job queue and durable workflow platform for March. It provides prim
 - `specs/conduit.md` — full design spec with phased implementation plan
 - `.claude/skills/march-lang/SKILL.md` — **March language reference** (read this before writing any March code)
 
+## Searching the codebase
+
+**Use `forge search` to find modules, functions, types, and other code constructs.** This is the primary way to discover what exists in the codebase.
+
+```
+forge search "function_name"    # search for a function
+forge search "ModuleName"       # search for a module
+forge search "type_name"        # search for a type
+```
+
+Always use `forge search` before grepping or manually reading files when looking for modules, functions, or types in March code.
+
 ## Development
 
 This is a March library. Use `forge test` to run the test suite. The compiler is at `/Users/80197052/code/march` but files cannot be compiled directly — write correct March source and use the skill for syntax reference.
