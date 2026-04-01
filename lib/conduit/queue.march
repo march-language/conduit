@@ -8,7 +8,7 @@ mod Conduit.Queue do
   fn enqueue(storage, job_type : String, payload : String, config : Conduit.JobConfig) : Result(String, String) do
     let id  = uuid_v4()
     let now = DateTime.now()
-    let unique_key = punique_key(job_type, payload, config)
+    let unique_key = punique_key(job_type, config.queue, payload, config)
     match punique_guard(storage, unique_key, config) do
       Err(e) -> Err(e)
       Ok(existing_id) ->
@@ -42,11 +42,11 @@ mod Conduit.Queue do
     end
   end
 
-  fn enqueue_in(storage, job_type : String, payload : String, delay : Duration, config : Conduit.JobConfig) : Result(String, String) do
+  fn enqueue_in(storage, job_type : String, payload : String, delay : Int, config : Conduit.JobConfig) : Result(String, String) do
     let id     = uuid_v4()
     let now    = DateTime.now()
     let run_at = DateTime.add(now, delay)
-    let unique_key = punique_key(job_type, payload, config)
+    let unique_key = punique_key(job_type, config.queue, payload, config)
     match punique_guard(storage, unique_key, config) do
       Err(e) -> Err(e)
       Ok(existing_id) ->
@@ -109,10 +109,10 @@ mod Conduit.Queue do
     end
   end
 
-  pfn punique_key(job_type : String, payload : String, config : Conduit.JobConfig) : Option(String) do
+  pfn punique_key(job_type : String, queue : String, payload : String, config : Conduit.JobConfig) : Option(String) do
     match config.unique_for do
       None     -> None
-      Some(uc) -> Some(Conduit.Unique.fingerprint(job_type, payload, uc.fields))
+      Some(uc) -> Some(Conduit.Unique.fingerprint(job_type, queue, payload, uc.fields, uc.scope))
     end
   end
 

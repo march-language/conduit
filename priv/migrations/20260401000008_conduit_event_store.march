@@ -8,24 +8,32 @@ consumed in order and side-effect functions are skipped.
 """
 
 mod Conduit.Migrations.CreateEventStore do
-  fn up() do
-    Depot.Migration.create_table("conduit_workflow_events", {
-      id          = ("Int",         { primary_key = true }),
-      workflow_id = ("String",      { null = false, references = { table = "conduit_workflows", column = "id", on_delete = "CASCADE" } }),
-      sequence    = ("Int",         { null = false }),
-      event_type  = ("String",      { null = false }),
-      payload     = ("Map",         { null = false }),
-      recorded_at = ("UtcDatetime", { null = false, default = "NOW()" })
-    })
 
+import Migration
+
+fn up() do
+  [
+    CreateTable({
+      name    = "conduit_workflow_events",
+      columns = [
+        { name = "id",          col_type = "bigserial", nullable = false, default_ = None,         primary_key = true,  unique_ = false, references = None },
+        { name = "workflow_id", col_type = "text",      nullable = false, default_ = None,         primary_key = false, unique_ = false, references = Some(("conduit_workflows", "id")) },
+        { name = "sequence",    col_type = "integer",   nullable = false, default_ = None,         primary_key = false, unique_ = false, references = None },
+        { name = "event_type",  col_type = "text",      nullable = false, default_ = None,         primary_key = false, unique_ = false, references = None },
+        { name = "payload",     col_type = "jsonb",     nullable = false, default_ = Some("'{}'"), primary_key = false, unique_ = false, references = None },
+        { name = "recorded_at", col_type = "timestamptz", nullable = false, default_ = Some("NOW()"), primary_key = false, unique_ = false, references = None }
+      ],
+      pk = None
+    }),
     -- Unique constraint on (workflow_id, sequence) ensures no duplicate events.
-    Depot.Migration.create_index("conduit_workflow_events", Cons("workflow_id", Cons("sequence", Nil)), { unique = true, name = "idx_conduit_events_wf_seq" })
-
+    AddIndex({ name = "idx_conduit_events_wf_seq",  table = "conduit_workflow_events", columns = ["workflow_id", "sequence"], unique_ = true }),
     -- Query index for loading events in order.
-    Depot.Migration.create_index("conduit_workflow_events", Cons("workflow_id", Cons("sequence", Nil)), { name = "idx_conduit_events_workflow" })
-  end
+    AddIndex({ name = "idx_conduit_events_workflow", table = "conduit_workflow_events", columns = ["workflow_id", "sequence"], unique_ = false })
+  ]
+end
 
-  fn down() do
-    Depot.Migration.drop_table("conduit_workflow_events")
-  end
+fn down() do
+  [DropTable("conduit_workflow_events")]
+end
+
 end

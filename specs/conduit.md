@@ -4286,7 +4286,7 @@ This means third-party tools, editor plugins, and CI pipelines can call `Conduit
 
 ## 10. Appendix: Open Questions
 
-These questions are unresolved and should be decided before or during implementation of the relevant phase.
+These questions have been resolved. Decisions recorded below for historical context.
 
 ### Q1: Checkpoint Retention Policy
 
@@ -4298,7 +4298,7 @@ These questions are unresolved and should be decided before or during implementa
 - C) Retain until explicitly cleared (simplest, but unbounded growth)
 - D) Configurable per workflow type
 
-**Leaning:** D, with B as the default.
+**Decided:** D, with B as the default. Configurable per-workflow; 24h after completion by default.
 
 ### Q2: Workflow Versioning
 
@@ -4312,7 +4312,7 @@ If `OnboardUserWorkflow` is updated to add a new step between step 2 and step 3,
 - C) Migration scripts: user-provided code to migrate in-flight workflows
 - D) Require all workflows to complete before deploying new versions (operational constraint)
 
-**Leaning:** B for Phase 4 (version field on `conduit_workflows`), C as a later enhancement.
+**Decided:** Use the CAS (content-addressable store) for workflow versioning. The workflow module's content hash determines the version. New instances get the current version; in-flight instances continue with their original version. This leverages March's existing CAS infrastructure rather than a manual version field.
 
 ### Q3: Workflow Sub-Step Parallelism Granularity
 
@@ -4323,7 +4323,7 @@ If `OnboardUserWorkflow` is updated to add a new step between step 2 and step 3,
 - B) Job-level parallelism: each branch is a separate Conduit job. Durable, but more overhead.
 - C) Configurable: default actor-level, opt-in to job-level for long-running branches.
 
-**Leaning:** C.
+**Decided:** C. Configurable — actor-level by default, job-level opt-in. Document this clearly in code.
 
 ### Q4: Checkpoint Serialization Format
 
@@ -4334,25 +4334,25 @@ If `OnboardUserWorkflow` is updated to add a new step between step 2 and step 3,
 - B) Pluggable: same `Serializable` interface as job payloads, JSON default, binary opt-in
 - C) MessagePack for checkpoints specifically (compact, fast, still debuggable with tooling)
 
-**Leaning:** B (consistent with job serialization philosophy).
+**Decided:** B. Pluggable with two built-in options: JSON (default, human-readable) and March native data types (for typed round-tripping without loss).
 
 ### Q5: Dashboard Auth — Session vs Token
 
 **Question:** Should the dashboard support cookie-based sessions (for human browser use) or only token-based auth (simpler to implement)?
 
-**Leaning:** Provide both, with the auth adapter receiving the full request so it can inspect cookies or headers.
+**Decided:** Both session and token. The `Auth.Fn` adapter receives the full request so it can inspect cookies or headers. Already effectively implemented.
 
 ### Q6: Workflow Output Size Limit
 
 **Question:** Workflow outputs are stored as JSONB. Should there be a size limit?
 
-**Leaning:** Soft limit of 1MB with a warning; hard limit of 10MB. Larger outputs should use external storage with a reference.
+**Decided:** 1MB soft limit (log warning only, don't break working code); 10MB hard limit (reject). Larger outputs should use external storage with a reference.
 
 ### Q7: Cron Expression Validation
 
 **Question:** Should cron expression validation be compile-time (macro) or runtime?
 
-**Leaning:** Runtime validation on registration with a clear error. Compile-time would require a complex macro and still can't validate dynamic crons.
+**Decided:** Runtime validation for now. Compile-time validation is a planned future enhancement (compile-time would require a complex macro and still can't validate dynamic crons).
 
 ### Q8: Unique Job Lock Scope
 
@@ -4360,7 +4360,7 @@ If `OnboardUserWorkflow` is updated to add a new step between step 2 and step 3,
 
 **Example:** If `SendWelcomeEmail` is unique for `user_id: 42` and the job is in queue `email`, can a second `SendWelcomeEmail { user_id: 42 }` be enqueued to queue `critical`?
 
-**Leaning:** Uniqueness is per-queue by default, with an option for global scope.
+**Decided:** Per-queue by default, global opt-in.
 
 ### Q9: Rate Limiter Backend
 
@@ -4369,13 +4369,13 @@ If `OnboardUserWorkflow` is updated to add a new step between step 2 and step 3,
 - B) Postgres-backed (coordinated, slightly slower)
 - C) Pluggable (in-process default, Postgres or Redis for coordinated)
 
-**Leaning:** C. In-process works for most cases (the limit is approximate anyway due to network latency). Postgres-backed for users who need exact cross-node limits.
+**Decided:** C. Pluggable — Postgres default (already implemented). In-process optimization deferred to a later phase.
 
 ### Q10: Forge Integration for Migration Generation
 
 **Question:** The migration command is proposed as `forge conduit.gen.migrations`. This generates SQL files into the user's migration directory. What should the migration directory default be?
 
-**Leaning:** `priv/migrations/` consistent with Depot conventions. User can configure via Forge config:
+**Decided:** `priv/migrations/` matching Depot conventions. User can configure via Forge config:
 
 ```march
 -- forge.march

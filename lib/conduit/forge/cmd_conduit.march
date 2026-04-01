@@ -1,0 +1,107 @@
+-- lib/conduit/forge/cmd_conduit.march
+-- forge conduit.gen.migrations
+--
+-- Copies Conduit's bundled migration files from the library's
+-- priv/migrations/ into the user's application's priv/migrations/.
+-- Files that already exist at the destination are skipped (no overwrites).
+--
+-- Usage (from the user's app directory):
+--   forge conduit.gen.migrations
+--   forge conduit.gen.migrations --dest db/migrate
+
+mod Forge.CmdConduit do
+
+-- ---- Constants ----
+
+-- Source: Conduit library's bundled migrations (relative to this file at
+-- lib/conduit/forge/cmd_conduit.march → ../../priv/migrations/).
+pfn source_dir() do
+  Path.join(Path.join(Path.join("deps", "conduit"), "priv"), "migrations")
+end
+
+-- Default destination in the user's app.
+pfn default_dest_dir() do
+  Path.join("priv", "migrations")
+end
+
+-- ---- Main entry point ----
+
+doc "forge conduit.gen.migrations — copy Conduit migrations to priv/migrations/."
+fn gen_migrations(dest_dir) do
+  let src = source_dir()
+  if !Dir.exists(src) do
+    Err("Conduit migration source not found: " ++ src ++ ". Is conduit listed as a dependency?")
+  else
+    let _ = Dir.mkdir_p(dest_dir)
+    match Dir.list(src) do
+    Err(e)    -> Err("cannot list " ++ src ++ ": " ++ e)
+    Ok(names) -> do
+      let march_files = filter_march_files(names)
+      let count       = list_length(march_files)
+      if count == 0 do
+        println("No migration files found in " ++ src ++ ".")
+        Ok(0)
+      else do
+        println("Copying " ++ int_to_string(count) ++ " Conduit migration(s) to " ++ dest_dir ++ "/\n")
+        copy_files(march_files, src, dest_dir, 0)
+      end
+      end
+    end
+    end
+  end
+end
+
+-- ---- File copying ----
+
+pfn copy_files(names, src_dir, dest_dir, copied) do
+  match names do
+  Nil               -> do
+    println("\nDone. " ++ int_to_string(copied) ++ " file(s) copied.")
+    Ok(copied)
+  end
+  Cons(name, rest)  -> do
+    let src_path  = Path.join(src_dir, name)
+    let dest_path = Path.join(dest_dir, name)
+    if File.exists(dest_path) do
+      println("  skip  " ++ name ++ " (already exists)")
+      copy_files(rest, src_dir, dest_dir, copied)
+    else
+      match File.read(src_path) do
+      Err(e) -> Err("cannot read " ++ src_path ++ ": " ++ e)
+      Ok(content) ->
+        match File.write(dest_path, content) do
+        Err(e) -> Err("cannot write " ++ dest_path ++ ": " ++ e)
+        Ok(_)  -> do
+          println("  create " ++ dest_path)
+          copy_files(rest, src_dir, dest_dir, copied + 1)
+        end
+        end
+      end
+    end
+  end
+  end
+end
+
+-- ---- Helpers ----
+
+pfn filter_march_files(names) do
+  match names do
+  Nil               -> Nil
+  Cons(name, rest)  ->
+    if String.ends_with(name, ".march") do
+      Cons(name, filter_march_files(rest))
+    else
+      filter_march_files(rest)
+    end
+  end
+end
+
+pfn list_length(lst) do list_len_acc(lst, 0) end
+pfn list_len_acc(lst, n) do
+  match lst do
+  Nil           -> n
+  Cons(_, rest) -> list_len_acc(rest, n + 1)
+  end
+end
+
+end

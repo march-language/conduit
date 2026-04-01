@@ -9,9 +9,13 @@ mod Conduit do
     | Fibonacci
     | Custom(Int -> Int)
 
+  -- Unique lock scope: PerQueue (default) or Global across all queues.
+  type UniqueScope = PerQueue | Global
+
   type UniqueConstraint = {
     duration : Int,
-    fields   : List(String)
+    fields   : List(String),
+    scope    : UniqueScope
   }
 
   type UniqueConflict = Ignore | Replace | Raise
@@ -21,9 +25,22 @@ mod Conduit do
     limit  : Int
   }
 
+  -- Pluggable rate limiter backend.
+  --
+  -- StorageBacked: delegates to the storage interface (Postgres token bucket).
+  --   Default and recommended for multi-node deployments.
+  -- Custom(f): user-supplied function f(key, rate) -> Result(Bool, String).
+  --   Use for Redis, in-process buckets, or any other backend.
+  --
+  -- In-process (Vault-based) optimization is planned as a future built-in option.
+  type RateLimiterBackend =
+      StorageBacked
+    | Custom(String -> Int -> Result(Bool, String))
+
   type RateLimit = {
     max_per_second : Int,
-    per_key        : Option(Conduit.PerKeyRateLimit)
+    per_key        : Option(Conduit.PerKeyRateLimit),
+    backend        : Conduit.RateLimiterBackend
   }
 
   type JobConfig = {

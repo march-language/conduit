@@ -1,0 +1,66 @@
+doc """
+Phase 1 migration: core job queue.
+
+Creates `conduit_jobs` — the main jobs table — plus poll and status
+indexes, and a LISTEN/NOTIFY trigger that fires on every new job insert.
+"""
+
+mod Conduit.Migrations.CreateConduitJobs do
+
+import Migration
+
+fn up() do
+  [
+    CreateTable({
+      name    = "conduit_jobs",
+      columns = [
+        { name = "id",                col_type = "text",        nullable = false, default_ = Some("gen_random_uuid()::text"), primary_key = true,  unique_ = false, references = None },
+        { name = "queue",             col_type = "text",        nullable = false, default_ = Some("'default'"),               primary_key = false, unique_ = false, references = None },
+        { name = "job_type",          col_type = "text",        nullable = false, default_ = None,                            primary_key = false, unique_ = false, references = None },
+        { name = "payload",           col_type = "jsonb",       nullable = false, default_ = Some("'{}'"),                    primary_key = false, unique_ = false, references = None },
+        { name = "status",            col_type = "text",        nullable = false, default_ = Some("'pending'"),               primary_key = false, unique_ = false, references = None },
+        { name = "attempt",           col_type = "integer",     nullable = false, default_ = Some("0"),                       primary_key = false, unique_ = false, references = None },
+        { name = "max_attempts",      col_type = "integer",     nullable = false, default_ = Some("3"),                       primary_key = false, unique_ = false, references = None },
+        { name = "priority",          col_type = "integer",     nullable = false, default_ = Some("0"),                       primary_key = false, unique_ = false, references = None },
+        { name = "backoff",           col_type = "text",        nullable = false, default_ = Some("'exponential'"),           primary_key = false, unique_ = false, references = None },
+        { name = "dead_letter_queue", col_type = "text",        nullable = true,  default_ = None,                            primary_key = false, unique_ = false, references = None },
+        { name = "inserted_at",       col_type = "timestamptz", nullable = false, default_ = Some("NOW()"),                   primary_key = false, unique_ = false, references = None },
+        { name = "scheduled_at",      col_type = "timestamptz", nullable = false, default_ = Some("NOW()"),                   primary_key = false, unique_ = false, references = None },
+        { name = "run_at",            col_type = "timestamptz", nullable = false, default_ = Some("NOW()"),                   primary_key = false, unique_ = false, references = None },
+        { name = "started_at",        col_type = "timestamptz", nullable = true,  default_ = None,                            primary_key = false, unique_ = false, references = None },
+        { name = "completed_at",      col_type = "timestamptz", nullable = true,  default_ = None,                            primary_key = false, unique_ = false, references = None },
+        { name = "heartbeat_at",      col_type = "timestamptz", nullable = true,  default_ = None,                            primary_key = false, unique_ = false, references = None },
+        { name = "worker_id",         col_type = "text",        nullable = true,  default_ = None,                            primary_key = false, unique_ = false, references = None },
+        { name = "errors",            col_type = "jsonb",       nullable = false, default_ = Some("'[]'"),                    primary_key = false, unique_ = false, references = None },
+        { name = "tags",              col_type = "text[]",      nullable = false, default_ = Some("'{}'"),                    primary_key = false, unique_ = false, references = None },
+        { name = "meta",              col_type = "jsonb",       nullable = false, default_ = Some("'{}'"),                    primary_key = false, unique_ = false, references = None }
+      ],
+      pk = None
+    }),
+    -- Primary poll index: queue + eligible statuses + ordering.
+    RawSql("CREATE INDEX idx_conduit_jobs_poll ON conduit_jobs (queue, status, priority DESC, run_at ASC) WHERE status IN ('pending', 'snoozed')"),
+    -- Status + time index for dashboard queries.
+    AddIndex({ name = "idx_conduit_jobs_status", table = "conduit_jobs", columns = ["status", "inserted_at"], unique_ = false }),
+    -- LISTEN/NOTIFY trigger: notify queue channel on each new job insert.
+    RawSql("""CREATE OR REPLACE FUNCTION conduit_notify_new_job()
+RETURNS TRIGGER AS $$
+BEGIN
+  PERFORM pg_notify('conduit_queue_' || NEW.queue, NEW.id);
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql"""),
+    RawSql("CREATE TRIGGER conduit_jobs_notify AFTER INSERT ON conduit_jobs FOR EACH ROW EXECUTE FUNCTION conduit_notify_new_job()")
+  ]
+end
+
+fn down() do
+  [
+    RawSql("DROP TRIGGER IF EXISTS conduit_jobs_notify ON conduit_jobs"),
+    RawSql("DROP FUNCTION IF EXISTS conduit_notify_new_job()"),
+    DropIndex("idx_conduit_jobs_status"),
+    DropIndex("idx_conduit_jobs_poll"),
+    DropTable("conduit_jobs")
+  ]
+end
+
+end
