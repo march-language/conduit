@@ -86,12 +86,12 @@ mod Conduit.Dashboard.Pages.Workflows do
     )
 
     let sig_headers = Cons("Type", Cons("Status", Cons("Sent At", Nil)))
-    let sig_rows = List.map(signals, fn sig ->
+    let sig_rows = List.map(signals, fn sr ->
       Cons(
-        Html.escape(sig.signal_type),
+        Html.escape(sr.signal_type),
         Cons(
-          Conduit.Dashboard.Html.status_badge(sig.status),
-          Cons(Html.escape(DateTime.format(sig.sent_at, "%Y-%m-%d %H:%M:%S")), Nil)
+          Conduit.Dashboard.Html.status_badge(sr.status),
+          Cons(Html.escape(DateTime.format(sr.sent_at, "%Y-%m-%d %H:%M:%S")), Nil)
         )
       )
     )

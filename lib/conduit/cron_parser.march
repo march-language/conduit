@@ -134,12 +134,13 @@ mod Conduit.CronParser do
 
   -- Generate [start, start+step, start+2*step, ..., ≤ hi]
   pfn pstep_values(start : Int, hi : Int, step : Int) : List(Int) do
-    pfn go(cur : Int, acc : List(Int)) : List(Int) do
-      if cur > hi do List.reverse(acc)
-      else go(cur + step, Cons(cur, acc))
-      end
+    pstep_go(start, hi, step, Nil)
+  end
+
+  pfn pstep_go(cur : Int, hi : Int, step : Int, acc : List(Int)) : List(Int) do
+    if cur > hi do List.reverse(acc)
+    else pstep_go(cur + step, hi, step, Cons(cur, acc))
     end
-    go(start, Nil)
   end
 
   -- ─────────────────────────────────────────────────────────────

@@ -221,12 +221,13 @@ mod Conduit.Dashboard.Router do
       ""
     else
       let pairs = String.split(qs, "&")
-      let found = List.find(pairs, fn pair ->
+      let found = List.find(pairs, fn pair -> do
         let parts = String.split(pair, "=")
         match parts do
           Cons(k, _) -> k == key
           Nil        -> false
-        end)
+        end
+      end)
       match found do
         None      -> ""
         Some(pair) ->

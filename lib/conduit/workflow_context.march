@@ -161,10 +161,10 @@ mod Conduit.WorkflowContext do
     else
       match Conduit.Storage.signal_peek(storage, workflow_id, signal_type) do
         Err(e)        -> Err(Conduit.WorkflowError.StorageError(e))
-        Ok(Some(sig)) ->
-          match Conduit.Storage.signal_mark_delivered(storage, sig.id) do
+        Ok(Some(sr)) ->
+          match Conduit.Storage.signal_mark_delivered(storage, sr.id) do
             Err(e) -> Err(Conduit.WorkflowError.StorageError(e))
-            Ok(_) -> Ok(sig.payload)
+            Ok(_) -> Ok(sr.payload)
           end
         Ok(None) ->
           psleep_ms(1000)

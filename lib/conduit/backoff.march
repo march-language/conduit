@@ -1,6 +1,6 @@
 mod Conduit.Backoff do
-  fn delay(strategy : Conduit.Backoff, attempt : Int) : Duration do
-    match strategy do
+  fn delay(strat : Conduit.Backoff, attempt : Int) : Duration do
+    match strat do
       Linear ->
         Duration.multiply(Duration.seconds(5), attempt)
       Exponential ->

@@ -76,7 +76,7 @@ mod Conduit.WorkflowRunner do
             Some(e) -> e.config
           end
           let replay_warm_result = match wf_config.execution_mode do
-            Conduit.ExecutionMode.DeterministicReplay ->
+            DeterministicReplay ->
               Conduit.EventStore.warm_replay(storage, row.id)
             _ -> Ok(())
           end
