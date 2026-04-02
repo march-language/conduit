@@ -1,5 +1,4 @@
 mod Conduit.Dashboard.Router do
-  import Conduit
   doc """
   HTTP request handler for the Conduit Dashboard.
 

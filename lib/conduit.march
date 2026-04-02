@@ -39,20 +39,20 @@ mod Conduit do
 
   type RateLimit = {
     max_per_second : Int,
-    per_key        : Option(Conduit.PerKeyRateLimit),
-    backend        : Conduit.RateLimiterBackend
+    per_key        : Option(PerKeyRateLimit),
+    backend        : RateLimiterBackend
   }
 
   type JobConfig = {
     queue             : String,
     max_attempts      : Int,
     timeout           : Int,
-    backoff           : Conduit.Backoff,
+    backoff           : Backoff,
     dead_letter_queue : Option(String),
-    unique_for        : Option(Conduit.UniqueConstraint),
-    on_conflict       : Conduit.UniqueConflict,
-    rate_limit        : Option(Conduit.RateLimit),
-    on_dead_letter    : Option(Conduit.JobInfo -> ()),
+    unique_for        : Option(UniqueConstraint),
+    on_conflict       : UniqueConflict,
+    rate_limit        : Option(RateLimit),
+    on_dead_letter    : Option(JobInfo -> ()),
     priority          : Int,
     tags              : List(String),
     discard_after     : Option(Int)
@@ -85,7 +85,7 @@ mod Conduit do
     schedule : String,
     timezone : String,
     queue    : String,
-    overlap  : Conduit.CronOverlap,
+    overlap  : CronOverlap,
     tags     : List(String)
   }
 
@@ -164,7 +164,7 @@ mod Conduit do
   type ExecutionMode = Checkpoint | DeterministicReplay
 
   type WorkflowConfig = {
-    execution_mode : Conduit.ExecutionMode,
+    execution_mode : ExecutionMode,
     timeout        : Option(Int),
     tags           : List(String)
   }

@@ -1,5 +1,4 @@
 mod Conduit.Unique do
-  import Conduit
   doc """
   Compute a unique fingerprint for a job.
 

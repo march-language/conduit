@@ -1,5 +1,4 @@
 mod Conduit.Storage.Postgres do
-  import Conduit
   type Config = { host : String }
 
   -- ─────────────────────────────────────────────────────────────

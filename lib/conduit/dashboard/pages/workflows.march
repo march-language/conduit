@@ -1,5 +1,4 @@
 mod Conduit.Dashboard.Pages.Workflows do
-  import Conduit
   doc "List workflows."
   fn render_list(base_path : String, workflows : List(Conduit.WorkflowRow), status_filter : String, page : Int) : String do
     let statuses = Cons("running", Cons("completed", Cons("failed", Cons("", Nil))))

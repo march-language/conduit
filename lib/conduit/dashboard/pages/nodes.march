@@ -1,5 +1,4 @@
 mod Conduit.Dashboard.Pages.Nodes do
-  import Conduit
   doc "Lists cluster nodes."
   fn render(base_path : String, nodes : List(Conduit.NodeInfo), leader : Option(String)) : String do
     let leader_id = Option.unwrap_or(leader, "")

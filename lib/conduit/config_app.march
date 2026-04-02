@@ -1,5 +1,4 @@
 mod Conduit.Config do
-  import Conduit
   fn default() : Conduit.Config do
     {
       queues                  = Cons("default", Nil),

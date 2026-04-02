@@ -1,5 +1,4 @@
 mod Conduit.Dashboard.Queries do
-  import Conduit
   doc "Load per-queue aggregate stats for the overview page."
   fn queue_summary(storage) : List(Conduit.Dashboard.QueueSummary) do
     match Conduit.Storage.dashboard_queue_summary(storage) do

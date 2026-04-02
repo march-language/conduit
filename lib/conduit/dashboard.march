@@ -1,5 +1,4 @@
 mod Conduit.Dashboard do
-  import Conduit
   -- Conduit Dashboard — web UI for monitoring and administering Conduit.
   --
   -- ## Embedded in a Bastion app

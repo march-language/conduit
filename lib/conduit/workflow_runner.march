@@ -1,5 +1,4 @@
 mod Conduit.WorkflowRunner do
-  import Conduit
   doc "The job_type constant (public so callers can use it in tests)."
   fn job_type() : String do
     "conduit.workflow_runner"
@@ -49,7 +48,7 @@ mod Conduit.WorkflowRunner do
       discard_after     = None
     }
     let payload = "{\"workflow_id\": \"" ++ workflow_id ++ "\"}"
-    Conduit.Queue.enqueue(storage, RunnerJobType, payload, job_config)
+    Conduit.Queue.enqueue(storage, job_type(), payload, job_config)
   end
 
   -- ─────────────────────────────────────────────────────────────

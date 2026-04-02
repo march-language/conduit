@@ -1,5 +1,4 @@
 mod Conduit.CronParser do
-  import Conduit
   -- A parsed cron field: either "match any" or a sorted list of valid integers.
   ptype Field = Any | Values(List(Int))
 

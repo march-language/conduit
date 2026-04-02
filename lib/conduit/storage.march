@@ -1,5 +1,4 @@
 mod Conduit do
-  import Conduit
   interface Storage(s) do
     fn enqueue            : s -> Conduit.JobRow -> Result(String, String)
     fn fetch_next         : s -> String -> Result(Option(Conduit.JobRow), String)

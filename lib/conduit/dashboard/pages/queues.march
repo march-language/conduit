@@ -1,5 +1,4 @@
 mod Conduit.Dashboard.Pages.Queues do
-  import Conduit
   doc "Lists all queues from summary."
   fn render_list(base_path : String, summary : List(Conduit.Dashboard.QueueSummary)) : String do
     let headers = Cons("Queue", Cons("Pending", Cons("Running", Cons("Failed", Cons("Dead", Nil)))))

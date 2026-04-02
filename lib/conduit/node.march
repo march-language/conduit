@@ -1,5 +1,4 @@
 mod Conduit.Node do
-  import Conduit
   let leader_lock_id = 8473625
 
   fn start(storage, config : Conduit.Config) : List(Task) do

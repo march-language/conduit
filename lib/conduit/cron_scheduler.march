@@ -1,5 +1,4 @@
 mod Conduit.CronScheduler do
-  import Conduit
   doc "Start the cron scheduler as a background task."
   fn start(storage, tick_interval_ms : Int) : Task do
     task_spawn(fn () -> scheduler_loop(storage, tick_interval_ms))

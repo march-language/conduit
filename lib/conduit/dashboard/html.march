@@ -1,5 +1,4 @@
 mod Conduit.Dashboard.Html do
-  import Conduit
   doc "Renders a full HTML page with the shared nav injected."
   fn page(title : String, base_path : String, content : String) : String do
     ~H"""

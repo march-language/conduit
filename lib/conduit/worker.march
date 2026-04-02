@@ -1,5 +1,4 @@
 mod Conduit.Worker do
-  import Conduit
   doc """
   Start `count` worker tasks for the given queue, plus one stale-rescue task.
   Returns all task handles.

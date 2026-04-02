@@ -1,5 +1,4 @@
 mod Conduit.RateLimiter do
-  import Conduit
   doc """
   Attempt to acquire a rate-limit token for the given job.
 

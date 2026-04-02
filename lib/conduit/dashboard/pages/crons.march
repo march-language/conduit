@@ -1,5 +1,4 @@
 mod Conduit.Dashboard.Pages.Crons do
-  import Conduit
   fn render(base_path : String, crons : List(Conduit.CronSchedule)) : String do
     let headers = Cons("ID", Cons("Job Type", Cons("Schedule", Cons("Timezone", Cons("Status", Cons("Last Run", Cons("Next Run", Cons("Actions", Nil))))))))
     let rows = List.map(crons, fn c -> prender_cron_row(base_path, c))

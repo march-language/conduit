@@ -1,5 +1,4 @@
 mod Conduit.Dashboard.Pages.DeadLetters do
-  import Conduit
   doc "Lists dead letters."
   fn render(base_path : String, dls : List(Conduit.DeadLetter), page : Int) : String do
     let retry_all_btn = Conduit.Dashboard.Html.action_btn(

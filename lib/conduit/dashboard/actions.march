@@ -1,5 +1,4 @@
 mod Conduit.Dashboard.Actions do
-  import Conduit
   doc "Retry a job: reset to pending with attempt = 0."
   fn retry_job(storage, job_id : String) : Result((), String) do
     Conduit.Storage.job_retry(storage, job_id)

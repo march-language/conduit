@@ -1,5 +1,4 @@
 mod Conduit.WorkflowConfig do
-  import Conduit
   fn default() : Conduit.WorkflowConfig do
     {
       execution_mode = Conduit.ExecutionMode.Checkpoint,
