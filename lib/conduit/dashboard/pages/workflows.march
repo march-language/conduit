@@ -11,11 +11,9 @@ mod Conduit.Dashboard.Pages.Workflows do
 
     let rows = List.map(workflows, fn wf -> prender_wf_row(base_path, wf))
 
-    let base_pagination_url = base_path ++ "/workflows?status=" ++ status_filter
-    let total_pages = if List.length(workflows) < 50 do page else page + 1 end
-    let pagination_html = Conduit.Dashboard.Html.pagination(base_pagination_url, page, total_pages)
+    let _ = page
 
-    let content = "<h1>Workflows</h1><div class=\"section\"><div class=\"tab-bar\">" ++ tab_html ++ "</div>" ++ Conduit.Dashboard.Html.table(headers, rows) ++ pagination_html ++ "</div>"
+    let content = "<h1>Workflows</h1><div class=\"section\"><div class=\"tab-bar\">" ++ tab_html ++ "</div>" ++ Conduit.Dashboard.Html.table(headers, rows) ++ "</div>"
     Conduit.Dashboard.Html.page_with_nav("Workflows", base_path, "workflows", content)
   end
 

@@ -46,7 +46,7 @@ mod Conduit.CronRegistry do
     end
   end
 
-  pfn registry_key() : String do
-    "conduit_cron_registry"
+  pfn registry_key() do
+    Vault.new("conduit_cron_registry")
   end
 end

@@ -35,182 +35,274 @@ mod Conduit.Dashboard.Router do
     GET  /nodes                     — cluster nodes
     GET  /api/summary               — JSON summary for polling
   """
-  fn handle(storage, auth : Conduit.Dashboard.Auth, base_path : String, conn) do
-    if not (Conduit.Dashboard.Auth.check(auth, conn)) do
+  fn handle(storage, auth : Conduit.Dashboard.Auth, base_path : String, conn : Conn) do
+    if Conduit.Dashboard.Auth.check(auth, conn) do
+      let method   : Atom         = HttpServer.method(conn)
+      let segments : List(String) = HttpServer.path_info(conn)
+      pdispatch(storage, base_path, method, segments, conn)
+    else
       conn
       |> HttpServer.put_resp_header("www-authenticate", "Bearer realm=\"Conduit Dashboard\"")
       |> HttpServer.text(401, "Unauthorized")
-    else
-      let method   = HttpServer.method(conn)
-      let segments = HttpServer.path_info(conn)
-      pdispatch(storage, base_path, method, segments, conn)
     end
   end
 
-  pfn pdispatch(storage, base_path : String, method, segments : List(String), conn) do
-    match (method, segments) do
+  pfn pdispatch(storage, base_path : String, method : Atom, segments : List(String), conn : Conn) do
+    match segments do
 
       -- Overview
-      (:get, Nil) ->
-        let summary = Conduit.Dashboard.Queries.queue_summary(storage)
-        let nodes   = Conduit.Dashboard.Queries.nodes(storage)
-        let leader  = Conduit.cluster_leader()
-        let html    = Conduit.Dashboard.Pages.Overview.render(base_path, summary, nodes, leader)
-        conn |> HttpServer.html(200, html)
-
-      -- Queue list
-      (:get, Cons("queues", Nil)) ->
-        let summary = Conduit.Dashboard.Queries.queue_summary(storage)
-        let html    = Conduit.Dashboard.Pages.Queues.render_list(base_path, summary)
-        conn |> HttpServer.html(200, html)
-
-      -- Queue detail
-      (:get, Cons("queues", Cons(queue, Nil))) ->
-        let qs      = HttpServer.query_string(conn)
-        let status_filter = pquery_param(qs, "status")
-        let page    = pquery_param(qs, "page") |> String.to_int |> unwrap_or(1)
-        let jobs    = Conduit.Dashboard.Queries.jobs_list(storage, queue, status_filter, page)
-        let html    = Conduit.Dashboard.Pages.Queues.render_detail(base_path, queue, status_filter, jobs, page)
-        conn |> HttpServer.html(200, html)
-
-      -- Job detail
-      (:get, Cons("jobs", Cons(job_id, Nil))) ->
-        match Conduit.Dashboard.Queries.job_by_id(storage, job_id) do
-          None     -> conn |> HttpServer.text(404, "Job not found")
-          Some(job) ->
-            let html = Conduit.Dashboard.Pages.Jobs.render(base_path, job)
-            conn |> HttpServer.html(200, html)
+      Nil ->
+        if method == :get do
+          let summary = Conduit.Dashboard.Queries.queue_summary(storage)
+          let nodes   = Conduit.Dashboard.Queries.nodes(storage)
+          let leader  = Conduit.cluster_leader()
+          let html    = Conduit.Dashboard.Pages.Overview.render(base_path, summary, nodes, leader)
+          conn |> HttpServer.html(200, html)
+        else
+          conn |> HttpServer.text(405, "Method Not Allowed")
         end
 
-      -- Job retry
-      (:post, Cons("jobs", Cons(job_id, Cons("retry", Nil)))) ->
-        match Conduit.Dashboard.Actions.retry_job(storage, job_id) do
-          Ok(_)   -> conn |> HttpServer.redirect(base_path ++ "/jobs/" ++ job_id)
-          Err(e)  -> conn |> HttpServer.text(500, "Error: " ++ e)
+      -- Queue list or queue detail
+      Cons("queues", rest) ->
+        match rest do
+          Nil ->
+            if method == :get do
+              let summary = Conduit.Dashboard.Queries.queue_summary(storage)
+              let html    = Conduit.Dashboard.Pages.Queues.render_list(base_path, summary)
+              conn |> HttpServer.html(200, html)
+            else
+              conn |> HttpServer.text(405, "Method Not Allowed")
+            end
+          Cons(queue, Nil) ->
+            if method == :get do
+              let qs      = HttpServer.query_string(conn)
+              let status_filter = pquery_param(qs, "status")
+              let page    = pparse_page(qs)
+              let jobs    = Conduit.Dashboard.Queries.jobs_list(storage, queue, status_filter, page)
+              let html    = Conduit.Dashboard.Pages.Queues.render_detail(base_path, queue, status_filter, jobs, page)
+              conn |> HttpServer.html(200, html)
+            else
+              conn |> HttpServer.text(405, "Method Not Allowed")
+            end
+          _ ->
+            conn |> HttpServer.text(404, "Not found")
         end
 
-      -- Job cancel
-      (:post, Cons("jobs", Cons(job_id, Cons("cancel", Nil)))) ->
-        match Conduit.Dashboard.Actions.cancel_job(storage, job_id) do
-          Ok(_)   -> conn |> HttpServer.redirect(base_path ++ "/jobs/" ++ job_id)
-          Err(e)  -> conn |> HttpServer.text(500, "Error: " ++ e)
+      -- Job routes
+      Cons("jobs", rest) ->
+        match rest do
+          Cons(job_id, Nil) ->
+            if method == :get do
+              match Conduit.Dashboard.Queries.job_by_id(storage, job_id) do
+                None      -> conn |> HttpServer.text(404, "Job not found")
+                Some(job) ->
+                  let html = Conduit.Dashboard.Pages.Jobs.render(base_path, job)
+                  conn |> HttpServer.html(200, html)
+              end
+            else
+              conn |> HttpServer.text(405, "Method Not Allowed")
+            end
+          Cons(job_id, Cons("retry", Nil)) ->
+            if method == :post do
+              match Conduit.Dashboard.Actions.retry_job(storage, job_id) do
+                Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/jobs/" ++ job_id)
+                Err(e) -> conn |> HttpServer.text(500, "Error: " ++ e)
+              end
+            else
+              conn |> HttpServer.text(405, "Method Not Allowed")
+            end
+          Cons(job_id, Cons("cancel", Nil)) ->
+            if method == :post do
+              match Conduit.Dashboard.Actions.cancel_job(storage, job_id) do
+                Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/jobs/" ++ job_id)
+                Err(e) -> conn |> HttpServer.text(500, "Error: " ++ e)
+              end
+            else
+              conn |> HttpServer.text(405, "Method Not Allowed")
+            end
+          Cons(job_id, Cons("delete", Nil)) ->
+            if method == :post do
+              match Conduit.Dashboard.Actions.delete_job(storage, job_id) do
+                Ok(_) ->
+                  let queue = pextract_queue_from_referer(conn)
+                  conn |> HttpServer.redirect(base_path ++ "/queues/" ++ queue)
+                Err(e) -> conn |> HttpServer.text(500, "Error: " ++ e)
+              end
+            else
+              conn |> HttpServer.text(405, "Method Not Allowed")
+            end
+          _ ->
+            conn |> HttpServer.text(404, "Not found")
         end
 
-      -- Job delete
-      (:post, Cons("jobs", Cons(job_id, Cons("delete", Nil)))) ->
-        match Conduit.Dashboard.Actions.delete_job(storage, job_id) do
-          Ok(_) ->
-            let queue = pextract_queue_from_referer(conn)
-            conn |> HttpServer.redirect(base_path ++ "/queues/" ++ queue)
-          Err(e) -> conn |> HttpServer.text(500, "Error: " ++ e)
+      -- Workflow routes
+      Cons("workflows", rest) ->
+        match rest do
+          Nil ->
+            if method == :get do
+              let qs      = HttpServer.query_string(conn)
+              let status_filter = pquery_param(qs, "status")
+              let page    = pparse_page(qs)
+              let wfs     = Conduit.Dashboard.Queries.workflows(storage, status_filter, page)
+              let html    = Conduit.Dashboard.Pages.Workflows.render_list(base_path, wfs, status_filter, page)
+              conn |> HttpServer.html(200, html)
+            else
+              conn |> HttpServer.text(405, "Method Not Allowed")
+            end
+          Cons(wf_id, Nil) ->
+            if method == :get do
+              match Conduit.Dashboard.Queries.workflow_by_id(storage, wf_id) do
+                None     -> conn |> HttpServer.text(404, "Workflow not found")
+                Some(wf) ->
+                  let cps     = Conduit.Dashboard.Queries.workflow_checkpoints(storage, wf_id)
+                  let signals = Nil    -- Phase 6: signal list query deferred
+                  let html    = Conduit.Dashboard.Pages.Workflows.render_detail(base_path, wf, cps, signals)
+                  conn |> HttpServer.html(200, html)
+              end
+            else
+              conn |> HttpServer.text(405, "Method Not Allowed")
+            end
+          Cons(wf_id, Cons("cancel", Nil)) ->
+            if method == :post do
+              match Conduit.Dashboard.Actions.cancel_workflow(storage, wf_id) do
+                Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/workflows/" ++ wf_id)
+                Err(e) -> conn |> HttpServer.text(500, "Error: " ++ e)
+              end
+            else
+              conn |> HttpServer.text(405, "Method Not Allowed")
+            end
+          _ ->
+            conn |> HttpServer.text(404, "Not found")
         end
 
-      -- Workflow list
-      (:get, Cons("workflows", Nil)) ->
-        let qs      = HttpServer.query_string(conn)
-        let status_filter = pquery_param(qs, "status")
-        let page    = pquery_param(qs, "page") |> String.to_int |> unwrap_or(1)
-        let wfs     = Conduit.Dashboard.Queries.workflows(storage, status_filter, page)
-        let html    = Conduit.Dashboard.Pages.Workflows.render_list(base_path, wfs, status_filter, page)
-        conn |> HttpServer.html(200, html)
-
-      -- Workflow detail
-      (:get, Cons("workflows", Cons(wf_id, Nil))) ->
-        match Conduit.Dashboard.Queries.workflow_by_id(storage, wf_id) do
-          None    -> conn |> HttpServer.text(404, "Workflow not found")
-          Some(wf) ->
-            let cps     = Conduit.Dashboard.Queries.workflow_checkpoints(storage, wf_id)
-            let signals = Nil    -- Phase 6: signal list query deferred
-            let html    = Conduit.Dashboard.Pages.Workflows.render_detail(base_path, wf, cps, signals)
-            conn |> HttpServer.html(200, html)
+      -- Cron routes
+      Cons("crons", rest) ->
+        match rest do
+          Nil ->
+            if method == :get do
+              let crons = Conduit.Dashboard.Queries.crons(storage)
+              let html  = Conduit.Dashboard.Pages.Crons.render(base_path, crons)
+              conn |> HttpServer.html(200, html)
+            else
+              conn |> HttpServer.text(405, "Method Not Allowed")
+            end
+          Cons(cron_id, Cons("trigger", Nil)) ->
+            if method == :post do
+              match Conduit.Dashboard.Actions.trigger_cron_now(storage, cron_id) do
+                Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/crons")
+                Err(e) -> conn |> HttpServer.text(500, "Error: " ++ e)
+              end
+            else
+              conn |> HttpServer.text(405, "Method Not Allowed")
+            end
+          Cons(cron_id, Cons("pause", Nil)) ->
+            if method == :post do
+              match Conduit.Dashboard.Actions.pause_cron(storage, cron_id) do
+                Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/crons")
+                Err(e) -> conn |> HttpServer.text(500, "Error: " ++ e)
+              end
+            else
+              conn |> HttpServer.text(405, "Method Not Allowed")
+            end
+          Cons(cron_id, Cons("resume", Nil)) ->
+            if method == :post do
+              match Conduit.Dashboard.Actions.resume_cron(storage, cron_id) do
+                Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/crons")
+                Err(e) -> conn |> HttpServer.text(500, "Error: " ++ e)
+              end
+            else
+              conn |> HttpServer.text(405, "Method Not Allowed")
+            end
+          Cons(cron_id, Cons("delete", Nil)) ->
+            if method == :post do
+              match Conduit.Dashboard.Actions.delete_cron(storage, cron_id) do
+                Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/crons")
+                Err(e) -> conn |> HttpServer.text(500, "Error: " ++ e)
+              end
+            else
+              conn |> HttpServer.text(405, "Method Not Allowed")
+            end
+          _ ->
+            conn |> HttpServer.text(404, "Not found")
         end
 
-      -- Workflow cancel
-      (:post, Cons("workflows", Cons(wf_id, Cons("cancel", Nil)))) ->
-        match Conduit.Dashboard.Actions.cancel_workflow(storage, wf_id) do
-          Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/workflows/" ++ wf_id)
-          Err(e)  -> conn |> HttpServer.text(500, "Error: " ++ e)
-        end
-
-      -- Cron list
-      (:get, Cons("crons", Nil)) ->
-        let crons = Conduit.Dashboard.Queries.crons(storage)
-        let html  = Conduit.Dashboard.Pages.Crons.render(base_path, crons)
-        conn |> HttpServer.html(200, html)
-
-      -- Trigger cron now
-      (:post, Cons("crons", Cons(cron_id, Cons("trigger", Nil)))) ->
-        match Conduit.Dashboard.Actions.trigger_cron_now(storage, cron_id) do
-          Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/crons")
-          Err(e) -> conn |> HttpServer.text(500, "Error: " ++ e)
-        end
-
-      -- Pause cron
-      (:post, Cons("crons", Cons(cron_id, Cons("pause", Nil)))) ->
-        match Conduit.Dashboard.Actions.pause_cron(storage, cron_id) do
-          Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/crons")
-          Err(e)  -> conn |> HttpServer.text(500, "Error: " ++ e)
-        end
-
-      -- Resume cron
-      (:post, Cons("crons", Cons(cron_id, Cons("resume", Nil)))) ->
-        match Conduit.Dashboard.Actions.resume_cron(storage, cron_id) do
-          Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/crons")
-          Err(e)  -> conn |> HttpServer.text(500, "Error: " ++ e)
-        end
-
-      -- Delete cron
-      (:post, Cons("crons", Cons(cron_id, Cons("delete", Nil)))) ->
-        match Conduit.Dashboard.Actions.delete_cron(storage, cron_id) do
-          Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/crons")
-          Err(e)  -> conn |> HttpServer.text(500, "Error: " ++ e)
-        end
-
-      -- Dead letter list
-      (:get, Cons("dead-letters", Nil)) ->
-        let qs   = HttpServer.query_string(conn)
-        let page = pquery_param(qs, "page") |> String.to_int |> unwrap_or(1)
-        let dls  = Conduit.Dashboard.Queries.dead_letters(storage, page)
-        let html = Conduit.Dashboard.Pages.DeadLetters.render(base_path, dls, page)
-        conn |> HttpServer.html(200, html)
-
-      -- Retry all dead letters
-      (:post, Cons("dead-letters", Cons("retry-all", Nil))) ->
-        let _ = Conduit.Dashboard.Actions.retry_all_dead_letters(storage)
-        conn |> HttpServer.redirect(base_path ++ "/dead-letters")
-
-      -- Retry one dead letter
-      (:post, Cons("dead-letters", Cons(dl_id, Cons("retry", Nil)))) ->
-        match Conduit.Dashboard.Actions.retry_dead_letter(storage, dl_id) do
-          Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/dead-letters")
-          Err(e) -> conn |> HttpServer.text(500, "Error: " ++ e)
-        end
-
-      -- Delete one dead letter
-      (:post, Cons("dead-letters", Cons(dl_id, Cons("delete", Nil)))) ->
-        match Conduit.Dashboard.Actions.delete_dead_letter(storage, dl_id) do
-          Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/dead-letters")
-          Err(e)  -> conn |> HttpServer.text(500, "Error: " ++ e)
+      -- Dead letter routes
+      Cons("dead-letters", rest) ->
+        match rest do
+          Nil ->
+            if method == :get do
+              let qs   = HttpServer.query_string(conn)
+              let page = pparse_page(qs)
+              let dls  = Conduit.Dashboard.Queries.dead_letters(storage, page)
+              let html = Conduit.Dashboard.Pages.DeadLetters.render(base_path, dls, page)
+              conn |> HttpServer.html(200, html)
+            else
+              conn |> HttpServer.text(405, "Method Not Allowed")
+            end
+          Cons("retry-all", Nil) ->
+            if method == :post do
+              let _ = Conduit.Dashboard.Actions.retry_all_dead_letters(storage)
+              conn |> HttpServer.redirect(base_path ++ "/dead-letters")
+            else
+              conn |> HttpServer.text(405, "Method Not Allowed")
+            end
+          Cons(dl_id, Cons("retry", Nil)) ->
+            if method == :post do
+              match Conduit.Dashboard.Actions.retry_dead_letter(storage, dl_id) do
+                Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/dead-letters")
+                Err(e) -> conn |> HttpServer.text(500, "Error: " ++ e)
+              end
+            else
+              conn |> HttpServer.text(405, "Method Not Allowed")
+            end
+          Cons(dl_id, Cons("delete", Nil)) ->
+            if method == :post do
+              match Conduit.Dashboard.Actions.delete_dead_letter(storage, dl_id) do
+                Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/dead-letters")
+                Err(e) -> conn |> HttpServer.text(500, "Error: " ++ e)
+              end
+            else
+              conn |> HttpServer.text(405, "Method Not Allowed")
+            end
+          _ ->
+            conn |> HttpServer.text(404, "Not found")
         end
 
       -- Nodes
-      (:get, Cons("nodes", Nil)) ->
-        let nodes  = Conduit.Dashboard.Queries.nodes(storage)
-        let leader = Conduit.cluster_leader()
-        let html   = Conduit.Dashboard.Pages.Nodes.render(base_path, nodes, leader)
-        conn |> HttpServer.html(200, html)
+      Cons("nodes", Nil) ->
+        if method == :get do
+          let nodes  = Conduit.Dashboard.Queries.nodes(storage)
+          let leader = Conduit.cluster_leader()
+          let html   = Conduit.Dashboard.Pages.Nodes.render(base_path, nodes, leader)
+          conn |> HttpServer.html(200, html)
+        else
+          conn |> HttpServer.text(405, "Method Not Allowed")
+        end
 
       -- JSON summary API endpoint (for polling-based real-time updates)
-      (:get, Cons("api", Cons("summary", Nil))) ->
-        let summary = Conduit.Dashboard.Queries.queue_summary(storage)
-        let json    = psummary_to_json(summary)
-        conn
-        |> HttpServer.put_resp_header("content-type", "application/json")
-        |> HttpServer.text(200, json)
+      Cons("api", Cons("summary", Nil)) ->
+        if method == :get do
+          let summary = Conduit.Dashboard.Queries.queue_summary(storage)
+          let json    = psummary_to_json(summary)
+          conn
+          |> HttpServer.put_resp_header("content-type", "application/json")
+          |> HttpServer.text(200, json)
+        else
+          conn |> HttpServer.text(405, "Method Not Allowed")
+        end
 
       -- 404 fallback
       _ ->
         conn |> HttpServer.text(404, "Not found")
+    end
+  end
+
+  -- Parse the ?page= query param, defaulting to 1. Returns a plain Int
+  -- via explicit match to avoid polymorphic boxing of the result.
+  pfn pparse_page(qs : String) : Int do
+    match String.to_int(pquery_param(qs, "page")) do
+      Some(n) -> n
+      None    -> 1
     end
   end
 

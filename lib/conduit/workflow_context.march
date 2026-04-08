@@ -58,9 +58,9 @@ mod Conduit.WorkflowContext do
             Ok(v)
           Ok(None) ->
             -- 3. Execute
-            let started = DateTime.to_timestamp(DateTime.now())
+            let started = DateTime.now()
             let value   = f()
-            let dur_ms  = (DateTime.to_timestamp(DateTime.now()) - started) * 1000
+            let dur_ms  = (DateTime.now() - started) * 1000
             -- 4. Persist
             match Conduit.Storage.checkpoint_set(storage, ctx.workflow_id, full_name, value, dur_ms) do
               Err(e) -> Err(Conduit.WorkflowError.StorageError(e))
@@ -73,7 +73,7 @@ mod Conduit.WorkflowContext do
   end
 
   -- Deterministic replay checkpoint: consume from event store or execute + append.
-  pfn preplay_checkpoint(storage, ctx : Conduit.WorkflowContext, replay_key : String, full_name : String, f : () -> String) : Result(String, Conduit.WorkflowError) do
+  pfn preplay_checkpoint(storage, ctx : Conduit.WorkflowContext, replay_key, full_name : String, f : () -> String) : Result(String, Conduit.WorkflowError) do
     let cursor      = Vault.get(replay_key, "cursor")      |> unwrap_or(0)
     let event_count = Vault.get(replay_key, "event_count") |> unwrap_or(0)
     if cursor < event_count do
@@ -86,9 +86,9 @@ mod Conduit.WorkflowContext do
       Ok(value)
     else
       -- First execution territory: execute fn, append event, advance cursor.
-      let started = DateTime.to_timestamp(DateTime.now())
+      let started = DateTime.now()
       let value   = f()
-      let dur_ms  = (DateTime.to_timestamp(DateTime.now()) - started) * 1000
+      let dur_ms  = (DateTime.now() - started) * 1000
       let next_seq = Vault.get(replay_key, "next_seq") |> unwrap_or(cursor)
       let event_payload = Conduit.EventStore.checkpoint_payload(full_name, value, dur_ms)
       match Conduit.EventStore.append(storage, ctx.workflow_id, next_seq, "checkpoint", event_payload) do
@@ -146,12 +146,12 @@ mod Conduit.WorkflowContext do
   Returns Ok(payload_json) or Err(WorkflowError.TimedOut).
   """
   fn wait_for_signal(storage, ctx : Conduit.WorkflowContext, signal_type : String, timeout : Option(Duration)) : Result(String, Conduit.WorkflowError) do
-    let deadline = Option.map(timeout, fn dur -> DateTime.to_timestamp(DateTime.add(DateTime.now(), dur)))
+    let deadline = Option.map(timeout, fn dur -> DateTime.now() + int_div(Duration.to_milliseconds(dur), 1000))
     pwait_loop(storage, ctx.workflow_id, signal_type, deadline)
   end
 
   pfn pwait_loop(storage, workflow_id : String, signal_type : String, deadline : Option(Int)) : Result(String, Conduit.WorkflowError) do
-    let now_ts = DateTime.to_timestamp(DateTime.now())
+    let now_ts = DateTime.now()
     let timed_out = match deadline do
       None    -> false
       Some(d) -> now_ts >= d
@@ -191,15 +191,15 @@ mod Conduit.WorkflowContext do
   -- Private helpers
   -- ─────────────────────────────────────────────────────────────
 
-  pfn pvault_key(workflow_id : String) : String do
-    "conduit_wf_" ++ workflow_id
+  pfn pvault_key(workflow_id : String) do
+    Vault.new("conduit_wf_" ++ workflow_id)
   end
 
-  pfn pvault_get(vault_key : String, name : String) : Option(String) do
+  pfn pvault_get(vault_key, name : String) : Option(String) do
     Vault.get(vault_key, name)
   end
 
-  pfn pvault_set(vault_key : String, name : String, value : String) : () do
+  pfn pvault_set(vault_key, name : String, value : String) : () do
     Vault.set(vault_key, name, value)
   end
 

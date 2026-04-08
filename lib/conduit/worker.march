@@ -4,10 +4,11 @@ mod Conduit.Worker do
   Returns all task handles.
   """
   fn start_workers(storage, queue : String, count : Int, poll_interval_ms : Int) : List(Task) do
+    Logger.debug("conduit: start_workers queue=" ++ queue ++ " count=" ++ int_to_string(count))
     let workers = List.range(0, count - 1)
       |> List.map(fn _ ->
-        task_spawn(fn () -> worker_loop(storage, queue, poll_interval_ms)))
-    let rescuer = task_spawn(fn () ->
+        task_spawn(fn _ -> worker_loop(storage, queue, poll_interval_ms)))
+    let rescuer = task_spawn(fn _ ->
       rescue_loop(storage, poll_interval_ms * 10))
     List.append(workers, Cons(rescuer, Nil))
   end
@@ -28,28 +29,35 @@ mod Conduit.Worker do
   end
 
   pfn execute(storage, job : Conduit.JobRow) : () do
+    Logger.debug("conduit: execute job.id=" ++ job.id ++ " job_type=" ++ job.job_type)
     let worker_id = uuid_v4()
+    Logger.debug("conduit: execute: calling mark_running job.id=" ++ job.id)
     match Conduit.Storage.mark_running(storage, job.id, worker_id) do
       Err(e) ->
         Logger.warn("conduit: could not claim job " ++ job.id ++ ": " ++ e)
       Ok(_) ->
+        Logger.debug("conduit: execute: mark_running ok, attempt=" ++ int_to_string(job.attempt))
         -- next_attempt is the attempt number that is now executing (post-increment).
         let next_attempt = job.attempt + 1
         let config = Conduit.Queue.lookup_config(job.job_type)
           |> Option.unwrap_or(Conduit.JobConfig.default())
+        Logger.debug("conduit: execute: got config, timeout=" ++ int_to_string(config.timeout))
 
         -- Heartbeat interval: one third of the job timeout, minimum 5s.
         let heartbeat_interval_ms = int_div(config.timeout, 3)
           |> pmax_int(5000)
+        Logger.debug("conduit: execute: heartbeat_interval=" ++ int_to_string(heartbeat_interval_ms))
 
-        let hb_task = task_spawn(fn () ->
+        let hb_task = task_spawn(fn _ ->
           heartbeat_loop(storage, job.id, heartbeat_interval_ms))
+        Logger.debug("conduit: execute: heartbeat task spawned")
 
         -- Rate limit check: if configured, try to acquire a token.
         let rate_ok = match config.rate_limit do
           None -> Ok(true)
           Some(rl) -> Conduit.RateLimiter.acquire(storage, job.job_type, rl, job.payload)
         end
+        Logger.debug("conduit: execute: rate check done")
 
         match rate_ok do
           Err(e) ->
@@ -58,19 +66,24 @@ mod Conduit.Worker do
             let result = Conduit.Queue.dispatch(job.job_type, job.payload)
             kill(task_await_unwrap(hb_task))
             handle_result(storage, job, next_attempt, config, result)
-          Ok(false) ->
-            -- Rate-limited: snooze the job.
-            let snooze_dur = match config.rate_limit do
-              None     -> 1000
-              Some(rl) -> Conduit.RateLimiter.snooze_duration(rl.max_per_second)
+          Ok(b) ->
+            if b do
+              -- Rate check passed: dispatch the job.
+              Logger.debug("conduit: execute: dispatching job_type=" ++ job.job_type)
+              let result = Conduit.Queue.dispatch(job.job_type, job.payload)
+              Logger.debug("conduit: execute: dispatch complete")
+              -- Cancel the heartbeat task now that the job has finished.
+              kill(task_await_unwrap(hb_task))
+              handle_result(storage, job, next_attempt, config, result)
+            else
+              -- Rate-limited: snooze the job.
+              let snooze_dur = match config.rate_limit do
+                None     -> 1000
+                Some(rl) -> Conduit.RateLimiter.snooze_duration(rl.max_per_second)
+              end
+              kill(task_await_unwrap(hb_task))
+              handle_result(storage, job, next_attempt, config, Err(ConduitError.Snooze(snooze_dur)))
             end
-            kill(task_await_unwrap(hb_task))
-            handle_result(storage, job, next_attempt, config, Err(ConduitError.Snooze(snooze_dur)))
-          Ok(true) ->
-            let result = Conduit.Queue.dispatch(job.job_type, job.payload)
-            -- Cancel the heartbeat task now that the job has finished.
-            kill(task_await_unwrap(hb_task))
-            handle_result(storage, job, next_attempt, config, result)
         end
     end
   end
@@ -97,7 +110,7 @@ mod Conduit.Worker do
         phandle_discard(storage, job, config, msg)
 
       Err(ConduitError.Snooze(dur)) ->
-        let wake_at = DateTime.add(DateTime.now(), dur)
+        let wake_at = DateTime.add_ms(DateTime.from_timestamp(DateTime.now()), dur)
         match Conduit.Storage.mark_snoozed(storage, job.id, wake_at) do
           Ok(_)  -> ()
           Err(e)  -> Logger.error("conduit: mark_snoozed error for " ++ job.id ++ ": " ++ e)
@@ -114,9 +127,9 @@ mod Conduit.Worker do
     else
       -- Compute run_at: base backoff delay + jitter.
       let base_delay  = Conduit.Backoff.delay(config.backoff, attempt)
-      let jitter_ms   = Random.int(0, 1000)
-      let run_at      = DateTime.add(
-                          DateTime.add(DateTime.now(), base_delay),
+      let (jitter_ms, _) = Random.range(Random.seed(DateTime.now()), 0, 1000)
+      let run_at      = DateTime.add_ms(
+                          DateTime.add_ms(DateTime.from_timestamp(DateTime.now()), base_delay),
                           jitter_ms
                         )
       Logger.debug("conduit: scheduling retry for " ++ job.id ++ " at attempt " ++ int_to_string(attempt + 1))
@@ -174,9 +187,8 @@ mod Conduit.Worker do
     let _ = psleep_ms(interval_ms)
     let _ = match Conduit.Storage.rescue_stale(storage, 60) do
       Ok(ids) ->
-        if not (is_nil(ids)) do
-          Logger.info("conduit: rescued " ++ int_to_string(length(ids)) ++ " stale job(s)")
-        else () end
+        if is_nil(ids) do ()
+        else Logger.info("conduit: rescued " ++ int_to_string(length(ids)) ++ " stale job(s)") end
       Err(e) ->
         Logger.error("conduit: rescue_stale error: " ++ e)
     end

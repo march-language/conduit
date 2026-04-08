@@ -71,14 +71,18 @@ mod Conduit.Dashboard.Queries do
 
   doc "Load workflows list with optional status filter (1-based page, up to 50)."
   fn workflows(storage, status_filter : String, page : Int) : List(Conduit.WorkflowRow) do
-    -- Workflows are loaded via a simple approach: we don't have a paginated
-    -- workflow list query yet; use signal_peek as a proxy for existence only.
-    -- For Phase 6, return empty list with a warning — proper pagination added
-    -- via Phase 6 storage method once wired.
-    let _ = storage
-    let _ = status_filter
     let _ = page
-    Nil
+    let all = match Conduit.Storage.workflow_list_all(storage) do
+      Ok(rows) -> rows
+      Err(e)   ->
+        Logger.warn("conduit_dashboard: workflow_list failed: " ++ e)
+        Nil
+    end
+    if status_filter == "" do
+      all
+    else
+      List.filter(all, fn wf -> wf.status == status_filter)
+    end
   end
 
   doc "Load workflow detail by id."

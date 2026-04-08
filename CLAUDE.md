@@ -35,6 +35,7 @@ All source files use the `.march` extension. **Always read `.claude/skills/march
 - `if cond do ... end` — no `then` keyword
 - Lambdas: `fn x -> expr` only (no `do...end` block form)
 - Zero-arg lambdas: `fn () -> expr`
+- `task_spawn(fn _ -> f())` — task_spawn calls its argument with 1 arg; use `fn _ ->` not `fn () ->`
 - Sum types: `type Foo = A | B(Int)` (no leading `|`)
 - `interface Name(a) do ... end` / `impl Name(Type) do ... end`
 - No semicolons
@@ -43,24 +44,62 @@ All source files use the `.march` extension. **Always read `.claude/skills/march
 
 - `depot` — March's standard data/storage library (`../depot`)
 
-## Architecture (Phase 1 — implemented)
+## Architecture (fully implemented)
 
 | File | Purpose |
 |------|---------|
-| `lib/conduit.march` | Public API: `start`, `enqueue`, `enqueue_in`, `register` |
+| `lib/conduit.march` | Public API: `start`, `enqueue`, `enqueue_in`, `register`, `start_workflow`, `cancel_workflow`, `cluster_leader` |
 | `lib/conduit/error.march` | `ConduitError` type |
 | `lib/conduit/backoff.march` | `Conduit.Backoff` type + `delay/2` |
 | `lib/conduit/config.march` | `Conduit.JobConfig`, `Conduit.Config`, defaults |
 | `lib/conduit/schema.march` | `Conduit.Schema` — optional arg validation |
 | `lib/conduit/job.march` | `Conduit.Job` interface |
-| `lib/conduit/storage.march` | `Conduit.Storage` interface + Postgres impl |
+| `lib/conduit/storage.march` | `Conduit.Storage` interface (Postgres + VaultStore impls) |
 | `lib/conduit/queue.march` | Queue ops + performer registry |
-| `lib/conduit/worker.march` | Task-based worker pool |
+| `lib/conduit/worker.march` | Task-based worker pool with heartbeat + rescue |
+| `lib/conduit/node.march` | Multi-node cluster registration + leader election |
+| `lib/conduit/cron.march` | `Conduit.Cron` — cron job definition |
+| `lib/conduit/cron_scheduler.march` | Background cron tick loop |
+| `lib/conduit/workflow.march` | `Conduit.WorkflowRow`, `WorkflowConfig` types |
+| `lib/conduit/workflow_context.march` | Deterministic checkpoint execution + replay |
+| `lib/conduit/workflow_registry.march` | In-process workflow handler registry |
+| `lib/conduit/workflow_runner.march` | Workflow execution via job queue |
+| `lib/conduit/event_store.march` | Append-only event log for workflow replay |
+| `lib/conduit/dashboard/` | Web dashboard: overview, queues, jobs, workflows, crons, dead letters, nodes |
+| `lib/conduit/api.march` | Top-level `Conduit.API.start` — boots workers + node + cron scheduler |
 
-## Implementation Phases
+## Critical runtime notes
 
-See `specs/conduit.md` for the full phased plan. Current status:
+### `task_spawn` arity
+`task_spawn` always calls its callback with **1 argument**. Always use a 1-arg lambda:
+```march
+task_spawn(fn _ -> my_loop(arg1, arg2))   -- correct
+task_spawn(fn () -> my_loop(arg1, arg2))  -- WRONG — arity mismatch at runtime
+```
+
+### VaultStore: flat primitive keys only
+When implementing `Conduit.Storage` with Vault, store each workflow/checkpoint/event field as a **separate primitive (String/Int) vault key** — never store a struct with nested DateTime fields in Vault. DateTime fields in heap-allocated structs cause GC/RC issues when stored as opaque pointers.
+
+Pattern used in `test_conduit_app`:
+```march
+-- Store flat keys:
+Vault.set(tbl, "wf:" ++ id ++ ":type",    row.workflow_type)
+Vault.set(tbl, "wf:" ++ id ++ ":status",  row.status)
+Vault.set(tbl, "wf:" ++ id ++ ":started", int_to_string(DateTime.to_timestamp(row.started_at)))
+-- ...etc
+
+-- Load flat keys:
+let wtype = Vault.get(tbl, "wf:" ++ id ++ ":type") |> unwrap_or("")
+```
+
+### Vault key length collision (march runtime bug — now fixed)
+The March runtime's `vault_key_cstr` previously used `march_value_to_string` on String keys, which returned `"#<tag:N>"` (where N = string length). This caused all vault keys of the **same length** to map to the same bucket. Fixed in `march_extras.c`. Always use the latest March runtime build.
+
+## Implementation Status
 
 - [x] **Phase 1** — Simple job queue: enqueue, execute, complete/fail
-- [ ] **Phase 2** — Retries, backoff, dead-letter queues
-- [ ] **Phase 3+** — Workflows, cron, middleware, telemetry, dashboard
+- [x] **Phase 2** — Retries, backoff, dead-letter queues
+- [x] **Phase 3** — Workflows, cron, multi-node cluster
+- [x] **Phase 4** — Web dashboard (overview, queues, jobs, workflows, crons, dead letters, nodes)
+- [ ] **Phase 5** — Postgres storage backend (storage interface is defined; VaultStore in-memory impl complete)
+- [ ] **Phase 6** — Telemetry, middleware hooks, rate limiting polish

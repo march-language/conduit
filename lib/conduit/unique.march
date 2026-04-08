@@ -43,12 +43,12 @@ mod Conduit.Unique do
   end
 
   pfn pextract_json_field(payload : String, field : String) : String do
-    match JSON.parse(payload) do
+    match Json.parse(payload) do
       Err(_) -> ""
       Ok(json) ->
-        match JSON.get(json, field) do
+        match Json.get(json, field) do
           None    -> ""
-          Some(v) -> JSON.to_string(v)
+          Some(v) -> Json.to_string(v)
         end
     end
   end

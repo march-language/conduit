@@ -32,6 +32,8 @@ mod Conduit do
 
     fn workflow_insert        : s -> Conduit.WorkflowRow -> Result(String, String)
     fn workflow_load          : s -> String -> Result(Option(Conduit.WorkflowRow), String)
+    fn workflow_list_all      : s -> Result(List(Conduit.WorkflowRow), String)
+    fn workflow_status_get    : s -> String -> Result(Option(String), String)
     fn workflow_update_status : s -> String -> String -> Option(String) -> Option(String) -> Result((), String)
     fn workflow_cancel        : s -> String -> String -> Result((), String)
     fn checkpoint_get         : s -> String -> String -> Result(Option(String), String)

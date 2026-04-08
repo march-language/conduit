@@ -1,22 +1,17 @@
 mod Conduit.WorkflowRegistry do
-  ptype Entry = {
-    config : Conduit.WorkflowConfig,
-    runner : String -> Conduit.WorkflowContext -> Result(String, Conduit.WorkflowError)
-  }
 
   fn register(
     workflow_type : String,
     runner        : String -> Conduit.WorkflowContext -> Result(String, Conduit.WorkflowError),
     config        : Conduit.WorkflowConfig
   ) : () do
-    Vault.set(registry_key(), workflow_type, { config = config, runner = runner })
+    let tbl = registry_key()
+    Vault.set(tbl, "fn:" ++ workflow_type, runner)
+    Vault.set(tbl, "cfg:" ++ workflow_type, config)
   end
 
-  fn lookup(workflow_type : String) : Option(Entry) do
-    match Vault.get(registry_key(), workflow_type) do
-      None    -> None
-      Some(e) -> Some({ config = e.config, runner = e.runner })
-    end
+  fn lookup_config(workflow_type : String) : Option(Conduit.WorkflowConfig) do
+    Vault.get(registry_key(), "cfg:" ++ workflow_type)
   end
 
   fn run(
@@ -24,13 +19,15 @@ mod Conduit.WorkflowRegistry do
     input_json    : String,
     ctx           : Conduit.WorkflowContext
   ) : Result(String, Conduit.WorkflowError) do
-    match Vault.get(registry_key(), workflow_type) do
+    match Vault.get(registry_key(), "fn:" ++ workflow_type) do
       None    -> Err(Conduit.WorkflowError.Failed("No workflow registered for type: " ++ workflow_type))
-      Some(e) -> e.runner(input_json)(ctx)
+      Some(runner) ->
+        let apply_ctx = runner(input_json)
+        apply_ctx(ctx)
     end
   end
 
-  pfn registry_key() : String do
-    "conduit_workflow_registry"
+  pfn registry_key() do
+    Vault.new("conduit_workflow_registry")
   end
 end

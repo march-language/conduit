@@ -232,4 +232,28 @@ mod Conduit do
     None
     | Token(String)
     | Fn(String -> Bool)
+
+  -- ── Top-level convenience forwarders ────────────────────────────────────
+  -- These delegate to Conduit.API so callers can write e.g. Conduit.pause_cron(...)
+  -- instead of the fully-qualified Conduit.API.pause_cron(...).
+
+  fn pause_cron(storage, cron_id : String) : Result((), String) do
+    Conduit.API.pause_cron(storage, cron_id)
+  end
+
+  fn resume_cron(storage, cron_id : String) : Result((), String) do
+    Conduit.API.resume_cron(storage, cron_id)
+  end
+
+  fn cancel_cron(storage, cron_id : String) : Result((), String) do
+    Conduit.API.cancel_cron(storage, cron_id)
+  end
+
+  fn cancel_workflow(workflow_id : String, reason : String, storage) : Result((), String) do
+    Conduit.API.cancel_workflow(workflow_id, reason, storage)
+  end
+
+  fn cluster_leader() : Option(String) do
+    Conduit.API.cluster_leader()
+  end
 end

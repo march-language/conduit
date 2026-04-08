@@ -42,7 +42,7 @@ mod Conduit.CronParser do
   -- ─────────────────────────────────────────────────────────────
 
   pfn pparse_expr(s : String) : Result(Expr, String) do
-    let parts = String.split(s, " ") |> List.filter(fn p -> not (String.is_empty(p)))
+    let parts = String.split(s, " ") |> List.filter(fn p -> if String.is_empty(p) do false else true end)
     match parts do
       Cons(min, Cons(hr, Cons(dom, Cons(mo, Cons(dow, Nil))))) ->
         match (pparse_field(min, 0, 59),
@@ -148,7 +148,7 @@ mod Conduit.CronParser do
   pfn pparse_list(items : List(String), lo : Int, hi : Int, acc : List(Int)) : Result(Field, String) do
     match items do
       Nil ->
-        Ok(Values(List.sort_by(acc, fn a -> fn b -> compare(a, b))))
+        Ok(Values(List.sort_by(acc, fn a -> fn b -> a < b)))
       Cons(item, rest) ->
         match pparse_field(item, lo, hi) do
           Err(e) -> Err(e)

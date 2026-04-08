@@ -1,7 +1,7 @@
 mod Conduit.CronScheduler do
   doc "Start the cron scheduler as a background task."
   fn start(storage, tick_interval_ms : Int) : Task do
-    task_spawn(fn () -> scheduler_loop(storage, tick_interval_ms))
+    task_spawn(fn _ -> scheduler_loop(storage, tick_interval_ms))
   end
 
   pfn scheduler_loop(storage, tick_interval_ms : Int) : () do
@@ -45,7 +45,7 @@ mod Conduit.CronScheduler do
           None     -> true
           Some(jid) ->
             match Conduit.Storage.cron_job_active(storage, jid) do
-              Ok(active) -> not active
+              Ok(active) -> if active do false else true end
               Err(_)     -> false
             end
         end

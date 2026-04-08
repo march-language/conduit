@@ -20,7 +20,7 @@ mod Conduit.API do
     let storage = { repo: MyApp.Repo }
     Conduit.start(Conduit.Config.default(), storage)
   """
-  fn start(config : Config, storage) : List(Task) do
+  fn start(config, storage) : List(Task) do
     -- Register the built-in workflow runner performer (closes over storage).
     Conduit.Queue.register_performer(
       Conduit.WorkflowRunner.job_type(),
@@ -221,10 +221,10 @@ mod Conduit.API do
   """
   fn start_workflow(workflow_type : String, input_json : String, storage) : Result(WorkflowHandle, String) do
     let id      = uuid_v4()
-    let now     = DateTime.now()
-    let config  = match Conduit.WorkflowRegistry.lookup(workflow_type) do
+    let now     = DateTime.from_timestamp(DateTime.now())
+    let config  = match Conduit.WorkflowRegistry.lookup_config(workflow_type) do
       None    -> Conduit.WorkflowConfig.default()
-      Some(e) -> e.config
+      Some(c) -> c
     end
     let timeout_at = Option.map(config.timeout, fn dur -> DateTime.add(now, dur))
     let row = {
@@ -260,11 +260,7 @@ mod Conduit.API do
   or None if the workflow does not exist.
   """
   fn workflow_status(workflow_id : String, storage) : Result(Option(String), String) do
-    match Conduit.Storage.workflow_load(storage, workflow_id) do
-      Err(e)          -> Err(e)
-      Ok(None)        -> Ok(None)
-      Ok(Some(row))   -> Ok(Some(row.status))
-    end
+    Conduit.Storage.workflow_status_get(storage, workflow_id)
   end
 
   doc """

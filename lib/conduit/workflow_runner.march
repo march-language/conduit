@@ -10,7 +10,9 @@ mod Conduit.WorkflowRunner do
   Delegates to prun after loading and validating the workflow row.
   """
   fn execute(storage, payload : String) : Result((), ConduitError) do
+    Logger.debug("workflow_runner: execute payload=" ++ payload)
     let workflow_id = pparse_workflow_id(payload)
+    Logger.debug("workflow_runner: execute workflow_id=" ++ workflow_id)
     if String.is_empty(workflow_id) do
       Err(ConduitError.Discard("workflow_runner: missing workflow_id in payload: " ++ payload))
     else
@@ -18,11 +20,12 @@ mod Conduit.WorkflowRunner do
         Err(e)      -> Err(ConduitError.Retry("workflow_runner: storage error: " ++ e))
         Ok(None)    -> Err(ConduitError.Discard("workflow_runner: workflow not found: " ++ workflow_id))
         Ok(Some(row)) ->
+          Logger.debug("workflow_runner: loaded row status=" ++ row.status)
           -- Already in a terminal state — nothing to do.
           if pis_terminal(row.status) do
             Ok(())
           else
-            prun(storage, row)
+            prun(storage, workflow_id, row)
           end
       end
     end
@@ -55,47 +58,53 @@ mod Conduit.WorkflowRunner do
   -- Private: execution
   -- ─────────────────────────────────────────────────────────────
 
-  pfn prun(storage, row : Conduit.WorkflowRow) : Result((), ConduitError) do
+  pfn prun(storage, workflow_id : String, row : Conduit.WorkflowRow) : Result((), ConduitError) do
+    Logger.debug("workflow_runner: prun workflow_id=" ++ workflow_id ++ " wf_type=" ++ row.workflow_type)
     -- Check timeout.
     let timed_out = match row.timeout_at do
       None    -> false
-      Some(t) -> DateTime.to_timestamp(DateTime.now()) >= DateTime.to_timestamp(t)
+      Some(t) -> DateTime.now() >= DateTime.to_timestamp(t)
     end
     if timed_out do
-      let _ = pmark_status(storage, row.id, "timed_out", None, Some("Workflow exceeded timeout"))
+      let _ = pmark_status(storage, workflow_id, "timed_out", None, Some("Workflow exceeded timeout"))
       Ok(())
     else
       -- Build context and warm checkpoint cache.
-      let ctx = Conduit.WorkflowContext.new(row.id)
+      Logger.debug("workflow_runner: prun: building context")
+      let ctx = Conduit.WorkflowContext.new(workflow_id)
+      Logger.debug("workflow_runner: prun: warming cache")
       match Conduit.WorkflowContext.warm_cache(storage, ctx) do
         Err(e) -> Err(ConduitError.Retry("workflow_runner: cache warm failed: " ++ e))
         Ok(_) ->
           -- If DeterministicReplay mode, warm the event replay cache.
-          let wf_config = match Conduit.WorkflowRegistry.lookup(row.workflow_type) do
+          Logger.debug("workflow_runner: prun: looking up wf_config")
+          let wf_config = match Conduit.WorkflowRegistry.lookup_config(row.workflow_type) do
             None    -> Conduit.WorkflowConfig.default()
-            Some(e) -> e.config
+            Some(c) -> c
           end
+          Logger.debug("workflow_runner: prun: warming replay")
           let replay_warm_result = match wf_config.execution_mode do
             DeterministicReplay ->
-              Conduit.EventStore.warm_replay(storage, row.id)
+              Conduit.EventStore.warm_replay(storage, workflow_id)
             _ -> Ok(())
           end
           match replay_warm_result do
             Err(e) -> Err(ConduitError.Retry("workflow_runner: event warm failed: " ++ e))
             Ok(_) ->
+              Logger.debug("workflow_runner: prun: calling WorkflowRegistry.run")
               -- Look up and run the registered workflow.
               match Conduit.WorkflowRegistry.run(row.workflow_type, row.input, ctx) do
                 Ok(output_json) ->
-                  let _ = pmark_status(storage, row.id, "completed", Some(output_json), None)
+                  let _ = pmark_status(storage, workflow_id, "completed", Some(output_json), None)
                   Ok(())
                 Err(Failed(msg)) ->
-                  let _ = pmark_status(storage, row.id, "failed", None, Some(msg))
+                  let _ = pmark_status(storage, workflow_id, "failed", None, Some(msg))
                   Err(ConduitError.Discard("workflow failed: " ++ msg))
                 Err(Cancelled(msg)) ->
-                  let _ = pmark_status(storage, row.id, "cancelled", None, Some(msg))
+                  let _ = pmark_status(storage, workflow_id, "cancelled", None, Some(msg))
                   Ok(())
                 Err(TimedOut) ->
-                  let _ = pmark_status(storage, row.id, "timed_out", None, Some("Timed out during execution"))
+                  let _ = pmark_status(storage, workflow_id, "timed_out", None, Some("Timed out during execution"))
                   Ok(())
                 Err(StorageError(msg)) ->
                   -- Transient — let the job retry via normal backoff.

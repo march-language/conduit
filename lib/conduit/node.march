@@ -7,17 +7,18 @@ mod Conduit.Node do
       Ok(_)  -> ()
       Err(e)  -> Logger.warn("conduit_node: register failed: " ++ e)
     end
-    Vault.set("conduit_cluster", "node_id",   config.node_id)
-    Vault.set("conduit_cluster", "is_leader",  false)
+    let cluster_tbl = Vault.new("conduit_cluster")
+    Vault.set(cluster_tbl, "node_id",   config.node_id)
+    Vault.set(cluster_tbl, "is_leader",  false)
 
     let heartbeat_task =
-      task_spawn(fn () -> pheartbeat_loop(storage, config.node_id, config.heartbeat_interval_ms))
+      task_spawn(fn _ -> pheartbeat_loop(storage, config.node_id, config.heartbeat_interval_ms))
 
     let stale_task =
-      task_spawn(fn () -> pstale_loop(storage, config.stale_node_threshold_ms, config.poll_interval_ms * 10))
+      task_spawn(fn _ -> pstale_loop(storage, config.stale_node_threshold_ms, config.poll_interval_ms * 10))
 
     let leader_task =
-      task_spawn(fn () -> pleader_loop(storage, config.node_id, config.heartbeat_interval_ms))
+      task_spawn(fn _ -> pleader_loop(storage, config.node_id, config.heartbeat_interval_ms))
 
     Cons(heartbeat_task, Cons(stale_task, Cons(leader_task, Nil)))
   end
@@ -29,16 +30,16 @@ mod Conduit.Node do
     end
     if is_leader() do
       let _ = Conduit.Storage.node_release_leader_lock(storage, leader_lock_id)
-      Vault.set("conduit_cluster", "is_leader", false)
+      Vault.set(Vault.new("conduit_cluster"), "is_leader", false)
     else () end
   end
 
   fn is_leader() : Bool do
-    Vault.get("conduit_cluster", "is_leader") |> unwrap_or(false)
+    Vault.get(Vault.new("conduit_cluster"), "is_leader") |> unwrap_or(false)
   end
 
   fn leader_node_id() : Option(String) do
-    Vault.get("conduit_cluster", "leader_node_id")
+    Vault.get(Vault.new("conduit_cluster"), "leader_node_id")
   end
 
   pfn pheartbeat_loop(storage, node_id : String, interval_ms : Int) : () do
@@ -54,9 +55,8 @@ mod Conduit.Node do
     let threshold_s = int_div(threshold_ms, 1000)
     match Conduit.Storage.node_reclaim_jobs(storage, threshold_s) do
       Ok(ids) ->
-        if not (List.is_empty(ids)) do
-          Logger.info("conduit_node: reclaimed " ++ int_to_string(List.length(ids)) ++ " stale job(s)")
-        else () end
+        if List.is_empty(ids) do ()
+        else Logger.info("conduit_node: reclaimed " ++ int_to_string(List.length(ids)) ++ " stale job(s)") end
       Err(e) -> Logger.warn("conduit_node: stale reclaim error: " ++ e)
     end
     match Conduit.Storage.node_cleanup_stale(storage, threshold_s) do
@@ -73,10 +73,11 @@ mod Conduit.Node do
   pfn pleader_loop(storage, node_id : String, interval_ms : Int) : () do
     match Conduit.Storage.node_try_leader_lock(storage, leader_lock_id) do
       Ok(true) ->
-        Vault.set("conduit_cluster", "is_leader",      true)
-        Vault.set("conduit_cluster", "leader_node_id", node_id)
+        let ct = Vault.new("conduit_cluster")
+        Vault.set(ct, "is_leader",      true)
+        Vault.set(ct, "leader_node_id", node_id)
       Ok(false) ->
-        Vault.set("conduit_cluster", "is_leader", false)
+        Vault.set(Vault.new("conduit_cluster"), "is_leader", false)
       Err(e) ->
         Logger.warn("conduit_node: leader election error: " ++ e)
     end
@@ -87,7 +88,7 @@ mod Conduit.Node do
   pfn pbuild_node_info(config : Conduit.Config) : Conduit.NodeInfo do
     {
       id           = config.node_id,
-      hostname     = System.hostname(),
+      hostname     = "localhost",
       pid          = System.pid(),
       queues       = config.queues,
       pool_size    = config.workers_per_queue,

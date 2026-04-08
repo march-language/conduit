@@ -1,12 +1,8 @@
 mod Conduit.Queue do
-  ptype Entry = {
-    performer : String -> Result((), Conduit.ConduitError),
-    config    : Conduit.JobConfig
-  }
 
   fn enqueue(storage, job_type : String, payload : String, config : Conduit.JobConfig) : Result(String, String) do
     let id  = uuid_v4()
-    let now = DateTime.now()
+    let now = DateTime.from_timestamp(DateTime.now())
     let unique_key = punique_key(job_type, config.queue, payload, config)
     match punique_guard(storage, unique_key, config) do
       Err(e) -> Err(e)
@@ -43,8 +39,8 @@ mod Conduit.Queue do
 
   fn enqueue_in(storage, job_type : String, payload : String, delay : Int, config : Conduit.JobConfig) : Result(String, String) do
     let id     = uuid_v4()
-    let now    = DateTime.now()
-    let run_at = DateTime.add(now, delay)
+    let now    = DateTime.from_timestamp(DateTime.now())
+    let run_at = DateTime.add_ms(now, delay)
     let unique_key = punique_key(job_type, config.queue, payload, config)
     match punique_guard(storage, unique_key, config) do
       Err(e) -> Err(e)
@@ -80,23 +76,25 @@ mod Conduit.Queue do
   end
 
   fn register_performer(job_type : String, performer : String -> Result((), Conduit.ConduitError), config : Conduit.JobConfig) : () do
-    Vault.set(registry_key(), job_type, { performer = performer, config = config })
+    let tbl = registry_key()
+    Vault.set(tbl, "fn:" ++ job_type, performer)
+    Vault.set(tbl, "cfg:" ++ job_type, config)
   end
 
   fn dispatch(job_type : String, payload : String) : Result((), Conduit.ConduitError) do
-    match Vault.get(registry_key(), job_type) do
+    Logger.debug("queue: dispatch job_type=" ++ job_type)
+    match Vault.get(registry_key(), "fn:" ++ job_type) do
       None    ->
+        Logger.debug("queue: dispatch: no performer found for " ++ job_type)
         Err(Conduit.ConduitError.Discard("No performer registered for job type: " ++ job_type))
-      Some(e) ->
-        e.performer(payload)
+      Some(performer) ->
+        Logger.debug("queue: dispatch: calling performer")
+        performer(payload)
     end
   end
 
   fn lookup_config(job_type : String) : Option(Conduit.JobConfig) do
-    match Vault.get(registry_key(), job_type) do
-      None    -> None
-      Some(e) -> Some(e.config)
-    end
+    Vault.get(registry_key(), "cfg:" ++ job_type)
   end
 
   pfn pbackoff_name(b : Conduit.Backoff) : String do
@@ -132,7 +130,7 @@ mod Conduit.Queue do
     end
   end
 
-  pfn registry_key() : String do
-    "conduit_performer_registry"
+  pfn registry_key() do
+    Vault.new("conduit_performer_registry")
   end
 end
