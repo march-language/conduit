@@ -1,13 +1,35 @@
+-- Conduit.CronRegistry — in-process registry mapping cron_type → (performer, config).
+--
+-- Static cron jobs are registered at startup via `Conduit.register_cron` (which
+-- delegates here).  Dynamic crons live only in the DB; they are not registered
+-- in-process and are fired by the scheduler directly without a registry lookup.
+--
+-- The registry is Vault-backed: each entry is stored under its cron_type key in
+-- a named table.  `Vault.new` is idempotent, so the registry is process-global
+-- and shared across all callers in the same OS process.
 mod Conduit.CronRegistry do
   ptype Entry = {
     config    : Conduit.CronConfig,
     performer : String -> Result((), Conduit.ConduitError)
   }
 
+  doc """
+  Register a cron performer and its config.
+
+  Should be called once at application startup for each static cron job.
+  Calling `register` a second time with the same `cron_type` overwrites the
+  previous entry — useful for testing but avoid in production.
+  """
   fn register(cron_type : String, config : Conduit.CronConfig, performer : String -> Result((), Conduit.ConduitError)) : () do
     Vault.set(registry_key(), cron_type, { config = config, performer = performer })
   end
 
+  doc """
+  Return the registered entry for `cron_type`, or None if not registered.
+
+  Workers and the cron scheduler use this to retrieve the performer function
+  and its associated config without re-querying the DB.
+  """
   fn lookup(cron_type : String) : Option(Entry) do
     match Vault.get(registry_key(), cron_type) do
       None    -> None
@@ -15,6 +37,12 @@ mod Conduit.CronRegistry do
     end
   end
 
+  doc """
+  Invoke the registered performer for `cron_type` with `payload`.
+
+  Returns the performer's result, or `Err(ConduitError.Discard(...))` if no
+  performer is registered for the given cron type.
+  """
   fn fire(cron_type : String, payload : String) : Result((), Conduit.ConduitError) do
     match Vault.get(registry_key(), cron_type) do
       None    -> Err(Conduit.ConduitError.Discard("No cron registered for type: " ++ cron_type))
@@ -22,14 +50,26 @@ mod Conduit.CronRegistry do
     end
   end
 
+  doc """
+  Return all registered cron entries as a list.
+
+  Used by `Conduit.API.start` to upsert static crons into the DB on startup.
+  Iterates `Vault.keys` to enumerate all registered cron_types, then loads
+  each entry.  Entries that have been concurrently unregistered are silently
+  skipped.
+  """
   fn all() do
-    Vault.all(registry_key())
-    |> List.filter_map(fn pair ->
-      match pair do
-        (cron_type, e) -> Some({ cron_type = cron_type, config = e.config, performer = e.performer })
-      end)
+    let tbl  = registry_key()
+    let keys = Vault.keys(tbl)
+    List.filter_map(keys, fn cron_type ->
+      match Vault.get(tbl, cron_type) do
+        None    -> None
+        Some(e) -> Some({ cron_type = cron_type, config = e.config, performer = e.performer })
+      end
+    )
   end
 
+  doc "Serialise a CronOverlap variant to its DB string representation."
   fn overlap_to_string(o : Conduit.CronOverlap) : String do
     match o do
       Skip    -> "skip"
@@ -38,6 +78,12 @@ mod Conduit.CronRegistry do
     end
   end
 
+  doc """
+  Deserialise a DB string back to a CronOverlap variant.
+
+  Unknown strings default to Skip (the safest policy: don't start a second
+  instance of the job if the previous one hasn't finished yet).
+  """
   fn overlap_from_string(s : String) : Conduit.CronOverlap do
     match s do
       "allow"   -> Conduit.CronOverlap.Allow
@@ -46,6 +92,9 @@ mod Conduit.CronRegistry do
     end
   end
 
+  -- Return (or create) the Vault table used as the cron registry.
+  --
+  -- `Vault.new` is idempotent; all callers in the same process share one table.
   pfn registry_key() do
     Vault.new("conduit_cron_registry")
   end

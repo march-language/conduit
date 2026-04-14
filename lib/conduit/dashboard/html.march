@@ -106,12 +106,20 @@ mod Conduit.Dashboard.Html do
     "<div class=\"flash " ++ cls ++ "\">" ++ Html.escape(message) ++ "</div>"
   end
 
-  doc "Admin action button (POST form button)."
+  doc """
+  Admin action button (POST form with optional JavaScript confirm dialog).
+
+  The `confirm` message is embedded in a JavaScript string literal, so it must
+  be escaped for JS (not HTML) — single quotes and backslashes are the primary
+  injection vectors.  `Html.escape` is NOT used here because HTML entity encoding
+  (`&apos;`, `&amp;`, etc.) is not decoded inside JS string literals in browsers,
+  which would display garbage in the dialog box or leave injection gaps open.
+  """
   fn action_btn(action_url : String, label : String, confirm : String) : String do
     let on_submit = if confirm == "" do
       "true"
     else
-      "confirm('" ++ Html.escape(confirm) ++ "')"
+      "confirm('" ++ pjs_escape(confirm) ++ "')"
     end
     let btn_class = match label do
       "Retry"  -> "btn-retry"
@@ -120,6 +128,19 @@ mod Conduit.Dashboard.Html do
       _        -> "btn-default"
     end
     "<form method=\"post\" action=\"" ++ Html.escape(action_url) ++ "\" style=\"display:inline\" onsubmit=\"return " ++ on_submit ++ "\"><button type=\"submit\" class=\"btn " ++ btn_class ++ "\">" ++ Html.escape(label) ++ "</button></form>"
+  end
+
+  -- Escape a string for safe embedding inside a single-quoted JS string literal.
+  --
+  -- Escapes: backslash, single quote, newline, carriage return.
+  -- This is intentionally minimal — it covers the characters that would break
+  -- out of the JS string context.  HTML entities must NOT be applied here.
+  pfn pjs_escape(s : String) : String do
+    s
+    |> String.replace("\\", "\\\\")
+    |> String.replace("'", "\\'")
+    |> String.replace("\n", "\\n")
+    |> String.replace("\r", "\\r")
   end
 
   pfn pcss() : String do

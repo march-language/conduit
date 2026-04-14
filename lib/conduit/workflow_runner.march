@@ -36,21 +36,20 @@ mod Conduit.WorkflowRunner do
   Called immediately after inserting a new workflow row.
   """
   fn enqueue(storage, workflow_id : String, config : Conduit.WorkflowConfig) : Result(String, String) do
+    -- Use the registered config for the workflow runner performer (which carries
+    -- the queue, priority, etc. set at startup).  Fall back to safe defaults if
+    -- the performer has not been registered yet (e.g. during testing).
+    let base_config = Conduit.Queue.lookup_config(job_type())
+      |> Option.unwrap_or(Conduit.JobConfig.default())
     let job_config = {
-      queue             = "default",
-      max_attempts      = 3,
-      timeout           = 30000,
-      backoff           = Conduit.Backoff.Exponential,
-      dead_letter_queue = None,
-      unique_for        = None,
-      on_conflict       = Conduit.UniqueConflict.Ignore,
-      rate_limit        = None,
-      on_dead_letter    = None,
-      priority          = 0,
-      tags              = config.tags,
-      discard_after     = None
+      ..base_config,
+      max_attempts  = 3,
+      timeout       = 30000,
+      backoff       = Conduit.Backoff.Exponential,
+      tags          = config.tags,
+      discard_after = None
     }
-    let payload = "{\"workflow_id\": \"" ++ workflow_id ++ "\"}"
+    let payload = "{\"workflow_id\":\"" ++ workflow_id ++ "\"}"
     Conduit.Queue.enqueue(storage, job_type(), payload, job_config)
   end
 
@@ -126,17 +125,22 @@ mod Conduit.WorkflowRunner do
     status == "completed" || status == "failed" || status == "cancelled" || status == "timed_out"
   end
 
-  -- Extract workflow_id from payload JSON.
-  -- Payload is: {"workflow_id": "..."}
+  -- Extract the workflow_id string from the job payload JSON.
+  --
+  -- Payload format: {"workflow_id":"<uuid>"}
+  --
+  -- Uses Json.parse + Json.get for correctness — the ad-hoc string-split
+  -- approach fails on payloads with escaped characters, extra whitespace,
+  -- or reordered keys.  Returns "" on any parse or type error so the caller
+  -- can return a Discard error.
   pfn pparse_workflow_id(payload : String) : String do
-    -- Simple extraction: find "workflow_id": "VALUE" in the JSON string.
-    let key = "\"workflow_id\": \""
-    match String.split_first(payload, key) do
-      None          -> ""
-      Some((_, rest)) ->
-        match String.split_first(rest, "\"") do
-          None            -> ""
-          Some((value, _)) -> value
+    match Json.parse(payload) do
+      Err(_)   -> ""
+      Ok(json) ->
+        match Json.get(json, "workflow_id") do
+          None           -> ""
+          Some(Json.String(id)) -> id
+          Some(_)        -> ""
         end
     end
   end

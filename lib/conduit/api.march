@@ -69,7 +69,11 @@ mod Conduit.API do
     Conduit.enqueue(SendWelcomeEmail, args)
   """
   fn enqueue(_job, job_type : String, payload : String, storage) : Result(String, String) do
-    let config = Conduit.JobConfig.default()
+    -- Prefer the config registered for this job type at startup; fall back to
+    -- defaults only when no performer has been registered yet (e.g. during tests
+    -- or when calling enqueue before register).
+    let config = Conduit.Queue.lookup_config(job_type)
+      |> Option.unwrap_or(Conduit.JobConfig.default())
     Conduit.Queue.enqueue(storage, job_type, payload, config)
   end
 
@@ -85,7 +89,8 @@ mod Conduit.API do
   Enqueue a job to run after `delay`. Returns the job id on success.
   """
   fn enqueue_in(_job, job_type : String, payload : String, delay : Int, storage) : Result(String, String) do
-    let config = Conduit.JobConfig.default()
+    let config = Conduit.Queue.lookup_config(job_type)
+      |> Option.unwrap_or(Conduit.JobConfig.default())
     Conduit.Queue.enqueue_in(storage, job_type, payload, delay, config)
   end
 
@@ -167,14 +172,20 @@ mod Conduit.API do
 
   doc "Disable a cron schedule by id."
   fn pause_cron(storage, cron_id : String) : Result((), String) do
-    Conduit.Storage.cron_upsert(storage, pcron_set_enabled(storage, cron_id, false))
-    |> Result.map(fn _ -> ())
+    match pcron_set_enabled(storage, cron_id, false) do
+      Err(e)    -> Err(e)
+      Ok(sched) -> Conduit.Storage.cron_upsert(storage, sched)
+                   |> Result.map(fn _ -> ())
+    end
   end
 
   doc "Re-enable a paused cron schedule by id."
   fn resume_cron(storage, cron_id : String) : Result((), String) do
-    Conduit.Storage.cron_upsert(storage, pcron_set_enabled(storage, cron_id, true))
-    |> Result.map(fn _ -> ())
+    match pcron_set_enabled(storage, cron_id, true) do
+      Err(e)    -> Err(e)
+      Ok(sched) -> Conduit.Storage.cron_upsert(storage, sched)
+                   |> Result.map(fn _ -> ())
+    end
   end
 
   doc "Cancel a cron schedule permanently (deletes the DB row)."
@@ -275,7 +286,19 @@ mod Conduit.API do
   `storage`      — storage backend
   """
   fn signal_workflow(workflow_id : String, signal_type : String, payload_json : String, storage) : Result(Int, String) do
-    Err("not implemented")
+    let now = DateTime.from_timestamp(DateTime.now())
+    let signal : Conduit.WorkflowSignal = {
+      id           = 0,
+      workflow_id  = workflow_id,
+      signal_type  = signal_type,
+      payload      = payload_json,
+      status       = "pending",
+      sent_at      = now,
+      delivered_at = None,
+      expires_at   = None,
+      sent_by      = None
+    }
+    Conduit.Storage.signal_insert(storage, signal)
   end
 
   doc "Cancel a running workflow with a reason."
@@ -407,20 +430,17 @@ mod Conduit.API do
     Conduit.EventStore.load_all(storage, workflow_id)
   end
 
-  pfn pcron_set_enabled(storage, cron_id : String, enabled : Bool) : CronSchedule do
-    {
-      id          = cron_id,
-      job_type    = cron_id,
-      schedule    = "* * * * *",
-      timezone    = "UTC",
-      queue       = "default",
-      payload     = "{}",
-      overlap     = "skip",
-      enabled     = enabled,
-      last_run_at = None,
-      last_job_id = None,
-      next_run_at = None,
-      tags        = Nil
-    }
+  -- Load an existing cron schedule from storage and return a modified copy with
+  -- only the `enabled` field changed.  Returns Err if the schedule does not exist.
+  --
+  -- IMPORTANT: we must load the existing row before upserting — constructing a
+  -- fresh struct with hardcoded defaults would silently overwrite the schedule,
+  -- timezone, queue, and all other fields with incorrect values.
+  pfn pcron_set_enabled(storage, cron_id : String, enabled : Bool) : Result(Conduit.CronSchedule, String) do
+    match Conduit.Storage.cron_load_by_id(storage, cron_id) do
+      Err(e)          -> Err(e)
+      Ok(None)        -> Err("cron schedule not found: " ++ cron_id)
+      Ok(Some(sched)) -> Ok({ ..sched, enabled = enabled })
+    end
   end
 end

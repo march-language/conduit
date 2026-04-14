@@ -1,10 +1,29 @@
+-- Conduit.Dashboard.Auth — authentication for the web dashboard.
+--
+-- Three auth modes:
+--
+--   None       — dashboard is open to all requests (only for dev / internal networks).
+--   Token(t)   — Bearer token required in the Authorization header.
+--                Comparison is constant-time via Crypto.secure_compare to prevent
+--                timing-based token enumeration.
+--   Fn(f)      — custom function receives the Authorization header value and
+--                returns true/false.  Useful for HMAC or OIDC token validation.
 mod Conduit.Dashboard.Auth do
+
+  doc """
+  Return true if the request passes the configured authentication check.
+
+  For `Token` mode the Authorization header is compared using
+  `Crypto.secure_compare`, which runs in constant time regardless of where the
+  strings first differ.  This prevents an attacker from determining the token
+  one character at a time by measuring response latency.
+  """
   fn check(auth : Conduit.Auth, conn) : Bool do
     match auth do
       None      -> true
       Token(t)  ->
         let header = HttpServer.get_req_header(conn, "authorization") |> unwrap_or("")
-        header == "Bearer " ++ t
+        Crypto.secure_compare(header, "Bearer " ++ t)
       Fn(f)     ->
         let header = HttpServer.get_req_header(conn, "authorization") |> unwrap_or("")
         f(header)

@@ -1,3 +1,24 @@
+-- Conduit.CronParser — cron expression parser and next-run calculator.
+--
+-- Parses the standard five-field cron syntax:
+--
+--   ┌─────── minute        (0–59)
+--   │ ┌───── hour          (0–23)
+--   │ │ ┌─── day-of-month  (1–31)
+--   │ │ │ ┌─ month         (1–12)
+--   │ │ │ │ ┌ day-of-week  (0–6, 0 = Sunday)
+--   * * * * *
+--
+-- Each field may be:
+--   *        — any value
+--   N        — exact value
+--   N-M      — inclusive range
+--   N-M/S    — range with step S
+--   */S      — every S values from the field's minimum
+--   a,b,c    — comma-separated list of literals or ranges
+--
+-- `next_run` finds the next DateTime after `from` that satisfies the expression
+-- by stepping minute-by-minute up to one year ahead.
 mod Conduit.CronParser do
   -- A parsed cron field: either "match any" or a sorted list of valid integers.
   ptype Field = Any | Values(List(Int))
@@ -12,8 +33,16 @@ mod Conduit.CronParser do
   }
 
   doc """
-  Parse a cron expression string. Returns Ok(next_run_at) on success,
-  Err(msg) if the expression is malformed or no match found within ~1 year.
+  Parse a cron expression and return the next run time after `from`.
+
+  The result is the first DateTime at or after `from + 1 minute` that matches
+  all five fields of the expression.  The search is bounded to ~1 year
+  (527 040 minutes); if no match is found within that window, returns
+  Err with a descriptive message.
+
+  Returns:
+    Ok(next_run_at)  — the next scheduled DateTime (always in the future).
+    Err(msg)         — invalid expression or no match found within 1 year.
   """
   fn next_run(schedule : String, from : DateTime) : Result(DateTime, String) do
     match pparse_expr(schedule) do
@@ -27,12 +56,16 @@ mod Conduit.CronParser do
     end
   end
 
-  doc "Parse a cron expression into its internal representation."
+  doc "Parse a cron expression into its internal Expr representation."
   fn parse(schedule : String) : Result(Expr, String) do
     pparse_expr(schedule)
   end
 
-  doc "Check whether a DateTime matches a parsed cron expression."
+  doc """
+  Return true if `dt` satisfies all five fields of the parsed `expr`.
+
+  Uses UTC time components (minute, hour, day-of-month, month, day-of-week).
+  """
   fn matches(expr : Expr, dt : DateTime) : Bool do
     pmatches(expr, dt)
   end
@@ -175,15 +208,17 @@ mod Conduit.CronParser do
   -- Private: matching
   -- ─────────────────────────────────────────────────────────────
 
+  -- Check whether `dt` satisfies all five fields of `expr`.
+  --
+  -- `expr` is a record type (ptype Expr = { minute, hour, dom, month, dow }),
+  -- so its fields are accessed with dot notation — not matched as a sum type
+  -- constructor.
   pfn pmatches(expr : Expr, dt : DateTime) : Bool do
-    match expr do
-      Expr(e) ->
-        pfield_matches(e.minute, pdt_minute(dt)) &&
-        pfield_matches(e.hour,   pdt_hour(dt))   &&
-        pfield_matches(e.dom,    pdt_dom(dt))     &&
-        pfield_matches(e.month,  pdt_month(dt))   &&
-        pfield_matches(e.dow,    pdt_dow(dt))
-    end
+    pfield_matches(expr.minute, pdt_minute(dt)) &&
+    pfield_matches(expr.hour,   pdt_hour(dt))   &&
+    pfield_matches(expr.dom,    pdt_dom(dt))     &&
+    pfield_matches(expr.month,  pdt_month(dt))   &&
+    pfield_matches(expr.dow,    pdt_dow(dt))
   end
 
   pfn pfield_matches(f : Field, v : Int) : Bool do
@@ -197,6 +232,9 @@ mod Conduit.CronParser do
   -- Private: next-run search
   -- ─────────────────────────────────────────────────────────────
 
+  -- Linearly advance minute-by-minute until a matching DateTime is found.
+  -- Bounded to 527 040 iterations (~1 year of minutes) to prevent infinite loops
+  -- for expressions like "0 0 30 2 *" (February 30 never exists).
   pfn pfind_next(expr : Expr, candidate : DateTime, count : Int) : Option(DateTime) do
     if count > 527040 do
       None

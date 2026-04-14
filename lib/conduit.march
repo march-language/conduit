@@ -1,48 +1,174 @@
+-- Conduit — job queue and durable workflow engine for March.
+--
+-- This module is the top-level namespace. It re-exports the types shared across
+-- all subsystems (errors, config, job metadata, workflow types, etc.) and provides
+-- thin forwarding wrappers so callers can write `Conduit.pause_cron(...)` instead
+-- of the fully-qualified `Conduit.API.pause_cron(...)`.
+--
+-- Typical startup sequence:
+--
+--   1. Register performers:    Conduit.API.register(job_type, performer, config)
+--   2. Register crons:         Conduit.API.register_cron(cron_type, cron_config, performer)
+--   3. Register workflows:     Conduit.API.register_workflow(wf_type, runner, wf_config)
+--   4. Start the engine:       Conduit.API.start(config, storage)
+--
+-- All types below are intentionally kept in this file so that library consumers
+-- have a single import point for the entire Conduit type vocabulary.
 mod Conduit do
+
+  -- ── Error type ────────────────────────────────────────────────────────────
+  --
+  -- `ConduitError` is returned by performer functions to control what the worker
+  -- does after a job finishes unsuccessfully.
+  --
+  --   Retry(msg)       — transient failure; reschedule using the job's backoff
+  --                      strategy.  `msg` is appended to the job's error list.
+  --   Discard(msg)     — permanent failure; do not retry.  Routes to the
+  --                      dead-letter queue if one is configured, otherwise marks
+  --                      the job dead in-place.
+  --   Snooze(ms)       — postpone: reschedule the job to run after `ms`
+  --                      milliseconds without consuming a retry attempt.  Used
+  --                      internally by the rate-limiter and available to
+  --                      performers that need to wait for an external resource.
+  --   WorkerError(msg) — unexpected infrastructure error (caught exception,
+  --                      storage failure).  Treated the same as Retry; the
+  --                      distinction lets callers identify system vs. domain
+  --                      failures in logs.
   type ConduitError = Retry(String) | Discard(String) | Snooze(Int) | WorkerError(String)
 
+  -- ── Schema ────────────────────────────────────────────────────────────────
+  --
+  -- Optional argument validator attached to a job or cron.  When `validator` is
+  -- `Some(f)`, `Conduit.Schema.validate` calls `f` on the decoded arguments and
+  -- propagates any `Err` back to the caller before the job is enqueued.  Use
+  -- `Conduit.Schema.none()` to skip validation.
   type Schema(a) = { validator : Option(a -> Result((), String)) }
 
+  -- ── Backoff strategies ────────────────────────────────────────────────────
+  --
+  -- Controls the delay between retry attempts.  The worker calls
+  -- `Conduit.Backoff.delay(strategy, attempt)` and adds a random jitter (0–1 s)
+  -- before scheduling the next attempt.
+  --
+  --   Linear         — delay = 5 s × attempt  (5 s, 10 s, 15 s, …)
+  --   Exponential    — delay = 2^(attempt-1) s  (1 s, 2 s, 4 s, 8 s, …)
+  --   Fibonacci      — delay = fib(attempt) s   (1 s, 1 s, 2 s, 3 s, 5 s, …)
+  --   Custom(f)      — delay = f(attempt) ms, fully user-controlled.
+  --                    `f` receives the 1-based attempt number and must return
+  --                    a non-negative integer of milliseconds.
   type Backoff =
     Linear
     | Exponential
     | Fibonacci
     | Custom(Int -> Int)
 
-  -- Unique lock scope: PerQueue (default) or Global across all queues.
+  -- ── Unique job constraints ─────────────────────────────────────────────────
+  --
+  -- `UniqueScope` controls the boundary of uniqueness:
+  --
+  --   PerQueue  (default) — one active job per (queue, job_type, fingerprint).
+  --                         The same job type can still be unique-per-queue in
+  --                         different queues simultaneously.
+  --   Global              — one active job per (job_type, fingerprint) across
+  --                         all queues.
   type UniqueScope = PerQueue | Global
 
+  -- `UniqueConstraint` is set via `JobConfig.unique_for`.
+  --
+  --   duration  — how long (ms) the unique lock is held after the job
+  --               completes.  Set to 0 to release immediately on completion.
+  --   fields    — JSON field names to include in the fingerprint.  An empty
+  --               list includes the entire raw payload string.
+  --   scope     — see UniqueScope above.
   type UniqueConstraint = {
     duration : Int,
     fields   : List(String),
     scope    : UniqueScope
   }
 
+  -- `UniqueConflict` controls what happens when a unique constraint fires:
+  --
+  --   Ignore   (default) — silently return the id of the existing job as if
+  --                        enqueue succeeded.  The new job is dropped.
+  --   Raise              — return `Err("unique constraint violated …")` to the
+  --                        caller.  Nothing is inserted.
+  --   Replace            — cancel the existing job and insert the new one.
   type UniqueConflict = Ignore | Replace | Raise
 
+  -- ── Rate limiting ──────────────────────────────────────────────────────────
+  --
+  -- `PerKeyRateLimit` adds a secondary per-entity bucket on top of the global
+  -- per-job-type bucket.
+  --
+  --   key_fn  — extracts a discriminator from the job payload string.
+  --             e.g. `fn payload -> Json.get_string(payload, "user_id")`
+  --   limit   — tokens/second for this entity bucket.
   type PerKeyRateLimit = {
     key_fn : String -> String,
     limit  : Int
   }
 
-  -- Pluggable rate limiter backend.
+  -- `RateLimiterBackend` selects the token-bucket implementation:
   --
-  -- StorageBacked: delegates to the storage interface (Postgres token bucket).
-  --   Default and recommended for multi-node deployments.
-  -- Custom(f): user-supplied function f(key, rate) -> Result(Bool, String).
-  --   Use for Redis, in-process buckets, or any other backend.
-  --
-  -- In-process (Vault-based) optimization is planned as a future built-in option.
+  --   StorageBacked       — Postgres token bucket via the storage interface.
+  --                         Correct under multi-node deployments; recommended
+  --                         default.
+  --   Custom(f)           — user-supplied function `f(key, rate) ->
+  --                         Result(Bool, String)`.  Return `Ok(true)` to allow,
+  --                         `Ok(false)` to deny (snooze), `Err(e)` on storage
+  --                         failure (worker will proceed anyway to avoid
+  --                         blocking the queue).  Use for Redis, in-process
+  --                         sliding windows, or any other backend.
   type RateLimiterBackend =
       StorageBacked
     | Custom(String -> Int -> Result(Bool, String))
 
+  -- `RateLimit` is set via `JobConfig.rate_limit`.
+  --
+  --   max_per_second  — global token allowance across all instances of this job
+  --                     type; 0 means unlimited.
+  --   per_key         — optional secondary per-entity bucket (see PerKeyRateLimit).
+  --   backend         — token-bucket implementation (see RateLimiterBackend).
   type RateLimit = {
     max_per_second : Int,
     per_key        : Option(PerKeyRateLimit),
     backend        : RateLimiterBackend
   }
 
+  -- ── Job configuration ──────────────────────────────────────────────────────
+  --
+  -- `JobConfig` is set once per job type, typically via `fn config()` on the job
+  -- module, and passed to `Conduit.API.register`.  At runtime the worker reads it
+  -- from the in-process registry to control retry, timeout, and routing.
+  --
+  --   queue             — name of the queue this job is enqueued into.
+  --                       Defaults to "default".
+  --   max_attempts      — maximum number of executions before dead-lettering.
+  --                       Attempt 1 is the first try; retries start at attempt 2.
+  --                       Defaults to 3.
+  --   timeout           — milliseconds before the worker considers the job hung.
+  --                       The heartbeat interval is derived as timeout / 3
+  --                       (minimum 5 s).  Defaults to 30 000 (30 s).
+  --   backoff           — delay strategy between retries (see Backoff).
+  --                       Defaults to Exponential.
+  --   dead_letter_queue — optional queue name for the DLQ.  When set, exhausted
+  --                       and discarded jobs are written to conduit_dead_letters
+  --                       and a `conduit_queue_<dlq>` NOTIFY is fired.  When
+  --                       None the job is marked dead in-place without a DLQ row.
+  --   unique_for        — optional uniqueness constraint (see UniqueConstraint).
+  --   on_conflict       — behaviour when a unique constraint fires (see
+  --                       UniqueConflict).  Defaults to Ignore.
+  --   rate_limit        — optional token-bucket rate limit (see RateLimit).
+  --   on_dead_letter    — optional callback fired synchronously after a job is
+  --                       moved to the dead-letter table.  Receives a JobInfo
+  --                       snapshot of the failed job.  Must not block or panic.
+  --   priority          — scheduling priority.  Higher values are polled first.
+  --                       Defaults to 0.
+  --   tags              — arbitrary string labels stored on the job row and
+  --                       queryable from the dashboard.
+  --   discard_after     — optional age limit in milliseconds.  Jobs older than
+  --                       this are discarded without retry.  Not yet enforced by
+  --                       the worker (Phase 6).
   type JobConfig = {
     queue             : String,
     max_attempts      : Int,
@@ -58,6 +184,21 @@ mod Conduit do
     discard_after     : Option(Int)
   }
 
+  -- ── Job metadata ───────────────────────────────────────────────────────────
+  --
+  -- `JobInfo` is a read-only snapshot passed to the `on_dead_letter` callback
+  -- and available to performers that have been injected their own metadata.
+  -- It does not include all fields of JobRow; only the information useful to
+  -- application-level dead-letter handlers.
+  --
+  --   id           — UUID of the job row.
+  --   queue        — queue it was enqueued in.
+  --   job_type     — string name of the performer module.
+  --   attempt      — the attempt number that just failed (1-based).
+  --   max_attempts — the configured maximum (same as JobConfig.max_attempts).
+  --   tags         — tags from the original JobConfig.
+  --   inserted_at  — when the job was first enqueued.
+  --   errors       — all error messages accumulated across all attempts.
   type JobInfo = {
     id           : String,
     queue        : String,
@@ -69,6 +210,29 @@ mod Conduit do
     errors       : List(String)
   }
 
+  -- ── Runtime configuration ──────────────────────────────────────────────────
+  --
+  -- `Config` is passed to `Conduit.API.start` and governs worker pool sizing,
+  -- polling cadence, and cluster membership.  See `Conduit.Config.default()` for
+  -- production-ready starting values.
+  --
+  --   queues                  — list of queue names this node polls.  Each queue
+  --                             gets `workers_per_queue` worker tasks.
+  --   workers_per_queue       — concurrent workers per queue.  Defaults to 5.
+  --   poll_interval_ms        — sleep between DB polls when the queue is empty.
+  --                             Defaults to 1 000 ms.  Reduce for lower latency
+  --                             at the cost of more DB traffic when idle.
+  --   cron_tick_interval_ms   — how often the cron scheduler checks for due
+  --                             schedules.  Defaults to 30 000 ms.  Must be ≤ the
+  --                             smallest cron interval you use (typically 60 s).
+  --   node_id                 — unique identifier for this process in the cluster.
+  --                             Defaults to a random UUID; override with a stable
+  --                             name for easier debugging.
+  --   heartbeat_interval_ms   — how often each node updates `last_seen_at` in the
+  --                             cluster registry.  Defaults to 15 000 ms.
+  --   stale_node_threshold_ms — a node not seen within this window is considered
+  --                             crashed; its in-flight jobs are reclaimed.
+  --                             Defaults to 60 000 ms (must be > heartbeat_interval_ms).
   type Config = {
     queues                  : List(String),
     workers_per_queue       : Int,
@@ -79,8 +243,27 @@ mod Conduit do
     stale_node_threshold_ms : Int
   }
 
+  -- ── Cron ──────────────────────────────────────────────────────────────────
+  --
+  -- `CronOverlap` controls what happens when a cron tick fires while the
+  -- previous job is still running.
+  --
+  --   Skip    (default) — do not fire; wait for the next tick.
+  --   Allow             — fire regardless; multiple jobs may run concurrently.
+  --   Replace           — cancel the in-flight job and enqueue a fresh one.
   type CronOverlap = Skip | Allow | Replace
 
+  -- `CronConfig` is passed to `Conduit.API.register_cron`.  Fields:
+  --
+  --   schedule  — standard 5-field cron expression ("min hr dom mon dow").
+  --               Examples: "0 * * * *" (hourly), "*/15 * * * *" (every 15 min).
+  --   timezone  — IANA timezone name for schedule evaluation.  Defaults to "UTC".
+  --               Note: the cron parser currently always evaluates in UTC;
+  --               timezone is stored for future support.
+  --   queue     — queue to enqueue fired jobs into.  Defaults to "default".
+  --   overlap   — what to do when the previous firing is still running
+  --               (see CronOverlap).  Defaults to Skip.
+  --   tags      — labels forwarded to the job row on each firing.
   type CronConfig = {
     schedule : String,
     timezone : String,
@@ -89,6 +272,25 @@ mod Conduit do
     tags     : List(String)
   }
 
+  -- `CronSchedule` is the DB row stored in `conduit_cron_schedules`.  Static
+  -- crons are upserted from their `CronConfig` each time `Conduit.API.start` runs;
+  -- dynamic crons are managed via `Conduit.API.schedule_cron`.
+  --
+  --   id          — unique identifier; for static crons this is the `cron_type`
+  --                 string.  For dynamic crons use a UUID.
+  --   job_type    — the performer registered under this name handles execution.
+  --   schedule    — raw cron expression string.
+  --   timezone    — IANA timezone (stored; parser currently uses UTC).
+  --   queue       — queue for fired jobs.
+  --   payload     — JSON payload forwarded to the performer on each firing.
+  --                 Defaults to "{}".
+  --   overlap     — serialised CronOverlap ("skip" | "allow" | "replace").
+  --   enabled     — when false the scheduler skips this row entirely.
+  --   last_run_at — timestamp of the most recent successful firing.
+  --   last_job_id — job id produced by the most recent firing (used for Skip
+  --                 overlap check).
+  --   next_run_at — pre-computed next fire time (set after each firing).
+  --   tags        — forwarded to each fired job row.
   type CronSchedule = {
     id          : String,
     job_type    : String,
@@ -104,6 +306,42 @@ mod Conduit do
     tags        : List(String)
   }
 
+  -- ── Job row ────────────────────────────────────────────────────────────────
+  --
+  -- `JobRow` mirrors the `conduit_jobs` DB schema.  Workers fetch this struct
+  -- from storage, execute the performer, and update the row through the storage
+  -- interface.  Application code typically does not construct JobRow directly;
+  -- use `Conduit.API.enqueue` instead.
+  --
+  --   id                — UUID primary key, generated at enqueue time.
+  --   queue             — queue name.
+  --   job_type          — string key into the performer registry.
+  --   payload           — opaque JSON string forwarded verbatim to the performer.
+  --   status            — lifecycle state: "pending" | "running" | "completed" |
+  --                       "failed" | "dead" | "snoozed".
+  --   attempt           — number of completed execution attempts (0 = not yet run).
+  --   max_attempts      — copy of JobConfig.max_attempts at enqueue time.
+  --   priority          — scheduling order; higher = polled first.
+  --   backoff           — serialised strategy name ("linear" | "exponential" |
+  --                       "fibonacci" | "custom").  Custom functions cannot be
+  --                       round-tripped; "custom" falls back to Exponential on
+  --                       retry.
+  --   dead_letter_queue — copy of JobConfig.dead_letter_queue at enqueue time.
+  --   inserted_at       — when the job was first enqueued.
+  --   scheduled_at      — when enqueue was called (same as inserted_at for
+  --                       immediate jobs; earlier for delayed jobs).
+  --   run_at            — earliest time the job may be picked up.  Workers skip
+  --                       rows where run_at > NOW().
+  --   started_at        — set by mark_running when a worker claims the job.
+  --   completed_at      — set by mark_completed on success.
+  --   heartbeat_at      — updated every heartbeat_interval_ms while running.
+  --                       Jobs with a stale heartbeat_at are candidates for
+  --                       rescue_stale reclaim.
+  --   worker_id         — UUID identifying the worker task that claimed the job.
+  --   unique_key        — SHA-256 fingerprint when unique_for is set; NULL
+  --                       otherwise.  Protected by a partial unique index.
+  --   errors            — chronological list of error messages from each attempt.
+  --   tags              — copy of JobConfig.tags at enqueue time.
   type JobRow = {
     id                : String,
     queue             : String,
@@ -127,6 +365,25 @@ mod Conduit do
     tags              : List(String)
   }
 
+  -- ── Dead letter ────────────────────────────────────────────────────────────
+  --
+  -- `DeadLetter` mirrors the `conduit_dead_letters` DB schema.  A row is written
+  -- here when a job exhausts all retry attempts or is explicitly discarded with a
+  -- dead-letter queue configured.
+  --
+  --   id                 — UUID of the dead-letter row (different from job_id).
+  --   job_id             — UUID of the originating job row.
+  --   queue / job_type / payload — copied from the originating JobRow.
+  --   errors             — full error list including the final failure message.
+  --   attempts           — total number of execution attempts made.
+  --   first_attempted_at — started_at of the very first attempt.
+  --   last_attempted_at  — time of the final failed attempt.
+  --   discarded_at       — time the dead-letter row was inserted.
+  --   reviewed           — set to true by a human operator after triage.
+  --   reviewed_by        — identifier of the operator who reviewed.
+  --   reviewed_at        — time of review.
+  --   retry_count        — number of times this dead-letter has been re-enqueued
+  --                        via the dashboard "Retry" action.
   type DeadLetter = {
     id                 : String,
     job_id             : String,
@@ -144,6 +401,19 @@ mod Conduit do
     retry_count        : Int
   }
 
+  -- ── Cluster node ──────────────────────────────────────────────────────────
+  --
+  -- `NodeInfo` mirrors the `conduit_workers` DB schema.  Each process that calls
+  -- `Conduit.API.start` registers a row here and refreshes it via heartbeat.
+  --
+  --   id           — stable node identifier (from Config.node_id).
+  --   hostname     — OS hostname of the node's machine.
+  --   pid          — OS process ID.
+  --   queues       — list of queues this node is polling.
+  --   pool_size    — workers_per_queue value (total pool = pool_size × |queues|).
+  --   started_at   — time Conduit.API.start was called on this node.
+  --   last_seen_at — updated every heartbeat_interval_ms; used to detect crashes.
+  --   status       — "running" | "stopped" | "stale".
   type NodeInfo = {
     id           : String,
     hostname     : String,
@@ -155,26 +425,81 @@ mod Conduit do
     status       : String
   }
 
+  -- ── Workflow types ─────────────────────────────────────────────────────────
+  --
+  -- `WorkflowError` is returned by workflow runner functions to signal how
+  -- execution ended.
+  --
+  --   Failed(msg)       — the workflow function returned an error; the job is
+  --                       marked "failed" and not retried.
+  --   Cancelled(msg)    — the workflow was cancelled via `cancel_workflow`; the
+  --                       job completes cleanly (no retry).
+  --   TimedOut          — `WorkflowConfig.timeout` elapsed; the row is marked
+  --                       "timed_out".
+  --   StorageError(msg) — a checkpoint or storage call failed transiently; the
+  --                       workflow job is retried via the normal backoff path.
   type WorkflowError =
     Failed(String)
     | Cancelled(String)
     | TimedOut
     | StorageError(String)
 
+  -- `ExecutionMode` selects the checkpoint durability strategy:
+  --
+  --   Checkpoint          (default) — each `checkpoint` call writes directly to
+  --                                   `conduit_checkpoints`.  On resume, completed
+  --                                   checkpoints are loaded from the DB and their
+  --                                   functions are skipped.
+  --   DeterministicReplay           — each `checkpoint` call appends to the event
+  --                                   store (`conduit_workflow_events`).  On resume
+  --                                   the full event log is replayed in order,
+  --                                   making the execution deterministic.  Use this
+  --                                   when you need full audit history or
+  --                                   point-in-time replay.
   type ExecutionMode = Checkpoint | DeterministicReplay
 
+  -- `WorkflowConfig` is passed to `Conduit.API.register_workflow`.
+  --
+  --   execution_mode  — checkpoint durability strategy (see ExecutionMode).
+  --   timeout         — optional maximum wall-clock duration (ms) for the whole
+  --                     workflow.  When elapsed the workflow runner marks the row
+  --                     "timed_out" and stops retrying.  None = no timeout.
+  --   tags            — labels forwarded to the workflow runner job row.
   type WorkflowConfig = {
     execution_mode : ExecutionMode,
     timeout        : Option(Int),
     tags           : List(String)
   }
 
+  -- `WorkflowHandle` is returned by `Conduit.API.start_workflow`.  It carries
+  -- the minimum information needed to poll status or send signals.
+  --
+  --   id             — UUID of the workflow row.
+  --   workflow_type  — the registered type name.
+  --   started_at     — time the row was inserted.
   type WorkflowHandle = {
     id            : String,
     workflow_type : String,
     started_at    : DateTime
   }
 
+  -- `WorkflowRow` mirrors the `conduit_workflows` DB schema.
+  --
+  --   id            — UUID primary key.
+  --   workflow_type — registered type name (key into the workflow registry).
+  --   parent_id     — UUID of the parent workflow, when this was spawned as a
+  --                   sub-workflow.  None for top-level workflows.
+  --   input         — JSON-encoded input passed to the runner function.
+  --   output        — JSON-encoded output on "completed"; None otherwise.
+  --   status        — "running" | "completed" | "failed" | "cancelled" |
+  --                   "timed_out".
+  --   started_at    — row insertion time.
+  --   completed_at  — set when status transitions to any terminal state.
+  --   timeout_at    — absolute deadline derived from WorkflowConfig.timeout.
+  --   error         — error message for "failed" / "cancelled" / "timed_out".
+  --   error_at      — when the error was recorded.
+  --   tags          — copy of WorkflowConfig.tags.
+  --   meta          — arbitrary JSON string for application-defined annotations.
   type WorkflowRow = {
     id            : String,
     workflow_type : String,
@@ -191,6 +516,15 @@ mod Conduit do
     meta          : String
   }
 
+  -- `WorkflowCheckpoint` mirrors a row in `conduit_checkpoints`.
+  --
+  --   id           — auto-increment integer primary key.
+  --   workflow_id  — foreign key to conduit_workflows.id.
+  --   name         — fully-qualified checkpoint name (namespace ++ local name).
+  --   value        — JSON-encoded return value of the checkpoint function.
+  --   created_at   — when the checkpoint was first written.
+  --   duration_ms  — wall-clock time the checkpoint function took to execute;
+  --                  None if not measured.
   type WorkflowCheckpoint = {
     id          : Int,
     workflow_id : String,
@@ -200,6 +534,17 @@ mod Conduit do
     duration_ms : Option(Int)
   }
 
+  -- `WorkflowSignal` mirrors a row in `conduit_workflow_signals`.
+  --
+  --   id           — auto-increment integer primary key.
+  --   workflow_id  — foreign key to conduit_workflows.id.
+  --   signal_type  — string that the workflow is `wait_for_signal`-ing on.
+  --   payload      — JSON payload carried with the signal.
+  --   status       — "pending" | "delivered".
+  --   sent_at      — when the signal was inserted.
+  --   delivered_at — when the workflow consumed the signal.
+  --   expires_at   — optional TTL; undelivered signals past this time are ignored.
+  --   sent_by      — optional identifier of the sender (for audit purposes).
   type WorkflowSignal = {
     id           : Int,
     workflow_id  : String,
@@ -212,6 +557,16 @@ mod Conduit do
     sent_by      : Option(String)
   }
 
+  -- `WorkflowContext` is threaded through every workflow function and passed to
+  -- `checkpoint`, `parallel`, and `wait_for_signal`.  Application code should
+  -- treat it as opaque; create one via `WorkflowContext.new` (done automatically
+  -- by the workflow runner).
+  --
+  --   workflow_id     — UUID of the running workflow.
+  --   parent_id       — UUID of the parent workflow (None for root).
+  --   namespace       — dot-separated prefix for checkpoint names within parallel
+  --                     branches; empty for the root context.
+  --   checkpoint_key  — Vault table key used as the in-process checkpoint cache.
   type WorkflowContext = {
     workflow_id    : String,
     parent_id      : Option(String),
@@ -219,6 +574,15 @@ mod Conduit do
     checkpoint_key : String
   }
 
+  -- `WorkflowEvent` mirrors a row in `conduit_workflow_events`.  Events are
+  -- append-only and form the source-of-truth for DeterministicReplay mode.
+  --
+  --   id          — auto-increment integer primary key.
+  --   workflow_id — foreign key to conduit_workflows.id.
+  --   sequence    — 0-based monotonically increasing index within the workflow.
+  --   event_type  — "checkpoint" (only type in Phase 3; more planned).
+  --   payload     — JSON: {"name":"…","value":…,"duration_ms":N}.
+  --   recorded_at — wall-clock time the event was appended.
   type WorkflowEvent = {
     id          : Int,
     workflow_id : String,
@@ -228,31 +592,54 @@ mod Conduit do
     recorded_at : DateTime
   }
 
+  -- ── Dashboard auth ─────────────────────────────────────────────────────────
+  --
+  -- `Auth` controls access to the web dashboard.  Pass it when mounting the
+  -- dashboard router.
+  --
+  --   None      — no authentication; the dashboard is publicly accessible.
+  --               Only use on internal-only networks.
+  --   Token(t)  — require the HTTP `Authorization: Bearer <t>` header.
+  --               Comparison is NOT constant-time in the current implementation;
+  --               use `Fn` with `Crypto.secure_compare` for production.
+  --   Fn(f)     — call `f(authorization_header_value)` on each request.
+  --               Return true to allow.  The full header value is passed,
+  --               including the "Bearer " prefix if present.
   type Auth =
     None
     | Token(String)
     | Fn(String -> Bool)
 
-  -- ── Top-level convenience forwarders ────────────────────────────────────
+  -- ── Top-level convenience forwarders ────────────────────────────────────────
   -- These delegate to Conduit.API so callers can write e.g. Conduit.pause_cron(...)
   -- instead of the fully-qualified Conduit.API.pause_cron(...).
 
+  doc "Disable a cron schedule by id.  See `Conduit.API.pause_cron`."
   fn pause_cron(storage, cron_id : String) : Result((), String) do
     Conduit.API.pause_cron(storage, cron_id)
   end
 
+  doc "Re-enable a paused cron schedule by id.  See `Conduit.API.resume_cron`."
   fn resume_cron(storage, cron_id : String) : Result((), String) do
     Conduit.API.resume_cron(storage, cron_id)
   end
 
+  doc "Permanently delete a cron schedule by id.  See `Conduit.API.cancel_cron`."
   fn cancel_cron(storage, cron_id : String) : Result((), String) do
     Conduit.API.cancel_cron(storage, cron_id)
   end
 
+  doc "Cancel a running workflow with a human-readable reason.  See `Conduit.API.cancel_workflow`."
   fn cancel_workflow(workflow_id : String, reason : String, storage) : Result((), String) do
     Conduit.API.cancel_workflow(workflow_id, reason, storage)
   end
 
+  doc """
+  Return the node_id of the current leader from this node's in-process view.
+
+  Updated by the background leader-election task each heartbeat cycle.  Returns
+  None if this node has not yet completed its first election tick.
+  """
   fn cluster_leader() : Option(String) do
     Conduit.API.cluster_leader()
   end

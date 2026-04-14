@@ -1312,6 +1312,40 @@ mod ConduitTest do
       let key = "events:" ++ workflow_id
       Ok(List.length(Vault.get(self.vault_key, key) |> unwrap_or(Nil)))
     end
+
+    -- New dashboard storage stubs (added with dashboard query fixes).
+    fn dashboard_job_by_id(_self : FakeWorkflowStorage, _id : String) : Result(Option(Conduit.JobRow), String) do
+      Ok(None)
+    end
+
+    fn dashboard_crons_list(_self : FakeWorkflowStorage) : Result(List(Conduit.CronSchedule), String) do
+      Ok(Nil)
+    end
+
+    fn dashboard_workflows_list(_self : FakeWorkflowStorage, _status : String, _page : Int) : Result(List(Conduit.WorkflowRow), String) do
+      Ok(Nil)
+    end
+
+    fn dead_letter_list_all(_self : FakeWorkflowStorage) : Result(List(Conduit.DeadLetter), String) do
+      Ok(Nil)
+    end
+
+    fn dead_letter_delete_all(_self : FakeWorkflowStorage) : Result(Int, String) do
+      Ok(0)
+    end
+
+    -- workflow_list_all is the older all-workflows method; still required by the interface.
+    fn workflow_list_all(_self : FakeWorkflowStorage) : Result(List(Conduit.WorkflowRow), String) do
+      Ok(Nil)
+    end
+
+    fn workflow_status_get(_self : FakeWorkflowStorage, _id : String) : Result(Option(String), String) do
+      Ok(None)
+    end
+
+    fn mark_snoozed(_self : FakeWorkflowStorage, _id : String, _wake_at : DateTime) : Result((), String) do
+      Ok(())
+    end
   end
 
   -- ─────────────────────────────────────────────────────────────
@@ -2147,6 +2181,152 @@ mod ConduitTest do
         let first = List.head_opt(evts) |> unwrap
         assert_true(String.contains(first.payload, "parallel:0:step"))
       Err(_) -> assert_true(false)
+    end
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Bug-fix regression tests
+  -- ─────────────────────────────────────────────────────────────
+
+  -- Backoff: Fibonacci is now iterative (no stack overflow for large attempts)
+  fn test_backoff_fibonacci_large_attempt_is_capped() do
+    -- fib(40) * 1000 would be enormous; after the cap it should equal 24h.
+    let delay = Conduit.Backoff.delay(Conduit.Backoff.Fibonacci, 40)
+    assert_eq_int(delay, 86400000)  -- 24h cap
+  end
+
+  -- Backoff: Exponential is capped at 24h
+  fn test_backoff_exponential_large_attempt_is_capped() do
+    let delay = Conduit.Backoff.delay(Conduit.Backoff.Exponential, 30)
+    assert_eq_int(delay, 86400000)  -- 24h cap
+  end
+
+  -- Backoff: Fibonacci produces correct sequence for small n
+  fn test_backoff_fibonacci_sequence() do
+    -- fib(1)=1, fib(2)=1, fib(3)=2, fib(4)=3, fib(5)=5
+    assert_eq_int(Conduit.Backoff.delay(Conduit.Backoff.Fibonacci, 1), 1000)
+    assert_eq_int(Conduit.Backoff.delay(Conduit.Backoff.Fibonacci, 2), 1000)
+    assert_eq_int(Conduit.Backoff.delay(Conduit.Backoff.Fibonacci, 3), 2000)
+    assert_eq_int(Conduit.Backoff.delay(Conduit.Backoff.Fibonacci, 4), 3000)
+    assert_eq_int(Conduit.Backoff.delay(Conduit.Backoff.Fibonacci, 5), 5000)
+  end
+
+  -- CronRegistry.all() returns registered entries via Vault.keys
+  fn test_cron_registry_all_returns_registered_entries() do
+    let cron_a = "AllTestA_" ++ uuid_v4()
+    let cron_b = "AllTestB_" ++ uuid_v4()
+    Conduit.CronRegistry.register(cron_a, Conduit.CronConfig.default(), fn _ -> Ok(()) end)
+    Conduit.CronRegistry.register(cron_b, Conduit.CronConfig.default(), fn _ -> Ok(()) end)
+    let all = Conduit.CronRegistry.all()
+    -- Both should appear in the result
+    let found_a = List.any(all, fn e -> e.cron_type == cron_a)
+    let found_b = List.any(all, fn e -> e.cron_type == cron_b)
+    assert_true(found_a)
+    assert_true(found_b)
+  end
+
+  -- WorkflowRunner: pparse_workflow_id now uses Json.parse, not string splitting
+  fn test_workflow_runner_parse_id_with_compact_json() do
+    -- Old string-split code required space after colon: "workflow_id": "..."
+    -- New Json.parse code handles compact JSON without spaces.
+    let vault_k = "wr_parse_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    -- Compact JSON (no space after colon, no space after key)
+    let payload = "{\"workflow_id\":\"" ++ uuid_v4() ++ "\"}"
+    let result  = Conduit.WorkflowRunner.execute(storage, payload)
+    -- Storage returns None for workflow_load → Discard (not empty-id Discard)
+    -- Both result in Err(Discard) but the message should not contain "missing"
+    match result do
+      Err(ConduitError.Discard(msg)) ->
+        -- Confirm we got past the empty-id check (id was parsed correctly)
+        assert_true(not (String.contains(msg, "missing workflow_id")))
+      _ -> assert_true(false)
+    end
+  end
+
+  -- signal_workflow: now delegates to storage.signal_insert
+  fn test_signal_workflow_inserts_signal() do
+    let vault_k = "sig_wf_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let wf_id   = uuid_v4()
+    let result  = Conduit.API.signal_workflow(wf_id, "approval", "{\"approved\":true}", storage)
+    -- Fake signal_insert always returns Ok(1)
+    assert_ok(result)
+    match result do
+      Err(_)  -> assert_true(false)
+      Ok(id)  -> assert_eq_int(id, 1)
+    end
+  end
+
+  -- Dashboard queries: workflows calls dashboard_workflows_list (paginated)
+  fn test_dashboard_queries_workflows_returns_list() do
+    let vault_k = "wf_q_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let result  = Conduit.Dashboard.Queries.workflows(storage, "", 1)
+    assert_eq_int(List.length(result), 0)
+  end
+
+  -- Dashboard queries: crons now calls dashboard_crons_list (all schedules)
+  fn test_dashboard_queries_crons_returns_list() do
+    let vault_k = "crons_q_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let result  = Conduit.Dashboard.Queries.crons(storage)
+    assert_eq_int(List.length(result), 0)
+  end
+
+  -- Dashboard queries: job_by_id uses dedicated storage method
+  fn test_dashboard_queries_job_by_id_not_found() do
+    let vault_k = "job_id_q_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let result  = Conduit.Dashboard.Queries.job_by_id(storage, uuid_v4())
+    assert_none(result)
+  end
+
+  -- Dashboard actions: delete_all_dead_letters uses storage method
+  fn test_dashboard_actions_delete_all_dead_letters() do
+    let vault_k = "dl_all_del_" ++ uuid_v4()
+    let storage = fake_workflow_storage_new(vault_k)
+    let result  = Conduit.Dashboard.Actions.delete_all_dead_letters(storage)
+    assert_ok(result)
+    match result do
+      Err(_) -> assert_true(false)
+      Ok(n)  -> assert_eq_int(n, 0)
+    end
+  end
+
+  -- cron_parser: pmatches works (was broken by Expr(e) pattern-match bug)
+  fn test_cron_parser_matches_works() do
+    -- The old code used `match expr do Expr(e) ->` which is invalid for a record
+    -- type.  This test exercises the matches/2 path end-to-end.
+    let expr_result = Conduit.CronParser.parse("* * * * *")
+    assert_ok(expr_result)
+    match expr_result do
+      Err(_)   -> assert_true(false)
+      Ok(expr) ->
+        let any_dt = DateTime.now()
+        -- "* * * * *" matches every minute — should always be true
+        assert_true(Conduit.CronParser.matches(expr, any_dt))
+    end
+  end
+
+  -- cron_parser: Expr(e) bug would make specific patterns fail
+  fn test_cron_parser_matches_specific_minute() do
+    -- "0 * * * *" matches only minute=0; at minute 30 it should be false.
+    let expr_result = Conduit.CronParser.parse("0 * * * *")
+    assert_ok(expr_result)
+    match expr_result do
+      Err(_)   -> assert_true(false)
+      Ok(expr) ->
+        -- Find a :00 minute datetime and a :30 minute datetime.
+        let next_00 = Conduit.CronParser.next_run("0 * * * *", DateTime.now())
+        match next_00 do
+          Err(_)   -> assert_true(false)
+          Ok(at00) ->
+            assert_true(Conduit.CronParser.matches(expr, at00))
+            -- Advance 30 minutes — should NOT match "0 * * * *"
+            let at30 = DateTime.from_timestamp(DateTime.to_timestamp(at00) + (30 * 60))
+            assert_true(not (Conduit.CronParser.matches(expr, at30)))
+        end
     end
   end
 end

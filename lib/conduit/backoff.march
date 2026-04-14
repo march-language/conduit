@@ -1,22 +1,67 @@
+-- Conduit.Backoff — retry delay strategies.
+--
+-- Each strategy maps (attempt : Int) to a delay in milliseconds.  "attempt" is
+-- the 1-based retry count: attempt=1 is the first retry after the initial
+-- failure, attempt=2 is the second, etc.
+--
+-- Caps
+-- ─────
+-- Exponential and Fibonacci delays are capped at MAX_DELAY_MS (24 hours) to
+-- prevent arithmetic overflow and to keep retry windows reasonable.  If a
+-- Custom function returns a value above the cap, it is not clamped — the
+-- caller is responsible for capping custom delays.
+--
+-- Linear has no cap; it grows at 5 s/attempt and stays manageable for normal
+-- max_attempts values (≤ 25 attempts → ≤ 125 s).
 mod Conduit.Backoff do
+
+  -- 24-hour cap applied to Exponential and Fibonacci delays.
+  let max_delay_ms = 86400000
+
+  doc """
+  Compute the retry delay in milliseconds for the given strategy and attempt.
+
+  Strategies:
+    Linear      — 5 000 * attempt ms (5 s, 10 s, 15 s, …)
+    Exponential — 2^(attempt-1) * 1 000 ms (1 s, 2 s, 4 s, …), capped at 24 h
+    Fibonacci   — fib(attempt) * 1 000 ms (1 s, 1 s, 2 s, 3 s, 5 s, …), capped at 24 h
+    Custom(f)   — f(attempt); the returned value is used as-is (ms)
+  """
   fn delay(strat : Conduit.Backoff, attempt : Int) : Int do
     match strat do
       Linear ->
         5000 * attempt
       Exponential ->
-        int_pow(2, attempt - 1) * 1000
+        pmin_int(int_pow(2, attempt - 1) * 1000, max_delay_ms)
       Fibonacci ->
-        pfib(attempt) * 1000
+        pmin_int(pfib(attempt) * 1000, max_delay_ms)
       Custom(f) ->
         f(attempt)
     end
   end
 
+  -- Iterative Fibonacci to avoid O(2^n) recursive blowup.
+  --
+  -- Returns fib(n):  fib(0) = 0, fib(1) = 1, fib(2) = 1, fib(3) = 2, …
+  -- The recursive definition pfib(n-1) + pfib(n-2) is exponential; this
+  -- iterative version runs in O(n) time.
   pfn pfib(n : Int) : Int do
     if n <= 1 do
       n
     else
-      pfib(n - 1) + pfib(n - 2)
+      pfib_loop(n, 0, 1)
     end
+  end
+
+  pfn pfib_loop(n : Int, a : Int, b : Int) : Int do
+    if n <= 1 do
+      b
+    else
+      pfib_loop(n - 1, b, a + b)
+    end
+  end
+
+  pfn pmin_int(a : Int, b : Int) : Int do
+    if a < b do a else b end
   end
 end

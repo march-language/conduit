@@ -1,5 +1,32 @@
+-- Conduit.Queue — job enqueue logic and the in-process performer registry.
+--
+-- This module has two responsibilities:
+--
+--   1. Enqueue: build a JobRow, apply the unique-constraint guard, and persist
+--      via the storage backend.  Both immediate and delayed variants are here.
+--
+--   2. Registry: maintain a Vault-backed in-process map of job_type → (fn, config)
+--      so that workers can dispatch and look up runtime config without hitting
+--      the DB.
+--
+-- Workers call `dispatch` to execute a job and `lookup_config` to read the
+-- registered JobConfig (used for backoff, timeout, DLQ routing, and callbacks).
 mod Conduit.Queue do
 
+  doc """
+  Enqueue a job for immediate execution and return its id.
+
+  Applies the unique-constraint guard before inserting:
+    • If `config.unique_for` is None → insert unconditionally.
+    • If a conflicting active job exists → apply `config.on_conflict`:
+        Ignore  → return Ok(existing_id).  NOTE: existing_id is the string
+                  "existing", not the real job UUID; treat it as opaque.
+        Raise   → return Err("unique constraint violated …").
+        Replace → continue with insert (the caller is responsible for the old job).
+
+  The new row is inserted with status = "pending", attempt = 0, and
+  run_at = NOW().
+  """
   fn enqueue(storage, job_type : String, payload : String, config : Conduit.JobConfig) : Result(String, String) do
     let id  = uuid_v4()
     let now = DateTime.from_timestamp(DateTime.now())
@@ -37,6 +64,14 @@ mod Conduit.Queue do
     end
   end
 
+  doc """
+  Enqueue a job to run after `delay` milliseconds and return its id.
+
+  Identical to `enqueue` except run_at is set to NOW() + delay.  The unique
+  constraint guard is applied using the same key that `enqueue` would compute, so
+  a delayed job and an immediate job for the same type+payload are considered the
+  same unique job when `unique_for` is set.
+  """
   fn enqueue_in(storage, job_type : String, payload : String, delay : Int, config : Conduit.JobConfig) : Result(String, String) do
     let id     = uuid_v4()
     let now    = DateTime.from_timestamp(DateTime.now())
@@ -75,12 +110,37 @@ mod Conduit.Queue do
     end
   end
 
+  doc """
+  Register a performer and its config in the in-process registry.
+
+  Must be called at application startup (before workers start) for each job type
+  that this process will execute.  The registry is Vault-backed and is local to
+  the current OS process; every node in a cluster must register all performers it
+  needs to handle.
+
+  Calling `register_performer` a second time with the same `job_type` silently
+  overwrites the previous entry — useful for testing but avoid in production.
+  """
   fn register_performer(job_type : String, performer : String -> Result((), Conduit.ConduitError), config : Conduit.JobConfig) : () do
     let tbl = registry_key()
     Vault.set(tbl, "fn:" ++ job_type, performer)
     Vault.set(tbl, "cfg:" ++ job_type, config)
   end
 
+  doc """
+  Invoke the registered performer for `job_type` with `payload`.
+
+  Returns the performer's result directly:
+    Ok(())                       — job succeeded.
+    Err(ConduitError.Retry(msg)) — transient failure; worker will reschedule.
+    Err(ConduitError.Discard(msg))— permanent failure; worker will dead-letter.
+    Err(ConduitError.Snooze(ms)) — postpone; worker will snooze the job.
+    Err(ConduitError.WorkerError(msg)) — infrastructure error; treated as Retry.
+
+  If no performer is registered for `job_type`, returns
+  `Err(ConduitError.Discard("No performer registered …"))` so the worker
+  dead-letters the job instead of retrying forever.
+  """
   fn dispatch(job_type : String, payload : String) : Result((), Conduit.ConduitError) do
     Logger.debug("queue: dispatch job_type=" ++ job_type)
     match Vault.get(registry_key(), "fn:" ++ job_type) do
@@ -93,10 +153,23 @@ mod Conduit.Queue do
     end
   end
 
+  doc """
+  Return the registered JobConfig for `job_type`, or None if not registered.
+
+  Workers call this after claiming a job to get the runtime config (backoff,
+  timeout, DLQ, callbacks) without re-querying the DB.  If the job type is not
+  registered, the worker falls back to `JobConfig.default()`.
+  """
   fn lookup_config(job_type : String) : Option(Conduit.JobConfig) do
     Vault.get(registry_key(), "cfg:" ++ job_type)
   end
 
+  -- Return the serialised name for a Backoff strategy.
+  --
+  -- This name is stored on the JobRow so dashboard readers know which strategy
+  -- was in use.  Custom functions cannot be serialised; they are stored as
+  -- "custom" and will fall back to Exponential if the row is ever retried
+  -- on a node that did not register the custom function.
   pfn pbackoff_name(b : Conduit.Backoff) : String do
     match b do
       Linear      -> "linear"
@@ -106,6 +179,10 @@ mod Conduit.Queue do
     end
   end
 
+  -- Compute the unique fingerprint for a job, or None if uniqueness is not configured.
+  --
+  -- Delegates to `Conduit.Unique.fingerprint` when `config.unique_for` is set.
+  -- The resulting SHA-256 hex string is stored in the job row's `unique_key` column.
   pfn punique_key(job_type : String, queue : String, payload : String, config : Conduit.JobConfig) : Option(String) do
     match config.unique_for do
       None     -> None
@@ -113,6 +190,16 @@ mod Conduit.Queue do
     end
   end
 
+  -- Check whether a unique constraint would be violated and apply on_conflict policy.
+  --
+  -- Returns:
+  --   Ok(None)         — no conflict; proceed with insert.
+  --   Ok(Some(id))     — conflict exists and policy is Ignore; return this id to
+  --                      the caller.  (id is the sentinel "existing", not a real UUID.)
+  --   Err(msg)         — conflict exists and policy is Raise, or storage error.
+  --
+  -- The Replace policy returns Ok(None) to proceed with the insert; cancelling
+  -- the old job is delegated to the storage layer's unique index conflict handler.
   pfn punique_guard(storage, unique_key : Option(String), config : Conduit.JobConfig) : Result(Option(String), String) do
     match unique_key do
       None     -> Ok(None)
@@ -130,6 +217,11 @@ mod Conduit.Queue do
     end
   end
 
+  -- Return (or create) the Vault table used as the performer registry.
+  --
+  -- `Vault.new` is idempotent: calling it with the same name always returns a
+  -- handle to the same table.  The registry is process-global; all workers in
+  -- this process share it.
   pfn registry_key() do
     Vault.new("conduit_performer_registry")
   end

@@ -1,4 +1,10 @@
+-- Conduit.Dashboard.Actions — write operations invoked by the dashboard UI.
+--
+-- All actions delegate to the Conduit public API or directly to storage.
+-- The router calls these after verifying auth; they return Result so the router
+-- can render an error page on failure.
 mod Conduit.Dashboard.Actions do
+
   doc "Retry a job: reset to pending with attempt = 0."
   fn retry_job(storage, job_id : String) : Result((), String) do
     Conduit.Storage.job_retry(storage, job_id)
@@ -18,6 +24,10 @@ mod Conduit.Dashboard.Actions do
   Retry a dead letter: re-enqueue the original job with a fresh attempt count
   and delete the dead letter entry.
 
+  Uses the original job's queue from the dead letter row.  Re-enqueues using
+  the performer's registered config if available (for correct backoff, DLQ, etc.);
+  falls back to safe defaults for jobs whose performer is no longer registered.
+
   Returns the new job id on success.
   """
   fn retry_dead_letter(storage, dl_id : String) : Result(String, String) do
@@ -25,20 +35,22 @@ mod Conduit.Dashboard.Actions do
       Err(e)     -> Err(e)
       Ok(None)   -> Err("dead letter not found: " ++ dl_id)
       Ok(Some(dl)) ->
-        let job_config = {
-          queue             = dl.queue,
-          max_attempts      = 3,
-          timeout           = 30000,
-          backoff           = Conduit.Backoff.Exponential,
-          dead_letter_queue = None,
-          unique_for        = None,
-          on_conflict       = Conduit.UniqueConflict.Ignore,
-          rate_limit        = None,
-          on_dead_letter    = None,
-          priority          = 0,
-          tags              = Nil,
-          discard_after     = None
-        }
+        let base_config = Conduit.Queue.lookup_config(dl.job_type)
+          |> Option.unwrap_or({
+              queue             = dl.queue,
+              max_attempts      = 3,
+              timeout           = 30000,
+              backoff           = Conduit.Backoff.Exponential,
+              dead_letter_queue = None,
+              unique_for        = None,
+              on_conflict       = Conduit.UniqueConflict.Ignore,
+              rate_limit        = None,
+              on_dead_letter    = None,
+              priority          = 0,
+              tags              = Nil,
+              discard_after     = None
+            })
+        let job_config = { ..base_config, queue = dl.queue }
         match Conduit.Queue.enqueue(storage, dl.job_type, dl.payload, job_config) do
           Err(e)       -> Err(e)
           Ok(new_id) ->
@@ -60,17 +72,29 @@ mod Conduit.Dashboard.Actions do
   doc """
   Retry all dead letters in the table.
 
-  Iterates through each and calls retry_dead_letter/2. Returns the list of
-  newly enqueued job ids. Errors per entry are logged and skipped.
+  Loads all dead letter rows via `dead_letter_list_all` (which fetches every
+  page, not just page 1) and re-enqueues each one.  Returns the list of newly
+  enqueued job ids.  Errors per entry are logged and skipped so one bad row
+  does not abort the rest.
   """
   fn retry_all_dead_letters(storage) : List(String) do
-    let dls = match Conduit.Storage.dead_letter_list(storage, 1) do
+    let dls = match Conduit.Storage.dead_letter_list_all(storage) do
       Ok(rows) -> rows
       Err(e)   ->
         Logger.warn("conduit_dashboard: retry_all: load failed: " ++ e)
         Nil
     end
     List.filter_map(dls, fn dl -> pretry_one_dl(storage, dl))
+  end
+
+  doc """
+  Delete all dead letters in the table.
+
+  Returns the count of deleted rows on success.  Errors are propagated to the
+  caller so the router can render an appropriate error page.
+  """
+  fn delete_all_dead_letters(storage) : Result(Int, String) do
+    Conduit.Storage.dead_letter_delete_all(storage)
   end
 
   pfn pretry_one_dl(storage, dl : Conduit.DeadLetter) : Option(String) do
@@ -88,20 +112,9 @@ mod Conduit.Dashboard.Actions do
       Err(e)       -> Err(e)
       Ok(None)     -> Err("cron schedule not found: " ++ cron_id)
       Ok(Some(sched)) ->
-        let job_config = {
-          queue             = sched.queue,
-          max_attempts      = 3,
-          timeout           = 30000,
-          backoff           = Conduit.Backoff.Exponential,
-          dead_letter_queue = None,
-          unique_for        = None,
-          on_conflict       = Conduit.UniqueConflict.Ignore,
-          rate_limit        = None,
-          on_dead_letter    = None,
-          priority          = 0,
-          tags              = Nil,
-          discard_after     = None
-        }
+        let base_config = Conduit.Queue.lookup_config(sched.job_type)
+          |> Option.unwrap_or(Conduit.JobConfig.default())
+        let job_config = { ..base_config, queue = sched.queue }
         Conduit.Queue.enqueue(storage, sched.job_type, sched.payload, job_config)
     end
   end
