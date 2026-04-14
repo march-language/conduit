@@ -101,6 +101,13 @@ mod Conduit.Worker do
           heartbeat_loop(storage, job.id, heartbeat_interval_ms, hb_flags))
         Logger.debug("conduit: execute: heartbeat task spawned")
 
+        -- Notify handlers that execution is beginning.
+        Conduit.Telemetry.dispatch(
+          Conduit.Telemetry.JobStarted(job.id, job.job_type, worker_id, next_attempt))
+
+        -- Capture wall-clock start so handle_result can compute duration_ms.
+        let started_at_ms = DateTime.now()
+
         -- Rate limit check: if configured, try to acquire a token.
         let rate_ok = match config.rate_limit do
           None -> Ok(true)
@@ -114,7 +121,7 @@ mod Conduit.Worker do
             Logger.warn("conduit: rate limit check failed for " ++ job.id ++ ": " ++ e)
             let result = Conduit.Queue.dispatch(job.job_type, job.payload)
             Vault.set(hb_flags, job.id, true)
-            handle_result(storage, job, next_attempt, config, result)
+            handle_result(storage, job, next_attempt, config, result, started_at_ms)
           Ok(b) ->
             if b do
               -- Rate check passed: dispatch the job.
@@ -123,7 +130,7 @@ mod Conduit.Worker do
               Logger.debug("conduit: execute: dispatch complete")
               -- Signal the heartbeat to stop on its next tick.
               Vault.set(hb_flags, job.id, true)
-              handle_result(storage, job, next_attempt, config, result)
+              handle_result(storage, job, next_attempt, config, result, started_at_ms)
             else
               -- Rate-limited: snooze the job.
               let snooze_dur = match config.rate_limit do
@@ -131,27 +138,33 @@ mod Conduit.Worker do
                 Some(rl) -> Conduit.RateLimiter.snooze_duration(rl.max_per_second)
               end
               Vault.set(hb_flags, job.id, true)
-              handle_result(storage, job, next_attempt, config, Err(Conduit.ConduitError.Snooze(snooze_dur)))
+              handle_result(storage, job, next_attempt, config, Err(Conduit.ConduitError.Snooze(snooze_dur)), started_at_ms)
             end
         end
     end
   end
 
   doc """
-  Route the performer result to the correct next state.
+  Route the performer result to the correct next state and emit telemetry.
 
   Result dispatch table:
-    Ok(())                        → mark_completed + release unique key
-    Err(ConduitError.Retry(msg))  → phandle_retry (reschedule or dead-letter)
+    Ok(())                        → mark_completed + emit JobCompleted + release unique key
+    Err(ConduitError.Retry(msg))  → phandle_retry (emit JobFailed; reschedule or dead-letter)
     Err(ConduitError.WorkerError) → logged as error, then treated as Retry
-    Err(ConduitError.Discard(msg))→ phandle_discard (dead-letter if DLQ configured)
-    Err(ConduitError.Snooze(ms))  → mark_snoozed with run_at = now + ms
+    Err(ConduitError.Discard(msg))→ phandle_discard (emit JobDiscarded; DLQ if configured)
+    Err(ConduitError.Snooze(ms))  → mark_snoozed + emit JobSnoozed
+
+  `started_at_ms` is the epoch-ms captured just before the performer was
+  dispatched; it is used to compute `duration_ms` for the JobCompleted event.
   """
-  pfn handle_result(storage, job : Conduit.JobRow, attempt : Int, config : Conduit.JobConfig, result : Result((), Conduit.ConduitError)) : () do
+  pfn handle_result(storage, job : Conduit.JobRow, attempt : Int, config : Conduit.JobConfig, result : Result((), Conduit.ConduitError), started_at_ms : Int) : () do
     match result do
       Ok(_) ->
         match Conduit.Storage.mark_completed(storage, job.id) do
           Ok(_)  ->
+            let duration_ms = DateTime.now() - started_at_ms
+            Conduit.Telemetry.dispatch(
+              Conduit.Telemetry.JobCompleted(job.id, duration_ms))
             -- Release unique key on successful completion.
             prelease_unique(storage, job)
           Err(e)  -> Logger.error("conduit: mark_completed failed for " ++ job.id ++ ": " ++ e)
@@ -171,7 +184,9 @@ mod Conduit.Worker do
       Err(Conduit.ConduitError.Snooze(dur)) ->
         let wake_at = DateTime.add_ms(DateTime.from_timestamp(DateTime.now()), dur)
         match Conduit.Storage.mark_snoozed(storage, job.id, wake_at) do
-          Ok(_)  -> ()
+          Ok(_)  ->
+            Conduit.Telemetry.dispatch(
+              Conduit.Telemetry.JobSnoozed(job.id, wake_at))
           Err(e)  -> Logger.error("conduit: mark_snoozed error for " ++ job.id ++ ": " ++ e)
         end
     end
@@ -184,8 +199,10 @@ mod Conduit.Worker do
   -- a distinct run_at, avoiding thundering-herd on the queue.
   pfn phandle_retry(storage, job : Conduit.JobRow, attempt : Int, config : Conduit.JobConfig, error_msg : String) : () do
     if attempt >= config.max_attempts do
-      -- Exhausted — move to dead letter.
+      -- Exhausted — emit failure event (no more retries) then dead-letter.
       Logger.info("conduit: job " ++ job.id ++ " exhausted " ++ int_to_string(attempt) ++ " attempts, dead-lettering")
+      Conduit.Telemetry.dispatch(
+        Conduit.Telemetry.JobFailed(job.id, error_msg, attempt, false))
       phandle_dead(storage, job, config, error_msg)
     else
       -- Compute run_at: base backoff delay + random jitter.
@@ -198,6 +215,8 @@ mod Conduit.Worker do
                           jitter_ms
                         )
       Logger.debug("conduit: scheduling retry for " ++ job.id ++ " at attempt " ++ int_to_string(attempt + 1))
+      Conduit.Telemetry.dispatch(
+        Conduit.Telemetry.JobFailed(job.id, error_msg, attempt, true))
       match Conduit.Storage.schedule_retry(storage, job.id, error_msg, run_at) do
         Ok(_)  -> ()
         Err(e)  -> Logger.error("conduit: schedule_retry error for " ++ job.id ++ ": " ++ e)
@@ -210,6 +229,8 @@ mod Conduit.Worker do
   -- If dead_letter_queue is configured, route to the dead-letter table and fire
   -- the on_dead_letter callback.  Otherwise, discard the job in-place (mark dead).
   pfn phandle_discard(storage, job : Conduit.JobRow, config : Conduit.JobConfig, reason : String) : () do
+    Conduit.Telemetry.dispatch(
+      Conduit.Telemetry.JobDiscarded(job.id, reason))
     match config.dead_letter_queue do
       None ->
         -- No DLQ configured: just mark the job dead in-place.
