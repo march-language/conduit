@@ -1,7 +1,32 @@
+-- Conduit.Worker — task-based worker pool with heartbeat and stale-rescue.
+--
+-- Each worker runs as an independent March task in an infinite loop:
+--
+--   1. fetch_next  — claim one job from the queue (SELECT … FOR UPDATE SKIP LOCKED).
+--   2. mark_running — atomically record the worker_id and increment attempt.
+--   3. heartbeat task — spawned in parallel; updates heartbeat_at periodically so
+--      the stale-rescue loop can detect crashed workers.
+--   4. rate-limit check — if configured, try to acquire a token; snooze on failure.
+--   5. dispatch — call the registered performer function.
+--   6. handle_result — transition the job to completed | retry | discard | dlq | snooze.
+--
+-- The heartbeat task is stopped via a Vault flag (not task_await_unwrap, which
+-- would block forever on the infinite heartbeat loop).
+--
+-- `start_workers/4` also spawns one stale-rescue loop per queue group that
+-- reclaims jobs abandoned by workers that died mid-execution.
 mod Conduit.Worker do
+
   doc """
   Start `count` worker tasks for the given queue, plus one stale-rescue task.
-  Returns all task handles.
+
+  Each worker runs an infinite poll loop:  fetch → mark_running → heartbeat →
+  dispatch → handle_result → repeat.  The stale-rescue task fires every
+  `poll_interval_ms * 10` ms, finding jobs whose heartbeat has expired and
+  resetting them to pending for re-execution.
+
+  Returns all task handles.  In production, wrap these in a supervisor for
+  auto-restart on unexpected panics.
   """
   fn start_workers(storage, queue : String, count : Int, poll_interval_ms : Int) : List(Task) do
     Logger.debug("conduit: start_workers queue=" ++ queue ++ " count=" ++ int_to_string(count))
@@ -13,6 +38,15 @@ mod Conduit.Worker do
     List.append(workers, Cons(rescuer, Nil))
   end
 
+  -- The inner poll loop for a single worker task.
+  --
+  -- On storage error: log and sleep one poll interval before retrying — avoids
+  -- hammering a degraded DB with tight loops.
+  --
+  -- On empty queue: sleep one poll interval, then loop.
+  --
+  -- On job available: call execute/2, then immediately loop (no extra sleep)
+  -- so the next job is picked up as fast as possible.
   pfn worker_loop(storage, queue : String, poll_interval_ms : Int) : () do
     match Conduit.Storage.fetch_next(storage, queue) do
       Err(e) ->
@@ -28,6 +62,15 @@ mod Conduit.Worker do
     end
   end
 
+  -- Execute a single job.
+  --
+  -- Steps:
+  --   1. Atomically claim the job via mark_running (skips if already claimed).
+  --   2. Look up the registered JobConfig (backoff, timeout, DLQ, callbacks).
+  --   3. Spawn a heartbeat task using a Vault stop-flag for clean termination.
+  --   4. Perform optional rate-limit check; snooze on rejection.
+  --   5. Dispatch the registered performer.
+  --   6. Signal the heartbeat to stop, then route the result.
   pfn execute(storage, job : Conduit.JobRow) : () do
     Logger.debug("conduit: execute job.id=" ++ job.id ++ " job_type=" ++ job.job_type)
     let worker_id = uuid_v4()
@@ -48,8 +91,14 @@ mod Conduit.Worker do
           |> pmax_int(5000)
         Logger.debug("conduit: execute: heartbeat_interval=" ++ int_to_string(heartbeat_interval_ms))
 
+        -- Create a per-job stop flag so we can terminate the heartbeat task
+        -- without calling task_await_unwrap (which would block forever on an
+        -- infinite loop).
+        let hb_flags = Vault.new("conduit_hb_flags")
+        Vault.set(hb_flags, job.id, false)
+
         let hb_task = task_spawn(fn _ ->
-          heartbeat_loop(storage, job.id, heartbeat_interval_ms))
+          heartbeat_loop(storage, job.id, heartbeat_interval_ms, hb_flags))
         Logger.debug("conduit: execute: heartbeat task spawned")
 
         -- Rate limit check: if configured, try to acquire a token.
@@ -64,7 +113,7 @@ mod Conduit.Worker do
             -- Storage error during rate limit check — proceed anyway to avoid blocking.
             Logger.warn("conduit: rate limit check failed for " ++ job.id ++ ": " ++ e)
             let result = Conduit.Queue.dispatch(job.job_type, job.payload)
-            kill(task_await_unwrap(hb_task))
+            Vault.set(hb_flags, job.id, true)
             handle_result(storage, job, next_attempt, config, result)
           Ok(b) ->
             if b do
@@ -72,8 +121,8 @@ mod Conduit.Worker do
               Logger.debug("conduit: execute: dispatching job_type=" ++ job.job_type)
               let result = Conduit.Queue.dispatch(job.job_type, job.payload)
               Logger.debug("conduit: execute: dispatch complete")
-              -- Cancel the heartbeat task now that the job has finished.
-              kill(task_await_unwrap(hb_task))
+              -- Signal the heartbeat to stop on its next tick.
+              Vault.set(hb_flags, job.id, true)
               handle_result(storage, job, next_attempt, config, result)
             else
               -- Rate-limited: snooze the job.
@@ -81,14 +130,24 @@ mod Conduit.Worker do
                 None     -> 1000
                 Some(rl) -> Conduit.RateLimiter.snooze_duration(rl.max_per_second)
               end
-              kill(task_await_unwrap(hb_task))
-              handle_result(storage, job, next_attempt, config, Err(ConduitError.Snooze(snooze_dur)))
+              Vault.set(hb_flags, job.id, true)
+              handle_result(storage, job, next_attempt, config, Err(Conduit.ConduitError.Snooze(snooze_dur)))
             end
         end
     end
   end
 
-  pfn handle_result(storage, job : Conduit.JobRow, attempt : Int, config : Conduit.JobConfig, result : Result((), ConduitError)) : () do
+  doc """
+  Route the performer result to the correct next state.
+
+  Result dispatch table:
+    Ok(())                        → mark_completed + release unique key
+    Err(ConduitError.Retry(msg))  → phandle_retry (reschedule or dead-letter)
+    Err(ConduitError.WorkerError) → logged as error, then treated as Retry
+    Err(ConduitError.Discard(msg))→ phandle_discard (dead-letter if DLQ configured)
+    Err(ConduitError.Snooze(ms))  → mark_snoozed with run_at = now + ms
+  """
+  pfn handle_result(storage, job : Conduit.JobRow, attempt : Int, config : Conduit.JobConfig, result : Result((), Conduit.ConduitError)) : () do
     match result do
       Ok(_) ->
         match Conduit.Storage.mark_completed(storage, job.id) do
@@ -98,18 +157,18 @@ mod Conduit.Worker do
           Err(e)  -> Logger.error("conduit: mark_completed failed for " ++ job.id ++ ": " ++ e)
         end
 
-      Err(ConduitError.Retry(msg)) ->
+      Err(Conduit.ConduitError.Retry(msg)) ->
         phandle_retry(storage, job, attempt, config, msg)
 
-      Err(ConduitError.WorkerError(msg)) ->
+      Err(Conduit.ConduitError.WorkerError(msg)) ->
         Logger.error("conduit: worker error on " ++ job.id ++ ": " ++ msg)
         phandle_retry(storage, job, attempt, config, "worker error: " ++ msg)
 
-      Err(ConduitError.Discard(msg)) ->
+      Err(Conduit.ConduitError.Discard(msg)) ->
         Logger.info("conduit: discarding " ++ job.id ++ " (" ++ job.job_type ++ "): " ++ msg)
         phandle_discard(storage, job, config, msg)
 
-      Err(ConduitError.Snooze(dur)) ->
+      Err(Conduit.ConduitError.Snooze(dur)) ->
         let wake_at = DateTime.add_ms(DateTime.from_timestamp(DateTime.now()), dur)
         match Conduit.Storage.mark_snoozed(storage, job.id, wake_at) do
           Ok(_)  -> ()
@@ -118,16 +177,22 @@ mod Conduit.Worker do
     end
   end
 
-  -- Retry path: check if we have attempts left; if so reschedule, else dead-letter.
+  -- Retry path: check if attempts remain; if so reschedule, else dead-letter.
+  --
+  -- Backoff delay = base strategy delay + uniform jitter in [0, 1000] ms.
+  -- Jitter uses the global RNG (Random.int) to give each concurrent retrying job
+  -- a distinct run_at, avoiding thundering-herd on the queue.
   pfn phandle_retry(storage, job : Conduit.JobRow, attempt : Int, config : Conduit.JobConfig, error_msg : String) : () do
     if attempt >= config.max_attempts do
       -- Exhausted — move to dead letter.
       Logger.info("conduit: job " ++ job.id ++ " exhausted " ++ int_to_string(attempt) ++ " attempts, dead-lettering")
       phandle_dead(storage, job, config, error_msg)
     else
-      -- Compute run_at: base backoff delay + jitter.
+      -- Compute run_at: base backoff delay + random jitter.
+      -- Random.int uses the global PRNG (not time-seeded), so concurrent retries
+      -- get independent jitter values even if they run in the same millisecond.
       let base_delay  = Conduit.Backoff.delay(config.backoff, attempt)
-      let (jitter_ms, _) = Random.range(Random.seed(DateTime.now()), 0, 1000)
+      let jitter_ms   = Random.int(0, 1000)
       let run_at      = DateTime.add_ms(
                           DateTime.add_ms(DateTime.from_timestamp(DateTime.now()), base_delay),
                           jitter_ms
@@ -141,6 +206,9 @@ mod Conduit.Worker do
   end
 
   -- Discard path: no retries, but may still go to DLQ.
+  --
+  -- If dead_letter_queue is configured, route to the dead-letter table and fire
+  -- the on_dead_letter callback.  Otherwise, discard the job in-place (mark dead).
   pfn phandle_discard(storage, job : Conduit.JobRow, config : Conduit.JobConfig, reason : String) : () do
     match config.dead_letter_queue do
       None ->
@@ -156,6 +224,9 @@ mod Conduit.Worker do
   end
 
   -- Dead-letter path: insert into conduit_dead_letters, fire callback, release unique key.
+  --
+  -- The unique constraint is released so the same job type + payload can be
+  -- re-enqueued (e.g. after the underlying bug is fixed).
   pfn phandle_dead(storage, job : Conduit.JobRow, config : Conduit.JobConfig, error_msg : String) : () do
     let dl = Conduit.DeadLetter.from_job(job, error_msg)
     match Conduit.Storage.move_to_dead_letter(storage, dl) do
@@ -171,18 +242,34 @@ mod Conduit.Worker do
     end
   end
 
-  -- Heartbeat task: updates the DB every `interval_ms`, keeps running until killed.
-  pfn heartbeat_loop(storage, job_id : String, interval_ms : Int) : () do
+  -- Heartbeat task: updates the DB every `interval_ms`, stops when the stop flag is set.
+  --
+  -- The stop flag lives in the shared `hb_flags` Vault table under the job's id.
+  -- After job execution (success or failure), the worker sets the flag to `true`.
+  -- The next heartbeat tick checks the flag and exits cleanly — no task_await_unwrap
+  -- needed, which would block forever on an infinite-loop task.
+  pfn heartbeat_loop(storage, job_id : String, interval_ms : Int, hb_flags) : () do
     psleep_ms(interval_ms)
-    match Conduit.Storage.heartbeat(storage, job_id) do
-      Ok(_)  -> ()
-      Err(e)  -> Logger.warn("conduit: heartbeat error for " ++ job_id ++ ": " ++ e)
+    match Vault.get(hb_flags, job_id) do
+      Some(true) ->
+        -- Clean up the flag entry and exit.
+        Vault.drop(hb_flags, job_id)
+      _ ->
+        match Conduit.Storage.heartbeat(storage, job_id) do
+          Ok(_)  -> ()
+          Err(e)  -> Logger.warn("conduit: heartbeat error for " ++ job_id ++ ": " ++ e)
+        end
+        heartbeat_loop(storage, job_id, interval_ms, hb_flags)
     end
-    heartbeat_loop(storage, job_id, interval_ms)
   end
 
   -- Stale-rescue loop: periodically finds crashed workers' jobs and requeues them.
-  -- Runs every `interval_ms`. Timeout: 2× the default job timeout (60s default).
+  --
+  -- A job is considered stale when heartbeat_at has not been updated for more than
+  -- the stale timeout (default 60s).  The rescue loop resets stale jobs to "pending"
+  -- so they can be re-claimed by healthy workers.
+  --
+  -- Runs every `interval_ms` (typically 10× the worker poll interval).
   pfn rescue_loop(storage, interval_ms : Int) : () do
     let _ = psleep_ms(interval_ms)
     let _ = match Conduit.Storage.rescue_stale(storage, 60) do
@@ -195,6 +282,11 @@ mod Conduit.Worker do
     rescue_loop(storage, interval_ms)
   end
 
+  -- Cooperative sleep: yields the task scheduler `n * 10` times to sleep ~ms.
+  --
+  -- This is not a wall-clock sleep; it yields for approximately `ms` worth of
+  -- scheduler ticks.  Use for poll delays and heartbeat intervals, not for
+  -- precision timing.
   pfn psleep_ms(ms : Int) : () do
     psleep_loop(int_div(ms, 10))
   end
@@ -209,6 +301,9 @@ mod Conduit.Worker do
   end
 
   -- Release the unique constraint for a job, if it has one.
+  --
+  -- Called on success and on dead-letter so that the same job type + payload can
+  -- be re-enqueued without triggering the uniqueness guard.
   pfn prelease_unique(storage, job : Conduit.JobRow) : () do
     match job.unique_key do
       None    -> ()

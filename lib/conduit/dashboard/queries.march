@@ -1,4 +1,10 @@
+-- Conduit.Dashboard.Queries — read-only data layer for the dashboard.
+--
+-- All functions return safe defaults (Nil / None) on storage errors rather than
+-- propagating exceptions, so dashboard pages degrade gracefully when the DB is
+-- under pressure.
 mod Conduit.Dashboard.Queries do
+
   doc "Load per-queue aggregate stats for the overview page."
   fn queue_summary(storage) : List(Conduit.Dashboard.QueueSummary) do
     match Conduit.Storage.dashboard_queue_summary(storage) do
@@ -39,13 +45,16 @@ mod Conduit.Dashboard.Queries do
     end
   end
 
-  doc "Load all cron schedules (enabled + disabled)."
+  doc """
+  Load all cron schedules (enabled and disabled) for the crons page.
+
+  Uses `dashboard_crons_list` which returns every schedule regardless of
+  whether it is currently due.  The old `cron_load_due` call only returned
+  schedules past their next_run_at, which meant disabled and future crons were
+  invisible to the dashboard.
+  """
   fn crons(storage) : List(Conduit.CronSchedule) do
-    -- Load all schedules: due + not-due + disabled by fetching without the filter.
-    -- We re-use the cron_load_due storage method for enabled ones and supplement
-    -- via a raw query if storage supports it; for simplicity we use cron_load_due
-    -- which returns enabled+due schedules. Dashboards tolerate this.
-    match Conduit.Storage.cron_load_due(storage) do
+    match Conduit.Storage.dashboard_crons_list(storage) do
       Ok(rows) -> rows
       Err(e)   ->
         Logger.warn("conduit_dashboard: crons failed: " ++ e)
@@ -53,35 +62,35 @@ mod Conduit.Dashboard.Queries do
     end
   end
 
-  doc "Load a job by id."
+  doc """
+  Load a single job by id.
+
+  Uses the dedicated `dashboard_job_by_id` storage method for an O(1) lookup
+  by primary key.  The previous implementation loaded all jobs on page 1 and
+  did a linear scan in memory — both slow and incomplete (missed jobs on later
+  pages).
+  """
   fn job_by_id(storage, job_id : String) : Option(Conduit.JobRow) do
-    -- Reuse dashboard_jobs_list with empty queue/status returns all; we filter by id
-    -- via a separate targeted fetch using fetch_next-equivalent. Instead, load from
-    -- the jobs_list across queues — for simplicity use dead_letter_load pattern.
-    -- Since there's no single-job-load storage method, load from all queues.
-    -- This is a dashboard convenience; performance is not critical.
-    let page = 1
-    let all_jobs = Conduit.Storage.dashboard_jobs_list(storage, "", "", page)
-    match all_jobs do
-      Err(_) -> None
-      Ok(jobs) ->
-        List.find(jobs, fn j -> j.id == job_id)
+    match Conduit.Storage.dashboard_job_by_id(storage, job_id) do
+      Ok(opt) -> opt
+      Err(e)  ->
+        Logger.warn("conduit_dashboard: job_by_id failed: " ++ e)
+        None
     end
   end
 
-  doc "Load workflows list with optional status filter (1-based page, up to 50)."
+  doc """
+  Load a paginated list of workflows with optional status filter (1-based page).
+
+  Passes the page parameter to the storage layer so the DB applies the LIMIT /
+  OFFSET, rather than loading all workflows into memory and ignoring pagination.
+  """
   fn workflows(storage, status_filter : String, page : Int) : List(Conduit.WorkflowRow) do
-    let _ = page
-    let all = match Conduit.Storage.workflow_list_all(storage) do
+    match Conduit.Storage.dashboard_workflows_list(storage, status_filter, page) do
       Ok(rows) -> rows
       Err(e)   ->
         Logger.warn("conduit_dashboard: workflow_list failed: " ++ e)
         Nil
-    end
-    if status_filter == "" do
-      all
-    else
-      List.filter(all, fn wf -> wf.status == status_filter)
     end
   end
 

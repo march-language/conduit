@@ -246,6 +246,13 @@ mod Conduit.Dashboard.Router do
             else
               conn |> HttpServer.text(405, "Method Not Allowed")
             end
+          Cons("delete-all", Nil) ->
+            if method == :post do
+              let _ = Conduit.Dashboard.Actions.delete_all_dead_letters(storage)
+              conn |> HttpServer.redirect(base_path ++ "/dead-letters")
+            else
+              conn |> HttpServer.text(405, "Method Not Allowed")
+            end
           Cons(dl_id, Cons("retry", Nil)) ->
             if method == :post do
               match Conduit.Dashboard.Actions.retry_dead_letter(storage, dl_id) do
@@ -358,13 +365,27 @@ mod Conduit.Dashboard.Router do
     "[" ++ String.join(items, ",") ++ "]"
   end
 
+  -- Build one JSON object for a queue summary row.
+  --
+  -- Queue names are user-supplied strings and may contain double quotes or
+  -- backslashes.  Use pjson_escape (not Html.escape — HTML entities are not
+  -- valid JSON escapes and would corrupt the output).
   pfn psummary_item_to_json(s : Conduit.Dashboard.QueueSummary) : String do
-    "{\"queue\":\"" ++ Html.escape(s.queue) ++ "\""
+    "{\"queue\":\"" ++ pjson_escape(s.queue) ++ "\""
     ++ ",\"pending\":"    ++ int_to_string(s.pending)
     ++ ",\"running\":"    ++ int_to_string(s.running)
     ++ ",\"failed\":"     ++ int_to_string(s.failed)
     ++ ",\"dead\":"       ++ int_to_string(s.dead)
     ++ ",\"throughput\":" ++ int_to_string(s.throughput)
     ++ "}"
+  end
+
+  -- Escape a string for embedding inside a JSON double-quoted string value.
+  pfn pjson_escape(s : String) : String do
+    s
+    |> String.replace("\\", "\\\\")
+    |> String.replace("\"", "\\\"")
+    |> String.replace("\n", "\\n")
+    |> String.replace("\r", "\\r")
   end
 end

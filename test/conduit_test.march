@@ -1,12 +1,5 @@
+-- Stub: all real tests live in test/test_conduit.march.
+-- This file exists only so that the test runner finds at least one module
+-- in the test/ directory; it contains no test functions.
 mod ConduitTest do
-
-  fn test_placeholder() : Bool do
-    true
-  end
-
-  fn main() do
-    let result = test_placeholder()
-    if result then println("All tests passed.") else println("Tests failed.")
-  end
-
 end

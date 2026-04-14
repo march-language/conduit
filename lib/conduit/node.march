@@ -1,6 +1,40 @@
+-- Conduit.Node — multi-node cluster registration and leader election.
+--
+-- Each Conduit process that calls `Conduit.Node.start` registers itself in the
+-- `conduit_workers` DB table and maintains its registration via three background
+-- tasks:
+--
+--   heartbeat task  — updates `last_seen_at` every `heartbeat_interval_ms`.
+--   stale task      — reclaims jobs from dead workers and purges stale node rows.
+--   leader task     — tries to acquire a Postgres advisory lock (id 8473625);
+--                     the holder is the cluster leader.
+--
+-- Leader state is stored in Vault (in-process) so `is_leader()` and
+-- `leader_node_id()` are O(1) reads with no DB round-trip.
+--
+-- Hostname detection
+-- ─────────────────
+-- `pbuild_node_info` reads the `HOSTNAME` environment variable (set automatically
+-- in most container environments).  If unset, it falls back to "localhost".
+-- Override via `CONDUIT_HOSTNAME` for bare-metal deployments that use a
+-- non-standard env variable.
 mod Conduit.Node do
+
+  -- Postgres advisory lock id used for leader election.
+  -- This is an arbitrary 32-bit constant shared across all Conduit processes.
   let leader_lock_id = 8473625
 
+  doc """
+  Register this node and start the three background tasks.
+
+  Inserts a NodeInfo row into `conduit_workers`, then spawns:
+    • A heartbeat task that pings the DB every `heartbeat_interval_ms`.
+    • A stale-detection task that reclaims orphaned jobs and prunes dead nodes.
+    • A leader-election task that competes for the advisory lock each heartbeat.
+
+  Must be called once at application startup (from `Conduit.API.start`).
+  Returns the list of task handles; keep them alive for the lifetime of the node.
+  """
   fn start(storage, config : Conduit.Config) : List(Task) do
     let node = pbuild_node_info(config)
     match Conduit.Storage.node_register(storage, node) do
@@ -23,6 +57,13 @@ mod Conduit.Node do
     Cons(heartbeat_task, Cons(stale_task, Cons(leader_task, Nil)))
   end
 
+  doc """
+  Deregister this node on graceful shutdown.
+
+  Removes the node row from `conduit_workers` and releases the advisory leader
+  lock if this node currently holds it.  Call during application shutdown before
+  the process exits.
+  """
   fn stop(storage, node_id : String) : () do
     match Conduit.Storage.node_deregister(storage, node_id) do
       Ok(_)  -> ()
@@ -34,14 +75,31 @@ mod Conduit.Node do
     else () end
   end
 
+  doc """
+  Return true if this node is the current cluster leader.
+
+  Fast in-process Vault read — no DB round-trip.  Updated by the leader task
+  on every heartbeat cycle.
+  """
   fn is_leader() : Bool do
     Vault.get(Vault.new("conduit_cluster"), "is_leader") |> unwrap_or(false)
   end
 
+  doc """
+  Return the node_id of the last known cluster leader, or None.
+
+  Updated by the leader task each time it wins (or confirms) the advisory lock.
+  May lag by up to one heartbeat interval when the leader changes.
+  """
   fn leader_node_id() : Option(String) do
     Vault.get(Vault.new("conduit_cluster"), "leader_node_id")
   end
 
+  -- Update this node's `last_seen_at` in the DB every `interval_ms`.
+  --
+  -- If the heartbeat fails (DB error), log a warning and continue — a single
+  -- missed heartbeat does not remove the node; the stale threshold provides
+  -- a grace period (default 30 s).
   pfn pheartbeat_loop(storage, node_id : String, interval_ms : Int) : () do
     match Conduit.Storage.node_heartbeat(storage, node_id) do
       Ok(_)  -> ()
@@ -51,6 +109,11 @@ mod Conduit.Node do
     pheartbeat_loop(storage, node_id, interval_ms)
   end
 
+  -- Reclaim jobs from stale workers and purge dead node rows.
+  --
+  -- A node is stale if `last_seen_at` is older than `threshold_ms`.  Jobs
+  -- owned by stale workers are reset to "pending" so healthy workers can
+  -- re-claim them.
   pfn pstale_loop(storage, threshold_ms : Int, interval_ms : Int) : () do
     let threshold_s = int_div(threshold_ms, 1000)
     match Conduit.Storage.node_reclaim_jobs(storage, threshold_s) do
@@ -70,6 +133,11 @@ mod Conduit.Node do
     pstale_loop(storage, threshold_ms, interval_ms)
   end
 
+  -- Compete for the advisory leader lock each interval.
+  --
+  -- `node_try_leader_lock` is an idempotent try-acquire — if this node already
+  -- holds the lock, it returns Ok(true) again.  The Vault state is updated each
+  -- cycle so callers see the most recent election result.
   pfn pleader_loop(storage, node_id : String, interval_ms : Int) : () do
     match Conduit.Storage.node_try_leader_lock(storage, leader_lock_id) do
       Ok(true) ->
@@ -85,15 +153,30 @@ mod Conduit.Node do
     pleader_loop(storage, node_id, interval_ms)
   end
 
+  -- Build the NodeInfo row for this process.
+  --
+  -- Hostname is read from the HOSTNAME environment variable (set automatically
+  -- in Docker/Kubernetes containers) with fallback to "localhost".  Override via
+  -- the CONDUIT_HOSTNAME env var for custom deployments.
   pfn pbuild_node_info(config : Conduit.Config) : Conduit.NodeInfo do
+    let hostname =
+      match process_env("CONDUIT_HOSTNAME") do
+        Some(h) -> h
+        None    ->
+          match process_env("HOSTNAME") do
+            Some(h) -> h
+            None    -> "localhost"
+          end
+      end
+    let now = DateTime.from_timestamp(DateTime.now())
     {
       id           = config.node_id,
-      hostname     = "localhost",
+      hostname     = hostname,
       pid          = System.pid(),
       queues       = config.queues,
       pool_size    = config.workers_per_queue,
-      started_at   = DateTime.now(),
-      last_seen_at = DateTime.now(),
+      started_at   = now,
+      last_seen_at = now,
       status       = "running"
     }
   end
