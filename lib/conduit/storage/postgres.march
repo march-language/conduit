@@ -1,0 +1,1224 @@
+-- Conduit.Storage.Postgres — Postgres-backed implementation of Conduit.Storage.
+--
+-- Uses the depot Pool actor for connection management and executes all
+-- operations as parameterized SQL queries via the March runtime's
+-- `exec_prepared` and `simple_query` builtins.
+--
+-- Schema conventions used by this implementation:
+--   • Timestamps are stored as BIGINT epoch-milliseconds.
+--   • JSON lists (errors, tags, queues) are stored as JSONB.
+--   • All other values are TEXT or INTEGER.
+--
+-- Usage:
+--   match Conduit.Storage.Postgres.start({
+--     host = "localhost", port = 5432,
+--     user = "myapp", password = Some("secret"), database = "myapp_dev",
+--     pool_min = 5, pool_max = 20
+--   }) do
+--     Ok(pg) -> Conduit.API.start(pg, conduit_config)
+--     Err(e) -> Logger.error("postgres connection failed: " ++ e)
+--   end
+
+mod Conduit.Storage.Postgres do
+
+  doc "Connection configuration for the Postgres storage backend."
+  type Config = {
+    host     : String,
+    port     : Int,
+    user     : String,
+    password : Option(String),
+    database : String,
+    pool_min : Int,
+    pool_max : Int
+  }
+
+  doc "The storage handle: wraps a depot connection pool Pid."
+  type PG = { pool : Pid }
+
+  doc "Start a Postgres storage backend with explicit connection parameters."
+  fn start(cfg : Config) : Result(PG, String) do
+    let conn_cfg = Connection.full_config(cfg.host, cfg.port, cfg.user, cfg.database, cfg.password)
+    let pool_cfg = { ..Pool.default_pool_config(conn_cfg),
+                     min_size = cfg.pool_min,
+                     max_size = cfg.pool_max }
+    let pool = Pool.start(pool_cfg)
+    Ok({ pool = pool })
+  end
+
+  doc "Convenience config targeting localhost:5432 with no password."
+  fn default_config(user : String, database : String) : Config do
+    { host = "localhost", port = 5432, user = user,
+      password = None, database = database,
+      pool_min = 5, pool_max = 20 }
+  end
+
+  -- ── Private helpers ──────────────────────────────────────────────────────
+
+  -- Execute a parameterized query, flattening the double-Result from with_conn.
+  pfn pexec(pg, sql, params) do
+    match Pool.with_conn(pg.pool, fn conn -> exec_prepared(conn, sql, params)) do
+      Ok(Ok(result)) -> Ok(result)
+      Ok(Err(e))     -> Err(e)
+      Err(e)         -> Err(e)
+    end
+  end
+
+  -- Execute a non-parameterized query (for LISTEN and advisory operations).
+  pfn pexec_simple(pg, sql) do
+    match Pool.with_conn(pg.pool, fn conn -> simple_query(conn, sql)) do
+      Ok(Ok(result)) -> Ok(result)
+      Ok(Err(e))     -> Err(e)
+      Err(e)         -> Err(e)
+    end
+  end
+
+  -- Execute a mutation; discard rows, return Ok(()).
+  pfn pmutate(pg, sql, params) do
+    match pexec(pg, sql, params) do
+      Err(e) -> Err(e)
+      Ok(_)  -> Ok(())
+    end
+  end
+
+  -- Return the first row of a QueryResult, or None.
+  pfn pfirst_row(result) do
+    match result.rows do
+      Nil          -> None
+      Cons(row, _) -> Some(row)
+    end
+  end
+
+  -- Apply f to every row and collect the results.
+  pfn pmap_rows(rows, f) do
+    List.map(rows, f)
+  end
+
+  -- Run a query, map all rows through f.
+  pfn pall_rows(pg, sql, params, f) do
+    match pexec(pg, sql, params) do
+      Err(e)     -> Err(e)
+      Ok(result) -> Ok(pmap_rows(result.rows, f))
+    end
+  end
+
+  -- Run a query, return Some(f(row)) for the first row or None.
+  pfn pone_row(pg, sql, params, f) do
+    match pexec(pg, sql, params) do
+      Err(e)     -> Err(e)
+      Ok(result) ->
+        match pfirst_row(result) do
+          None      -> Ok(None)
+          Some(row) -> Ok(Some(f(row)))
+        end
+    end
+  end
+
+  -- ── Column access ────────────────────────────────────────────────────────
+
+  -- Get the nth element (0-based) from a list, returning Option.
+  pfn pnth(lst, idx) do
+    match lst do
+      Nil          -> None
+      Cons(h, t)   ->
+        if idx == 0 do Some(h) else pnth(t, idx - 1)
+    end
+  end
+
+  -- Get a cell (Option(String)) from a row (List(Option(String))).
+  pfn pget(row, idx) do
+    match pnth(row, idx) do
+      None       -> None      -- out of bounds
+      Some(cell) -> cell      -- may be None (NULL) or Some(str)
+    end
+  end
+
+  -- Get a string value from a row; default "" on NULL or missing.
+  pfn pstr(row, idx) do
+    match pget(row, idx) do
+      None    -> ""
+      Some(s) -> s
+    end
+  end
+
+  -- Get an integer value from a row; default 0 on NULL or parse failure.
+  pfn pint(row, idx) do
+    unwrap_or(string_to_int(pstr(row, idx)), 0)
+  end
+
+  -- Get a boolean value. Postgres returns "t"/"f" for BOOLEAN columns.
+  pfn pbool(row, idx) do
+    let s = pstr(row, idx)
+    s == "t" || s == "true" || s == "1"
+  end
+
+  -- Get an Option(String) from a row.
+  pfn popt(row, idx) do
+    pget(row, idx)
+  end
+
+  -- Get an Option(Int) from a row.
+  pfn popt_int(row, idx) do
+    match pget(row, idx) do
+      None    -> None
+      Some(s) -> string_to_int(s)
+    end
+  end
+
+  -- ── Timestamp helpers ────────────────────────────────────────────────────
+
+  -- Current time as epoch milliseconds.
+  pfn pnow() do DateTime.now() end
+
+  -- Parse a BIGINT epoch-ms column into a DateTime.
+  pfn pparse_ts(row, idx) do
+    DateTime.from_timestamp(pint(row, idx))
+  end
+
+  -- Parse an optional BIGINT epoch-ms column into Option(DateTime).
+  pfn pparse_opt_ts(row, idx) do
+    match pget(row, idx) do
+      None    -> None
+      Some(s) ->
+        match string_to_int(s) do
+          None     -> None
+          Some(ms) -> Some(DateTime.from_timestamp(ms))
+        end
+    end
+  end
+
+  -- Convert a DateTime to a ParamText epoch-ms string.
+  pfn pts(dt) do
+    ParamText(int_to_string(DateTime.to_timestamp(dt)))
+  end
+
+  -- Convert an Option(DateTime) to a Param (ParamNull on None).
+  pfn popt_ts(opt) do
+    match opt do
+      None     -> ParamNull
+      Some(dt) -> pts(dt)
+    end
+  end
+
+  -- ── JSON list helpers ────────────────────────────────────────────────────
+
+  -- JSON-escape a string for embedding in a JSON array literal.
+  pfn pjesc(s) do
+    s |> String.replace("\\", "\\\\")
+      |> String.replace("\"", "\\\"")
+      |> String.replace("\n", "\\n")
+      |> String.replace("\r", "\\r")
+  end
+
+  pfn pjoin_quoted(lst) do
+    match lst do
+      Nil           -> ""
+      Cons(h, Nil)  -> "\"" ++ pjesc(h) ++ "\""
+      Cons(h, t)    -> "\"" ++ pjesc(h) ++ "\"," ++ pjoin_quoted(t)
+    end
+  end
+
+  -- Encode a List(String) as a JSON array literal (for JSONB columns).
+  pfn pencode_list(lst) do
+    "[" ++ pjoin_quoted(lst) ++ "]"
+  end
+
+  -- Decode a JSONB column value (returned as a JSON string) into List(String).
+  pfn pdecode_list(s) do
+    match Json.parse(s) do
+      Err(_)   -> Nil
+      Ok(json) ->
+        match json do
+          Json.Array(items) ->
+            List.filter_map(items, fn item ->
+              match item do
+                Json.String(v) -> Some(v)
+                _              -> None
+              end
+            )
+          _ -> Nil
+        end
+    end
+  end
+
+  -- ── Fixed-order column list strings ─────────────────────────────────────
+  -- Each query SELECTs columns in this exact order so converters can use
+  -- positional indices without needing to look up column names.
+
+  pfn pjob_cols() do
+    "id, queue, job_type, payload, status, attempt, max_attempts, priority, " ++
+    "backoff, dead_letter_queue, inserted_at, scheduled_at, run_at, " ++
+    "started_at, completed_at, heartbeat_at, worker_id, unique_key, errors, tags"
+  end
+  -- Indices: 0=id 1=queue 2=job_type 3=payload 4=status 5=attempt
+  --          6=max_attempts 7=priority 8=backoff 9=dead_letter_queue
+  --          10=inserted_at 11=scheduled_at 12=run_at 13=started_at
+  --          14=completed_at 15=heartbeat_at 16=worker_id 17=unique_key
+  --          18=errors 19=tags
+
+  pfn pdl_cols() do
+    "id, job_id, queue, job_type, payload, errors, attempts, " ++
+    "first_attempted_at, last_attempted_at, discarded_at, " ++
+    "reviewed, reviewed_by, reviewed_at, retry_count"
+  end
+  -- Indices: 0=id 1=job_id 2=queue 3=job_type 4=payload 5=errors
+  --          6=attempts 7=first_attempted_at 8=last_attempted_at
+  --          9=discarded_at 10=reviewed 11=reviewed_by 12=reviewed_at
+  --          13=retry_count
+
+  pfn pcron_cols() do
+    "id, job_type, schedule, timezone, queue, payload, overlap, enabled, " ++
+    "last_run_at, last_job_id, next_run_at, tags"
+  end
+  -- Indices: 0=id 1=job_type 2=schedule 3=timezone 4=queue 5=payload
+  --          6=overlap 7=enabled 8=last_run_at 9=last_job_id
+  --          10=next_run_at 11=tags
+
+  pfn pnode_cols() do
+    "id, hostname, pid, queues, pool_size, started_at, last_seen_at, status"
+  end
+  -- Indices: 0=id 1=hostname 2=pid 3=queues 4=pool_size
+  --          5=started_at 6=last_seen_at 7=status
+
+  pfn pwf_cols() do
+    "id, workflow_type, parent_id, input, output, status, " ++
+    "started_at, completed_at, timeout_at, error, error_at, tags, meta"
+  end
+  -- Indices: 0=id 1=workflow_type 2=parent_id 3=input 4=output 5=status
+  --          6=started_at 7=completed_at 8=timeout_at 9=error 10=error_at
+  --          11=tags 12=meta
+
+  pfn pchk_cols() do
+    "id, workflow_id, name, value, created_at, duration_ms"
+  end
+  -- Indices: 0=id 1=workflow_id 2=name 3=value 4=created_at 5=duration_ms
+
+  pfn psig_cols() do
+    "id, workflow_id, signal_type, payload, status, " ++
+    "sent_at, delivered_at, expires_at, sent_by"
+  end
+  -- Indices: 0=id 1=workflow_id 2=signal_type 3=payload 4=status
+  --          5=sent_at 6=delivered_at 7=expires_at 8=sent_by
+
+  pfn pevt_cols() do
+    "id, workflow_id, sequence, event_type, payload, recorded_at"
+  end
+  -- Indices: 0=id 1=workflow_id 2=sequence 3=event_type 4=payload 5=recorded_at
+
+  -- ── Row-to-type converters ───────────────────────────────────────────────
+
+  pfn prow_to_job(row) do
+    {
+      id                = pstr(row, 0),
+      queue             = pstr(row, 1),
+      job_type          = pstr(row, 2),
+      payload           = pstr(row, 3),
+      status            = pstr(row, 4),
+      attempt           = pint(row, 5),
+      max_attempts      = pint(row, 6),
+      priority          = pint(row, 7),
+      backoff           = pstr(row, 8),
+      dead_letter_queue = popt(row, 9),
+      inserted_at       = pparse_ts(row, 10),
+      scheduled_at      = pparse_ts(row, 11),
+      run_at            = pparse_ts(row, 12),
+      started_at        = pparse_opt_ts(row, 13),
+      completed_at      = pparse_opt_ts(row, 14),
+      heartbeat_at      = pparse_opt_ts(row, 15),
+      worker_id         = popt(row, 16),
+      unique_key        = popt(row, 17),
+      errors            = pdecode_list(pstr(row, 18)),
+      tags              = pdecode_list(pstr(row, 19))
+    }
+  end
+
+  pfn prow_to_dl(row) do
+    {
+      id                 = pstr(row, 0),
+      job_id             = pstr(row, 1),
+      queue              = pstr(row, 2),
+      job_type           = pstr(row, 3),
+      payload            = pstr(row, 4),
+      errors             = pdecode_list(pstr(row, 5)),
+      attempts           = pint(row, 6),
+      first_attempted_at = pparse_opt_ts(row, 7),
+      last_attempted_at  = pparse_opt_ts(row, 8),
+      discarded_at       = pparse_ts(row, 9),
+      reviewed           = pbool(row, 10),
+      reviewed_by        = popt(row, 11),
+      reviewed_at        = pparse_opt_ts(row, 12),
+      retry_count        = pint(row, 13)
+    }
+  end
+
+  pfn prow_to_cron(row) do
+    {
+      id          = pstr(row, 0),
+      job_type    = pstr(row, 1),
+      schedule    = pstr(row, 2),
+      timezone    = pstr(row, 3),
+      queue       = pstr(row, 4),
+      payload     = pstr(row, 5),
+      overlap     = pstr(row, 6),
+      enabled     = pbool(row, 7),
+      last_run_at = pparse_opt_ts(row, 8),
+      last_job_id = popt(row, 9),
+      next_run_at = pparse_opt_ts(row, 10),
+      tags        = pdecode_list(pstr(row, 11))
+    }
+  end
+
+  pfn prow_to_node(row) do
+    {
+      id           = pstr(row, 0),
+      hostname     = pstr(row, 1),
+      pid          = pint(row, 2),
+      queues       = pdecode_list(pstr(row, 3)),
+      pool_size    = pint(row, 4),
+      started_at   = pparse_ts(row, 5),
+      last_seen_at = pparse_ts(row, 6),
+      status       = pstr(row, 7)
+    }
+  end
+
+  pfn prow_to_wf(row) do
+    {
+      id            = pstr(row, 0),
+      workflow_type = pstr(row, 1),
+      parent_id     = popt(row, 2),
+      input         = pstr(row, 3),
+      output        = popt(row, 4),
+      status        = pstr(row, 5),
+      started_at    = pparse_ts(row, 6),
+      completed_at  = pparse_opt_ts(row, 7),
+      timeout_at    = pparse_opt_ts(row, 8),
+      error         = popt(row, 9),
+      error_at      = pparse_opt_ts(row, 10),
+      tags          = pdecode_list(pstr(row, 11)),
+      meta          = pstr(row, 12)
+    }
+  end
+
+  pfn prow_to_chk(row) do
+    {
+      id          = pint(row, 0),
+      workflow_id = pstr(row, 1),
+      name        = pstr(row, 2),
+      value       = pstr(row, 3),
+      created_at  = pparse_ts(row, 4),
+      duration_ms = popt_int(row, 5)
+    }
+  end
+
+  pfn prow_to_sig(row) do
+    {
+      id           = pint(row, 0),
+      workflow_id  = pstr(row, 1),
+      signal_type  = pstr(row, 2),
+      payload      = pstr(row, 3),
+      status       = pstr(row, 4),
+      sent_at      = pparse_ts(row, 5),
+      delivered_at = pparse_opt_ts(row, 6),
+      expires_at   = pparse_opt_ts(row, 7),
+      sent_by      = popt(row, 8)
+    }
+  end
+
+  pfn prow_to_evt(row) do
+    {
+      id          = pint(row, 0),
+      workflow_id = pstr(row, 1),
+      sequence    = pint(row, 2),
+      event_type  = pstr(row, 3),
+      payload     = pstr(row, 4),
+      recorded_at = pparse_ts(row, 5)
+    }
+  end
+
+  pfn prow_to_summary(row) do
+    {
+      queue       = pstr(row, 0),
+      pending     = pint(row, 1),
+      running     = pint(row, 2),
+      failed      = pint(row, 3),
+      dead        = pint(row, 4),
+      throughput  = pint(row, 5),
+      avg_latency = pint(row, 6)
+    }
+  end
+
+  -- ── Dashboard filter builders ────────────────────────────────────────────
+
+  -- Build (WHERE clause, params) for dashboard_jobs_list.
+  -- Param indices start at 1; LIMIT and OFFSET come last.
+  pfn pjobs_filter(queue, status, limit_n, offset_n) do
+    let lim = int_to_string(limit_n)
+    let off = int_to_string(offset_n)
+    match (queue != "", status != "") do
+      (false, false) ->
+        ("LIMIT $1 OFFSET $2",
+         [ParamText(lim), ParamText(off)])
+      (true, false) ->
+        ("WHERE queue = $1 LIMIT $2 OFFSET $3",
+         [ParamText(queue), ParamText(lim), ParamText(off)])
+      (false, true) ->
+        ("WHERE status = $1 LIMIT $2 OFFSET $3",
+         [ParamText(status), ParamText(lim), ParamText(off)])
+      (true, true) ->
+        ("WHERE queue = $1 AND status = $2 LIMIT $3 OFFSET $4",
+         [ParamText(queue), ParamText(status), ParamText(lim), ParamText(off)])
+    end
+  end
+
+  -- Build (WHERE clause, params) for dashboard_workflows_list.
+  pfn pwf_filter(status_filter, limit_n, offset_n) do
+    let lim = int_to_string(limit_n)
+    let off = int_to_string(offset_n)
+    if status_filter == "" do
+      ("LIMIT $1 OFFSET $2", [ParamText(lim), ParamText(off)])
+    else
+      ("WHERE status = $1 LIMIT $2 OFFSET $3",
+       [ParamText(status_filter), ParamText(lim), ParamText(off)])
+    end
+  end
+
+  -- ── Load-then-update helper for errors list ──────────────────────────────
+
+  -- Load the current errors list for a job, append msg, write back.
+  pfn pappend_error(pg, job_id, msg) do
+    match pexec(pg, "SELECT errors FROM conduit_jobs WHERE id = $1",
+                [ParamText(job_id)]) do
+      Err(e) -> Err(e)
+      Ok(result) ->
+        let existing = match pfirst_row(result) do
+          None      -> Nil
+          Some(row) -> pdecode_list(pstr(row, 0))
+        end
+        let new_errors = List.append(existing, Cons(msg, Nil))
+        pmutate(pg,
+          "UPDATE conduit_jobs SET errors = $2::jsonb WHERE id = $1",
+          [ParamText(job_id), ParamText(pencode_list(new_errors))])
+    end
+  end
+
+  -- ── Storage interface implementation ─────────────────────────────────────
+
+  impl Conduit.Storage(PG) do
+
+    -- ── Job lifecycle ────────────────────────────────────────────────────
+
+    fn enqueue(pg, job : Conduit.JobRow) : Result(String, String) do
+      let sql =
+        "INSERT INTO conduit_jobs " ++
+        "(id, queue, job_type, payload, status, attempt, max_attempts, priority, " ++
+        " backoff, dead_letter_queue, inserted_at, scheduled_at, run_at, errors, tags, unique_key) " ++
+        "VALUES ($1,$2,$3,$4,'pending',0,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) " ++
+        "ON CONFLICT (unique_key) WHERE unique_key IS NOT NULL DO NOTHING " ++
+        "RETURNING id"
+      let params = [
+        ParamText(job.id),
+        ParamText(job.queue),
+        ParamText(job.job_type),
+        ParamText(job.payload),
+        ParamText(int_to_string(job.max_attempts)),
+        ParamText(int_to_string(job.priority)),
+        ParamText(job.backoff),
+        match job.dead_letter_queue do None -> ParamNull | Some(q) -> ParamText(q) end,
+        ParamText(int_to_string(DateTime.to_timestamp(job.inserted_at))),
+        ParamText(int_to_string(DateTime.to_timestamp(job.scheduled_at))),
+        ParamText(int_to_string(DateTime.to_timestamp(job.run_at))),
+        ParamText(pencode_list(job.errors)),
+        ParamText(pencode_list(job.tags)),
+        match job.unique_key do None -> ParamNull | Some(k) -> ParamText(k) end
+      ]
+      match pexec(pg, sql, params) do
+        Err(e) -> Err(e)
+        Ok(result) ->
+          match pfirst_row(result) do
+            None      -> Err("unique_key conflict: job not inserted")
+            Some(row) -> Ok(pstr(row, 0))
+          end
+      end
+    end
+
+    fn fetch_next(pg, queue : String) : Result(Option(Conduit.JobRow), String) do
+      let now = int_to_string(pnow())
+      let sql =
+        "SELECT " ++ pjob_cols() ++
+        " FROM conduit_jobs" ++
+        " WHERE queue = $1 AND status IN ('pending','snoozed') AND run_at <= $2" ++
+        " ORDER BY priority DESC, run_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
+      pone_row(pg, sql, [ParamText(queue), ParamText(now)], fn row -> prow_to_job(row))
+    end
+
+    fn mark_running(pg, job_id : String, worker_id : String) : Result((), String) do
+      let now = int_to_string(pnow())
+      let sql =
+        "UPDATE conduit_jobs" ++
+        " SET status='running', worker_id=$2, started_at=$3, attempt=attempt+1" ++
+        " WHERE id=$1 AND status NOT IN ('running','completed','dead')" ++
+        " RETURNING id"
+      match pexec(pg, sql, [ParamText(job_id), ParamText(worker_id), ParamText(now)]) do
+        Err(e) -> Err(e)
+        Ok(result) ->
+          match pfirst_row(result) do
+            None  -> Err("job already claimed or in terminal state: " ++ job_id)
+            Some(_) -> Ok(())
+          end
+      end
+    end
+
+    fn mark_completed(pg, job_id : String) : Result((), String) do
+      let now = int_to_string(pnow())
+      pmutate(pg,
+        "UPDATE conduit_jobs SET status='completed', completed_at=$2, unique_key=NULL WHERE id=$1",
+        [ParamText(job_id), ParamText(now)])
+    end
+
+    fn mark_snoozed(pg, job_id : String, wake_at : DateTime) : Result((), String) do
+      pmutate(pg,
+        "UPDATE conduit_jobs SET status='snoozed', run_at=$2 WHERE id=$1",
+        [ParamText(job_id), pts(wake_at)])
+    end
+
+    fn heartbeat(pg, job_id : String) : Result((), String) do
+      let now = int_to_string(pnow())
+      pmutate(pg,
+        "UPDATE conduit_jobs SET heartbeat_at=$2 WHERE id=$1",
+        [ParamText(job_id), ParamText(now)])
+    end
+
+    fn schedule_retry(pg, job_id : String, error_msg : String, retry_at : DateTime) : Result((), String) do
+      match pappend_error(pg, job_id, error_msg) do
+        Err(e) -> Err(e)
+        Ok(()) ->
+          pmutate(pg,
+            "UPDATE conduit_jobs SET status='pending', run_at=$2, worker_id=NULL WHERE id=$1",
+            [ParamText(job_id), pts(retry_at)])
+      end
+    end
+
+    fn discard(pg, job_id : String, reason : String) : Result((), String) do
+      match pappend_error(pg, job_id, reason) do
+        Err(e) -> Err(e)
+        Ok(()) ->
+          pmutate(pg,
+            "UPDATE conduit_jobs SET status='dead', unique_key=NULL WHERE id=$1",
+            [ParamText(job_id)])
+      end
+    end
+
+    fn move_to_dead_letter(pg, dl : Conduit.DeadLetter) : Result((), String) do
+      let insert_sql =
+        "INSERT INTO conduit_dead_letters" ++
+        " (id,job_id,queue,job_type,payload,errors,attempts," ++
+        "  first_attempted_at,last_attempted_at,discarded_at,reviewed,retry_count)" ++
+        " VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,false,0)"
+      let params = [
+        ParamText(dl.id),
+        ParamText(dl.job_id),
+        ParamText(dl.queue),
+        ParamText(dl.job_type),
+        ParamText(dl.payload),
+        ParamText(pencode_list(dl.errors)),
+        ParamText(int_to_string(dl.attempts)),
+        popt_ts(dl.first_attempted_at),
+        popt_ts(dl.last_attempted_at),
+        ParamText(int_to_string(DateTime.to_timestamp(dl.discarded_at)))
+      ]
+      match pexec(pg, insert_sql, params) do
+        Err(e) -> Err(e)
+        Ok(_)  ->
+          pmutate(pg,
+            "UPDATE conduit_jobs SET status='dead', unique_key=NULL WHERE id=$1",
+            [ParamText(dl.job_id)])
+      end
+    end
+
+    fn rescue_stale(pg, stale_threshold_s : Int) : Result(List(String), String) do
+      let cutoff = int_to_string(pnow() - stale_threshold_s * 1000)
+      let now    = int_to_string(pnow())
+      let sql =
+        "UPDATE conduit_jobs" ++
+        " SET status='pending', run_at=$2, worker_id=NULL, heartbeat_at=NULL" ++
+        " WHERE status='running'" ++
+        "   AND (heartbeat_at < $1 OR (heartbeat_at IS NULL AND started_at < $1))" ++
+        " RETURNING id"
+      match pexec(pg, sql, [ParamText(cutoff), ParamText(now)]) do
+        Err(e)     -> Err(e)
+        Ok(result) -> Ok(List.map(result.rows, fn row -> pstr(row, 0)))
+      end
+    end
+
+    -- ── Cron ──────────────────────────────────────────────────────────────
+
+    fn cron_upsert(pg, sched : Conduit.CronSchedule) : Result((), String) do
+      let sql =
+        "INSERT INTO conduit_cron_schedules" ++
+        " (id,job_type,schedule,timezone,queue,payload,overlap,enabled," ++
+        "  last_run_at,last_job_id,next_run_at,tags)" ++
+        " VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)" ++
+        " ON CONFLICT (id) DO UPDATE SET" ++
+        "   job_type=$2, schedule=$3, timezone=$4, queue=$5, payload=$6," ++
+        "   overlap=$7, enabled=$8, last_run_at=$9, last_job_id=$10," ++
+        "   next_run_at=$11, tags=$12"
+      pmutate(pg, sql, [
+        ParamText(sched.id),
+        ParamText(sched.job_type),
+        ParamText(sched.schedule),
+        ParamText(sched.timezone),
+        ParamText(sched.queue),
+        ParamText(sched.payload),
+        ParamText(sched.overlap),
+        ParamText(if sched.enabled do "true" else "false"),
+        popt_ts(sched.last_run_at),
+        match sched.last_job_id do None -> ParamNull | Some(id) -> ParamText(id) end,
+        popt_ts(sched.next_run_at),
+        ParamText(pencode_list(sched.tags))
+      ])
+    end
+
+    fn cron_load_due(pg) : Result(List(Conduit.CronSchedule), String) do
+      let now = int_to_string(pnow())
+      let sql =
+        "SELECT " ++ pcron_cols() ++
+        " FROM conduit_cron_schedules" ++
+        " WHERE enabled=true AND (next_run_at IS NULL OR next_run_at <= $1)"
+      pall_rows(pg, sql, [ParamText(now)], fn row -> prow_to_cron(row))
+    end
+
+    fn cron_load_by_id(pg, cron_id : String) : Result(Option(Conduit.CronSchedule), String) do
+      let sql = "SELECT " ++ pcron_cols() ++ " FROM conduit_cron_schedules WHERE id=$1"
+      pone_row(pg, sql, [ParamText(cron_id)], fn row -> prow_to_cron(row))
+    end
+
+    fn cron_mark_fired(pg, cron_id : String, job_id : String, next : Option(DateTime)) : Result((), String) do
+      let now = int_to_string(pnow())
+      pmutate(pg,
+        "UPDATE conduit_cron_schedules SET last_run_at=$2, last_job_id=$3, next_run_at=$4 WHERE id=$1",
+        [ParamText(cron_id), ParamText(now), ParamText(job_id), popt_ts(next)])
+    end
+
+    fn cron_job_active(pg, job_id : String) : Result(Bool, String) do
+      let sql =
+        "SELECT 1 FROM conduit_jobs" ++
+        " WHERE id=$1 AND status IN ('pending','running') LIMIT 1"
+      match pexec(pg, sql, [ParamText(job_id)]) do
+        Err(e)     -> Err(e)
+        Ok(result) ->
+          Ok(match result.rows do Nil -> false | _ -> true end)
+      end
+    end
+
+    fn cron_cancel_job(pg, job_id : String) : Result((), String) do
+      pmutate(pg,
+        "UPDATE conduit_jobs SET status='dead' WHERE id=$1 AND status NOT IN ('completed','dead')",
+        [ParamText(job_id)])
+    end
+
+    fn cron_delete(pg, cron_id : String) : Result((), String) do
+      pmutate(pg, "DELETE FROM conduit_cron_schedules WHERE id=$1", [ParamText(cron_id)])
+    end
+
+    fn cron_advisory_lock(pg, lock_id : Int) : Result(Bool, String) do
+      let sql = "SELECT pg_try_advisory_lock($1)"
+      match pexec(pg, sql, [ParamText(int_to_string(lock_id))]) do
+        Err(e)     -> Err(e)
+        Ok(result) ->
+          match pfirst_row(result) do
+            None      -> Ok(false)
+            Some(row) -> Ok(pbool(row, 0))
+          end
+      end
+    end
+
+    fn cron_advisory_unlock(pg, lock_id : Int) : Result((), String) do
+      pmutate(pg, "SELECT pg_advisory_unlock($1)", [ParamText(int_to_string(lock_id))])
+    end
+
+    -- ── Multi-node cluster ───────────────────────────────────────────────
+
+    fn node_register(pg, node : Conduit.NodeInfo) : Result((), String) do
+      let sql =
+        "INSERT INTO conduit_workers" ++
+        " (id,hostname,pid,queues,pool_size,started_at,last_seen_at,status)" ++
+        " VALUES ($1,$2,$3,$4,$5,$6,$7,'running')" ++
+        " ON CONFLICT (id) DO UPDATE SET" ++
+        "   hostname=$2, pid=$3, queues=$4, pool_size=$5," ++
+        "   last_seen_at=$7, status='running', stopped_at=NULL"
+      pmutate(pg, sql, [
+        ParamText(node.id),
+        ParamText(node.hostname),
+        ParamText(int_to_string(node.pid)),
+        ParamText(pencode_list(node.queues)),
+        ParamText(int_to_string(node.pool_size)),
+        pts(node.started_at),
+        pts(node.last_seen_at)
+      ])
+    end
+
+    fn node_heartbeat(pg, node_id : String) : Result((), String) do
+      let now = int_to_string(pnow())
+      pmutate(pg,
+        "UPDATE conduit_workers SET last_seen_at=$2 WHERE id=$1",
+        [ParamText(node_id), ParamText(now)])
+    end
+
+    fn node_deregister(pg, node_id : String) : Result((), String) do
+      let now = int_to_string(pnow())
+      pmutate(pg,
+        "UPDATE conduit_workers SET status='stopped', stopped_at=$2 WHERE id=$1",
+        [ParamText(node_id), ParamText(now)])
+    end
+
+    fn node_list_active(pg) : Result(List(Conduit.NodeInfo), String) do
+      let sql =
+        "SELECT " ++ pnode_cols() ++
+        " FROM conduit_workers WHERE status='running' ORDER BY started_at ASC"
+      pall_rows(pg, sql, Nil, fn row -> prow_to_node(row))
+    end
+
+    fn node_reclaim_jobs(pg, stale_threshold_s : Int) : Result(List(String), String) do
+      let cutoff = int_to_string(pnow() - stale_threshold_s * 1000)
+      let now    = int_to_string(pnow())
+      let sql =
+        "UPDATE conduit_jobs" ++
+        " SET status='pending', run_at=$2, worker_id=NULL, heartbeat_at=NULL" ++
+        " WHERE status='running'" ++
+        "   AND worker_id IN (" ++
+        "     SELECT id FROM conduit_workers WHERE last_seen_at < $1 AND status='running'" ++
+        "   )" ++
+        " RETURNING id"
+      match pexec(pg, sql, [ParamText(cutoff), ParamText(now)]) do
+        Err(e)     -> Err(e)
+        Ok(result) -> Ok(List.map(result.rows, fn row -> pstr(row, 0)))
+      end
+    end
+
+    fn node_cleanup_stale(pg, stale_threshold_s : Int) : Result(Int, String) do
+      let cutoff = int_to_string(pnow() - stale_threshold_s * 1000)
+      let now    = int_to_string(pnow())
+      let sql =
+        "UPDATE conduit_workers SET status='stale', stopped_at=$2" ++
+        " WHERE status='running' AND last_seen_at < $1 RETURNING id"
+      match pexec(pg, sql, [ParamText(cutoff), ParamText(now)]) do
+        Err(e)     -> Err(e)
+        Ok(result) -> Ok(List.length(result.rows))
+      end
+    end
+
+    fn node_try_leader_lock(pg, lock_id : Int) : Result(Bool, String) do
+      let sql = "SELECT pg_try_advisory_lock($1)"
+      match pexec(pg, sql, [ParamText(int_to_string(lock_id))]) do
+        Err(e)     -> Err(e)
+        Ok(result) ->
+          match pfirst_row(result) do
+            None      -> Ok(false)
+            Some(row) -> Ok(pbool(row, 0))
+          end
+      end
+    end
+
+    fn node_release_leader_lock(pg, lock_id : Int) : Result((), String) do
+      pmutate(pg, "SELECT pg_advisory_unlock($1)", [ParamText(int_to_string(lock_id))])
+    end
+
+    -- ── Workflows ────────────────────────────────────────────────────────
+
+    fn workflow_insert(pg, wf : Conduit.WorkflowRow) : Result(String, String) do
+      let sql =
+        "INSERT INTO conduit_workflows" ++
+        " (id,workflow_type,parent_id,input,output,status," ++
+        "  started_at,completed_at,timeout_at,error,error_at,tags,meta)" ++
+        " VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)" ++
+        " RETURNING id"
+      let params = [
+        ParamText(wf.id),
+        ParamText(wf.workflow_type),
+        match wf.parent_id do None -> ParamNull | Some(p) -> ParamText(p) end,
+        ParamText(wf.input),
+        match wf.output do None -> ParamNull | Some(o) -> ParamText(o) end,
+        ParamText(wf.status),
+        pts(wf.started_at),
+        popt_ts(wf.completed_at),
+        popt_ts(wf.timeout_at),
+        match wf.error do None -> ParamNull | Some(e) -> ParamText(e) end,
+        popt_ts(wf.error_at),
+        ParamText(pencode_list(wf.tags)),
+        ParamText(wf.meta)
+      ]
+      match pexec(pg, sql, params) do
+        Err(e)     -> Err(e)
+        Ok(result) ->
+          match pfirst_row(result) do
+            None      -> Err("workflow_insert returned no id")
+            Some(row) -> Ok(pstr(row, 0))
+          end
+      end
+    end
+
+    fn workflow_load(pg, wf_id : String) : Result(Option(Conduit.WorkflowRow), String) do
+      let sql = "SELECT " ++ pwf_cols() ++ " FROM conduit_workflows WHERE id=$1"
+      pone_row(pg, sql, [ParamText(wf_id)], fn row -> prow_to_wf(row))
+    end
+
+    fn workflow_list_all(pg) : Result(List(Conduit.WorkflowRow), String) do
+      let sql =
+        "SELECT " ++ pwf_cols() ++
+        " FROM conduit_workflows ORDER BY started_at DESC LIMIT 200"
+      pall_rows(pg, sql, Nil, fn row -> prow_to_wf(row))
+    end
+
+    fn workflow_status_get(pg, wf_id : String) : Result(Option(String), String) do
+      let sql = "SELECT status FROM conduit_workflows WHERE id=$1"
+      match pexec(pg, sql, [ParamText(wf_id)]) do
+        Err(e)     -> Err(e)
+        Ok(result) ->
+          match pfirst_row(result) do
+            None      -> Ok(None)
+            Some(row) -> Ok(popt(row, 0))
+          end
+      end
+    end
+
+    fn workflow_update_status(pg, wf_id : String, status : String,
+                              output : Option(String), error : Option(String)) : Result((), String) do
+      let now = int_to_string(pnow())
+      let is_terminal = status == "completed" || status == "failed"
+                     || status == "cancelled"  || status == "timed_out"
+      let completed_at_p = if is_terminal do ParamText(now) else ParamNull
+      let error_at_p     = match error do None -> ParamNull | Some(_) -> ParamText(now) end
+      pmutate(pg,
+        "UPDATE conduit_workflows" ++
+        " SET status=$2, output=$3, error=$4, completed_at=$5, error_at=$6" ++
+        " WHERE id=$1",
+        [
+          ParamText(wf_id),
+          ParamText(status),
+          match output do None -> ParamNull | Some(o) -> ParamText(o) end,
+          match error  do None -> ParamNull | Some(e) -> ParamText(e) end,
+          completed_at_p,
+          error_at_p
+        ])
+    end
+
+    fn workflow_cancel(pg, wf_id : String, reason : String) : Result((), String) do
+      let now = int_to_string(pnow())
+      pmutate(pg,
+        "UPDATE conduit_workflows" ++
+        " SET status='cancelled', error=$2, error_at=$3, completed_at=$3" ++
+        " WHERE id=$1 AND status='running'",
+        [ParamText(wf_id), ParamText(reason), ParamText(now)])
+    end
+
+    -- ── Checkpoints ──────────────────────────────────────────────────────
+
+    fn checkpoint_get(pg, wf_id : String, name : String) : Result(Option(String), String) do
+      let sql =
+        "SELECT value FROM conduit_checkpoints" ++
+        " WHERE workflow_id=$1 AND name=$2"
+      match pexec(pg, sql, [ParamText(wf_id), ParamText(name)]) do
+        Err(e)     -> Err(e)
+        Ok(result) ->
+          match pfirst_row(result) do
+            None      -> Ok(None)
+            Some(row) -> Ok(popt(row, 0))
+          end
+      end
+    end
+
+    fn checkpoint_set(pg, wf_id : String, name : String,
+                      value : String, duration_ms : Int) : Result((), String) do
+      let now = int_to_string(pnow())
+      let sql =
+        "INSERT INTO conduit_checkpoints (workflow_id,name,value,created_at,duration_ms)" ++
+        " VALUES ($1,$2,$3,$4,$5)" ++
+        " ON CONFLICT (workflow_id,name) DO UPDATE SET value=$3, duration_ms=$5"
+      pmutate(pg, sql, [
+        ParamText(wf_id),
+        ParamText(name),
+        ParamText(value),
+        ParamText(now),
+        ParamText(int_to_string(duration_ms))
+      ])
+    end
+
+    fn checkpoint_load_all(pg, wf_id : String) : Result(List(Conduit.WorkflowCheckpoint), String) do
+      let sql =
+        "SELECT " ++ pchk_cols() ++
+        " FROM conduit_checkpoints WHERE workflow_id=$1 ORDER BY id ASC"
+      pall_rows(pg, sql, [ParamText(wf_id)], fn row -> prow_to_chk(row))
+    end
+
+    -- ── Signals ──────────────────────────────────────────────────────────
+
+    fn signal_insert(pg, sig : Conduit.WorkflowSignal) : Result(Int, String) do
+      let sql =
+        "INSERT INTO conduit_workflow_signals" ++
+        " (workflow_id,signal_type,payload,status,sent_at,delivered_at,expires_at,sent_by)" ++
+        " VALUES ($1,$2,$3,$4,$5,$6,$7,$8)" ++
+        " RETURNING id"
+      let params = [
+        ParamText(sig.workflow_id),
+        ParamText(sig.signal_type),
+        ParamText(sig.payload),
+        ParamText(sig.status),
+        pts(sig.sent_at),
+        popt_ts(sig.delivered_at),
+        popt_ts(sig.expires_at),
+        match sig.sent_by do None -> ParamNull | Some(s) -> ParamText(s) end
+      ]
+      match pexec(pg, sql, params) do
+        Err(e)     -> Err(e)
+        Ok(result) ->
+          match pfirst_row(result) do
+            None      -> Err("signal_insert returned no id")
+            Some(row) -> Ok(pint(row, 0))
+          end
+      end
+    end
+
+    fn signal_peek(pg, wf_id : String, signal_type : String) : Result(Option(Conduit.WorkflowSignal), String) do
+      let now = int_to_string(pnow())
+      let sql =
+        "SELECT " ++ psig_cols() ++
+        " FROM conduit_workflow_signals" ++
+        " WHERE workflow_id=$1 AND signal_type=$2 AND status='pending'" ++
+        "   AND (expires_at IS NULL OR expires_at > $3)" ++
+        " ORDER BY id ASC LIMIT 1"
+      pone_row(pg, sql,
+               [ParamText(wf_id), ParamText(signal_type), ParamText(now)],
+               fn row -> prow_to_sig(row))
+    end
+
+    fn signal_mark_delivered(pg, sig_id : Int) : Result((), String) do
+      let now = int_to_string(pnow())
+      pmutate(pg,
+        "UPDATE conduit_workflow_signals SET status='delivered', delivered_at=$2 WHERE id=$1",
+        [ParamText(int_to_string(sig_id)), ParamText(now)])
+    end
+
+    -- ── Dashboard queries ────────────────────────────────────────────────
+
+    fn dashboard_queue_summary(pg) : Result(List(Conduit.Dashboard.QueueSummary), String) do
+      let since_24h = int_to_string(pnow() - 86400000)
+      let sql =
+        "SELECT queue," ++
+        "  COUNT(*) FILTER (WHERE status='pending')  AS pending," ++
+        "  COUNT(*) FILTER (WHERE status='running')  AS running," ++
+        "  COUNT(*) FILTER (WHERE status='failed')   AS failed," ++
+        "  COUNT(*) FILTER (WHERE status='dead')     AS dead," ++
+        "  COUNT(*) FILTER (WHERE status='completed' AND completed_at > $1) AS throughput," ++
+        "  COALESCE(AVG(CASE WHEN completed_at IS NOT NULL AND started_at IS NOT NULL" ++
+        "            THEN completed_at - started_at END)::BIGINT, 0) AS avg_latency" ++
+        " FROM conduit_jobs GROUP BY queue ORDER BY queue ASC"
+      pall_rows(pg, sql, [ParamText(since_24h)], fn row -> prow_to_summary(row))
+    end
+
+    fn dashboard_jobs_list(pg, queue : String, status : String, page : Int) : Result(List(Conduit.JobRow), String) do
+      let limit_n  = 50
+      let offset_n = (page - 1) * limit_n
+      let (where_cl, params) = pjobs_filter(queue, status, limit_n, offset_n)
+      let sql =
+        "SELECT " ++ pjob_cols() ++
+        " FROM conduit_jobs " ++ where_cl ++
+        " ORDER BY inserted_at DESC"
+      pall_rows(pg, sql, params, fn row -> prow_to_job(row))
+    end
+
+    fn dashboard_job_by_id(pg, job_id : String) : Result(Option(Conduit.JobRow), String) do
+      let sql = "SELECT " ++ pjob_cols() ++ " FROM conduit_jobs WHERE id=$1"
+      pone_row(pg, sql, [ParamText(job_id)], fn row -> prow_to_job(row))
+    end
+
+    fn dashboard_crons_list(pg) : Result(List(Conduit.CronSchedule), String) do
+      let sql =
+        "SELECT " ++ pcron_cols() ++
+        " FROM conduit_cron_schedules ORDER BY id ASC"
+      pall_rows(pg, sql, Nil, fn row -> prow_to_cron(row))
+    end
+
+    fn dashboard_workflows_list(pg, status_filter : String, page : Int) : Result(List(Conduit.WorkflowRow), String) do
+      let limit_n  = 50
+      let offset_n = (page - 1) * limit_n
+      let (where_cl, params) = pwf_filter(status_filter, limit_n, offset_n)
+      let sql =
+        "SELECT " ++ pwf_cols() ++
+        " FROM conduit_workflows " ++ where_cl ++
+        " ORDER BY started_at DESC"
+      pall_rows(pg, sql, params, fn row -> prow_to_wf(row))
+    end
+
+    fn dead_letter_list(pg, page : Int) : Result(List(Conduit.DeadLetter), String) do
+      let limit_n  = 50
+      let offset_n = (page - 1) * limit_n
+      let sql =
+        "SELECT " ++ pdl_cols() ++
+        " FROM conduit_dead_letters ORDER BY discarded_at DESC LIMIT $1 OFFSET $2"
+      pall_rows(pg, sql,
+               [ParamText(int_to_string(limit_n)), ParamText(int_to_string(offset_n))],
+               fn row -> prow_to_dl(row))
+    end
+
+    fn dead_letter_list_all(pg) : Result(List(Conduit.DeadLetter), String) do
+      let sql =
+        "SELECT " ++ pdl_cols() ++
+        " FROM conduit_dead_letters ORDER BY discarded_at DESC"
+      pall_rows(pg, sql, Nil, fn row -> prow_to_dl(row))
+    end
+
+    fn dead_letter_delete_all(pg) : Result(Int, String) do
+      match pexec(pg, "DELETE FROM conduit_dead_letters RETURNING id", Nil) do
+        Err(e)     -> Err(e)
+        Ok(result) -> Ok(List.length(result.rows))
+      end
+    end
+
+    fn dead_letter_load(pg, dl_id : String) : Result(Option(Conduit.DeadLetter), String) do
+      let sql = "SELECT " ++ pdl_cols() ++ " FROM conduit_dead_letters WHERE id=$1"
+      pone_row(pg, sql, [ParamText(dl_id)], fn row -> prow_to_dl(row))
+    end
+
+    fn job_retry(pg, job_id : String) : Result((), String) do
+      let now = int_to_string(pnow())
+      pmutate(pg,
+        "UPDATE conduit_jobs" ++
+        " SET status='pending', attempt=0, run_at=$2," ++
+        "     started_at=NULL, completed_at=NULL, worker_id=NULL" ++
+        " WHERE id=$1",
+        [ParamText(job_id), ParamText(now)])
+    end
+
+    fn job_cancel(pg, job_id : String, reason : String) : Result((), String) do
+      match pappend_error(pg, job_id, reason) do
+        Err(e) -> Err(e)
+        Ok(()) ->
+          pmutate(pg,
+            "UPDATE conduit_jobs SET status='dead', unique_key=NULL WHERE id=$1",
+            [ParamText(job_id)])
+      end
+    end
+
+    fn job_delete(pg, job_id : String) : Result((), String) do
+      pmutate(pg, "DELETE FROM conduit_jobs WHERE id=$1", [ParamText(job_id)])
+    end
+
+    fn dead_letter_delete(pg, dl_id : String) : Result((), String) do
+      pmutate(pg, "DELETE FROM conduit_dead_letters WHERE id=$1", [ParamText(dl_id)])
+    end
+
+    fn notify_subscribe(pg, channel : String) : Result((), String) do
+      -- LISTEN cannot be parameterized; channel names are built by Conduit
+      -- internals (never from user input), so direct string embedding is safe.
+      let safe = "conduit_queue_" ++ channel
+      match Pool.with_conn(pg.pool, fn conn ->
+        simple_query(conn, "LISTEN " ++ safe)
+      ) do
+        Ok(Ok(_)) -> Ok(())
+        Ok(Err(e)) -> Err(e)
+        Err(e) -> Err(e)
+      end
+    end
+
+    -- ── Rate limiting ────────────────────────────────────────────────────
+
+    fn rate_limit_acquire(pg, key : String, rate : Int) : Result(Bool, String) do
+      -- Token-bucket algorithm stored in conduit_rate_limit_buckets.
+      -- Refill tokens proportional to elapsed time, then try to consume one.
+      let now  = int_to_string(pnow())
+      let rate_s = int_to_string(rate)
+      let sql =
+        "INSERT INTO conduit_rate_limit_buckets (key, tokens, last_refill)" ++
+        " VALUES ($1, $2::DECIMAL - 1, $3)" ++
+        " ON CONFLICT (key) DO UPDATE SET" ++
+        "   tokens = GREATEST(-1," ++
+        "     LEAST($2::DECIMAL," ++
+        "       conduit_rate_limit_buckets.tokens +" ++
+        "       ($2::DECIMAL * ($3::BIGINT - conduit_rate_limit_buckets.last_refill) / 1000.0)" ++
+        "     ) - 1" ++
+        "   )," ++
+        "   last_refill = $3" ++
+        " RETURNING tokens >= 0 AS acquired"
+      match pexec(pg, sql, [ParamText(key), ParamText(rate_s), ParamText(now)]) do
+        Err(e)     -> Err(e)
+        Ok(result) ->
+          match pfirst_row(result) do
+            None      -> Ok(false)
+            Some(row) -> Ok(pbool(row, 0))
+          end
+      end
+    end
+
+    fn unique_check(pg, unique_key : String) : Result(Bool, String) do
+      let sql =
+        "SELECT 1 FROM conduit_jobs" ++
+        " WHERE unique_key=$1 AND status NOT IN ('completed','dead') LIMIT 1"
+      match pexec(pg, sql, [ParamText(unique_key)]) do
+        Err(e)     -> Err(e)
+        Ok(result) ->
+          Ok(match result.rows do Nil -> false | _ -> true end)
+      end
+    end
+
+    fn unique_release(pg, job_id : String) : Result((), String) do
+      pmutate(pg, "UPDATE conduit_jobs SET unique_key=NULL WHERE id=$1", [ParamText(job_id)])
+    end
+
+    -- ── Event store ──────────────────────────────────────────────────────
+
+    fn event_append(pg, wf_id : String, sequence : Int,
+                    event_type : String, payload : String) : Result(Int, String) do
+      let now = int_to_string(pnow())
+      let sql =
+        "INSERT INTO conduit_workflow_events" ++
+        " (workflow_id,sequence,event_type,payload,recorded_at)" ++
+        " VALUES ($1,$2,$3,$4,$5)" ++
+        " ON CONFLICT (workflow_id,sequence) DO NOTHING" ++
+        " RETURNING id"
+      match pexec(pg, sql, [
+        ParamText(wf_id),
+        ParamText(int_to_string(sequence)),
+        ParamText(event_type),
+        ParamText(payload),
+        ParamText(now)
+      ]) do
+        Err(e)     -> Err(e)
+        Ok(result) ->
+          match pfirst_row(result) do
+            None      -> Err("event_append: duplicate (workflow_id, sequence) pair")
+            Some(row) -> Ok(pint(row, 0))
+          end
+      end
+    end
+
+    fn event_load_all(pg, wf_id : String) : Result(List(Conduit.WorkflowEvent), String) do
+      let sql =
+        "SELECT " ++ pevt_cols() ++
+        " FROM conduit_workflow_events WHERE workflow_id=$1 ORDER BY sequence ASC"
+      pall_rows(pg, sql, [ParamText(wf_id)], fn row -> prow_to_evt(row))
+    end
+
+    fn event_load_up_to(pg, wf_id : String, max_sequence : Int) : Result(List(Conduit.WorkflowEvent), String) do
+      let sql =
+        "SELECT " ++ pevt_cols() ++
+        " FROM conduit_workflow_events" ++
+        " WHERE workflow_id=$1 AND sequence<=$2 ORDER BY sequence ASC"
+      pall_rows(pg, sql,
+               [ParamText(wf_id), ParamText(int_to_string(max_sequence))],
+               fn row -> prow_to_evt(row))
+    end
+
+    fn event_count(pg, wf_id : String) : Result(Int, String) do
+      let sql = "SELECT COUNT(*) FROM conduit_workflow_events WHERE workflow_id=$1"
+      match pexec(pg, sql, [ParamText(wf_id)]) do
+        Err(e)     -> Err(e)
+        Ok(result) ->
+          match pfirst_row(result) do
+            None      -> Ok(0)
+            Some(row) -> Ok(pint(row, 0))
+          end
+      end
+    end
+
+  end -- impl Conduit.Storage(PG)
+
+end -- mod Conduit.Storage.Postgres

@@ -59,7 +59,14 @@ mod Conduit.Queue do
               errors            = Nil,
               tags              = config.tags
             }
-            Conduit.Storage.enqueue(storage, row)
+            let result = Conduit.Storage.enqueue(storage, row)
+            let _ = match result do
+              Ok(job_id) ->
+                Conduit.Telemetry.dispatch(
+                  Conduit.Telemetry.JobEnqueued(job_id, job_type, config.queue))
+              Err(_) -> ()
+            end
+            result
         end
     end
   end
@@ -105,7 +112,14 @@ mod Conduit.Queue do
               errors            = Nil,
               tags              = config.tags
             }
-            Conduit.Storage.enqueue(storage, row)
+            let result = Conduit.Storage.enqueue(storage, row)
+            let _ = match result do
+              Ok(job_id) ->
+                Conduit.Telemetry.dispatch(
+                  Conduit.Telemetry.JobEnqueued(job_id, job_type, config.queue))
+              Err(_) -> ()
+            end
+            result
         end
     end
   end
