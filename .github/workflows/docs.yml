@@ -19,7 +19,7 @@ jobs:
         uses: march-language/setup-march@main
 
       - name: Install march_doc
-        run: forge install march_doc
+        run: forge install march_doc@https://github.com/march-language/march_doc.git
 
       - name: Generate docs
         run: forge march_doc.doc
