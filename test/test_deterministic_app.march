@@ -1,13 +1,3 @@
-doc """
-End-to-end test app for Phase 8: Deterministic Replay.
-
-Simulates a payment workflow with 3 checkpoint steps, then verifies:
-  1. First run: all fns execute, events are logged
-  2. Replay: fns are NOT called, recorded values returned
-  3. Point-in-time replay: only first N events loaded
-  4. Event history is queryable
-"""
-
 mod DeterministicAppTest do
   use Test
 

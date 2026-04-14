@@ -20,5 +20,8 @@ jobs:
       - name: Set up March
         uses: march-language/setup-march@main
 
+      - name: Build
+        run: forge build
+
       - name: Test
         run: forge test
