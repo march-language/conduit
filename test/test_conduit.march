@@ -1605,6 +1605,22 @@ mod ConduitTest do
     assert_true(List.any(evs, fn e -> String.starts_with(e, "dl_delete:" ++ dl_id)))
   end
 
+  test "dashboard_actions_trigger_cron_now_not_found" do
+    let vault_k = "tc_now_" ++ base64_encode(random_bytes(16))
+    let storage = fake_workflow_storage_new(vault_k)
+    -- cron_load_by_id returns Ok(None), so we get Err("cron schedule not found").
+    let result = Conduit.Dashboard.Actions.trigger_cron_now(storage, "nonexistent")
+    assert_err(result)
+  end
+
+  test "dashboard_actions_retry_all_dead_letters_empty" do
+    let vault_k = "radl_" ++ base64_encode(random_bytes(16))
+    let storage = fake_workflow_storage_new(vault_k)
+    -- dead_letter_list returns Ok(Nil), so result should be empty.
+    let result = Conduit.Dashboard.Actions.retry_all_dead_letters(storage)
+    assert_eq_int(List.length(result), 0)
+  end
+
   -- ─────────────────────────────────────────────────────────────
   -- Phase 6: Queries via fake storage
   -- ─────────────────────────────────────────────────────────────
