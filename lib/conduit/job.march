@@ -1,4 +1,0 @@
-mod Conduit do
-  -- Job interface placeholder. Jobs define perform/config/schema directly in their module.
-  pfn pjob_placeholder() : () do () end
-end

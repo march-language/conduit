@@ -606,31 +606,117 @@ mod Conduit do
   --               Return true to allow.  The full header value is passed,
   --               including the "Bearer " prefix if present.
   type Auth =
-    None
+    Open
     | Token(String)
     | Fn(String -> Bool)
+
+  -- ── Storage interface ─────────────────────────────────────────────────────
+  --
+  -- Pluggable storage backend interface.  Implement it for your preferred
+  -- database to make Conduit work with that backend.  See
+  -- `lib/conduit/storage.march` for the full interface documentation.
+  interface Storage(s) do
+
+    -- ── Job lifecycle ──────────────────────────────────────────────────────
+    fn enqueue : s -> JobRow -> Result(String, String)
+    fn fetch_next : s -> String -> Result(Option(JobRow), String)
+    fn mark_running : s -> String -> String -> Result((), String)
+    fn mark_completed : s -> String -> Result((), String)
+    fn mark_snoozed : s -> String -> DateTime -> Result((), String)
+    fn heartbeat : s -> String -> Result((), String)
+    fn schedule_retry : s -> String -> String -> DateTime -> Result((), String)
+    fn discard : s -> String -> String -> Result((), String)
+    fn move_to_dead_letter : s -> DeadLetter -> Result((), String)
+    fn rescue_stale : s -> Int -> Result(List(String), String)
+
+    -- ── Cron ──────────────────────────────────────────────────────────────
+    fn cron_upsert : s -> CronSchedule -> Result((), String)
+    fn cron_load_due : s -> Result(List(CronSchedule), String)
+    fn cron_load_by_id : s -> String -> Result(Option(CronSchedule), String)
+    fn cron_mark_fired : s -> String -> String -> Option(DateTime) -> Result((), String)
+    fn cron_job_active : s -> String -> Result(Bool, String)
+    fn cron_cancel_job : s -> String -> Result((), String)
+    fn cron_delete : s -> String -> Result((), String)
+    fn cron_advisory_lock : s -> Int -> Result(Bool, String)
+    fn cron_advisory_unlock : s -> Int -> Result((), String)
+
+    -- ── Multi-node cluster ─────────────────────────────────────────────────
+    fn node_register : s -> NodeInfo -> Result((), String)
+    fn node_heartbeat : s -> String -> Result((), String)
+    fn node_deregister : s -> String -> Result((), String)
+    fn node_list_active : s -> Result(List(NodeInfo), String)
+    fn node_reclaim_jobs : s -> Int -> Result(List(String), String)
+    fn node_cleanup_stale : s -> Int -> Result(Int, String)
+    fn node_try_leader_lock : s -> Int -> Result(Bool, String)
+    fn node_release_leader_lock : s -> Int -> Result((), String)
+
+    -- ── Workflows ──────────────────────────────────────────────────────────
+    fn workflow_insert : s -> WorkflowRow -> Result(String, String)
+    fn workflow_load : s -> String -> Result(Option(WorkflowRow), String)
+    fn workflow_list_all : s -> Result(List(WorkflowRow), String)
+    fn workflow_status_get : s -> String -> Result(Option(String), String)
+    fn workflow_update_status : s -> String -> String -> Option(String) -> Option(String) -> Result((), String)
+    fn workflow_cancel : s -> String -> String -> Result((), String)
+
+    -- ── Checkpoints ────────────────────────────────────────────────────────
+    fn checkpoint_get : s -> String -> String -> Result(Option(String), String)
+    fn checkpoint_set : s -> String -> String -> String -> Int -> Result((), String)
+    fn checkpoint_load_all : s -> String -> Result(List(WorkflowCheckpoint), String)
+
+    -- ── Signals ────────────────────────────────────────────────────────────
+    fn signal_insert : s -> WorkflowSignal -> Result(Int, String)
+    fn signal_peek : s -> String -> String -> Result(Option(WorkflowSignal), String)
+    fn signal_mark_delivered : s -> Int -> Result((), String)
+
+    -- ── Dashboard queries ──────────────────────────────────────────────────
+    fn dashboard_queue_summary : s -> Result(List(Conduit.Dashboard.QueueSummary), String)
+    fn dashboard_jobs_list : s -> String -> String -> Int -> Result(List(JobRow), String)
+    fn dashboard_job_by_id : s -> String -> Result(Option(JobRow), String)
+    fn dashboard_crons_list : s -> Result(List(CronSchedule), String)
+    fn dashboard_workflows_list : s -> String -> Int -> Result(List(WorkflowRow), String)
+    fn dead_letter_list : s -> Int -> Result(List(DeadLetter), String)
+    fn dead_letter_list_all : s -> Result(List(DeadLetter), String)
+    fn dead_letter_delete_all : s -> Result(Int, String)
+    fn dead_letter_load : s -> String -> Result(Option(DeadLetter), String)
+    fn job_retry : s -> String -> Result((), String)
+    fn job_cancel : s -> String -> String -> Result((), String)
+    fn job_delete : s -> String -> Result((), String)
+    fn dead_letter_delete : s -> String -> Result((), String)
+    fn notify_subscribe : s -> String -> Result((), String)
+
+    -- ── Rate limiting ──────────────────────────────────────────────────────
+    fn rate_limit_acquire : s -> String -> Int -> Result(Bool, String)
+    fn unique_check : s -> String -> Result(Bool, String)
+    fn unique_release : s -> String -> Result((), String)
+
+    -- ── Event store ────────────────────────────────────────────────────────
+    fn event_append : s -> String -> Int -> String -> String -> Result(Int, String)
+    fn event_load_all : s -> String -> Result(List(WorkflowEvent), String)
+    fn event_load_up_to : s -> String -> Int -> Result(List(WorkflowEvent), String)
+    fn event_count : s -> String -> Result(Int, String)
+  end
 
   -- ── Top-level convenience forwarders ────────────────────────────────────────
   -- These delegate to Conduit.API so callers can write e.g. Conduit.pause_cron(...)
   -- instead of the fully-qualified Conduit.API.pause_cron(...).
 
   doc "Disable a cron schedule by id.  See `Conduit.API.pause_cron`."
-  fn pause_cron(storage, cron_id : String) : Result((), String) do
+  fn pause_cron(storage : s, cron_id : String) : Result((), String) do
     Conduit.API.pause_cron(storage, cron_id)
   end
 
   doc "Re-enable a paused cron schedule by id.  See `Conduit.API.resume_cron`."
-  fn resume_cron(storage, cron_id : String) : Result((), String) do
+  fn resume_cron(storage : s, cron_id : String) : Result((), String) do
     Conduit.API.resume_cron(storage, cron_id)
   end
 
   doc "Permanently delete a cron schedule by id.  See `Conduit.API.cancel_cron`."
-  fn cancel_cron(storage, cron_id : String) : Result((), String) do
+  fn cancel_cron(storage : s, cron_id : String) : Result((), String) do
     Conduit.API.cancel_cron(storage, cron_id)
   end
 
   doc "Cancel a running workflow with a human-readable reason.  See `Conduit.API.cancel_workflow`."
-  fn cancel_workflow(workflow_id : String, reason : String, storage) : Result((), String) do
+  fn cancel_workflow(workflow_id : String, reason : String, storage : s) : Result((), String) do
     Conduit.API.cancel_workflow(workflow_id, reason, storage)
   end
 

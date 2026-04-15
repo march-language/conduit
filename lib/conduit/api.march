@@ -20,7 +20,7 @@ mod Conduit.API do
     let storage = { repo: MyApp.Repo }
     Conduit.start(Conduit.Config.default(), storage)
   """
-  fn start(config, storage) : List(Task) do
+  fn start(config : Conduit.Config, storage : s) : List(Task) do
     -- Register the built-in workflow runner performer (closes over storage).
     Conduit.Queue.register_performer(
       Conduit.WorkflowRunner.job_type(),
@@ -68,7 +68,7 @@ mod Conduit.API do
   Phase 2 will provide a typed wrapper:
     Conduit.enqueue(SendWelcomeEmail, args)
   """
-  fn enqueue(_job, job_type : String, payload : String, storage) : Result(String, String) do
+  fn enqueue(_job, job_type : String, payload : String, storage : s) : Result(String, String) do
     -- Prefer the config registered for this job type at startup; fall back to
     -- defaults only when no performer has been registered yet (e.g. during tests
     -- or when calling enqueue before register).
@@ -81,14 +81,14 @@ mod Conduit.API do
   Enqueue a job with an explicit Conduit.JobConfig. Use this when you need to
   override queue, priority, max_attempts, etc.
   """
-  fn enqueue_with(job_type : String, payload : String, config : JobConfig, storage) : Result(String, String) do
+  fn enqueue_with(job_type : String, payload : String, config : JobConfig, storage : s) : Result(String, String) do
     Conduit.Queue.enqueue(storage, job_type, payload, config)
   end
 
   doc """
   Enqueue a job to run after `delay`. Returns the job id on success.
   """
-  fn enqueue_in(_job, job_type : String, payload : String, delay : Int, storage) : Result(String, String) do
+  fn enqueue_in(_job, job_type : String, payload : String, delay : Int, storage : s) : Result(String, String) do
     let config = Conduit.Queue.lookup_config(job_type)
       |> Option.unwrap_or(Conduit.JobConfig.default())
     Conduit.Queue.enqueue_in(storage, job_type, payload, delay, config)
@@ -97,7 +97,7 @@ mod Conduit.API do
   doc """
   Enqueue a job to run after `delay` with explicit config.
   """
-  fn enqueue_in_with(job_type : String, payload : String, delay : Int, config : JobConfig, storage) : Result(String, String) do
+  fn enqueue_in_with(job_type : String, payload : String, delay : Int, config : JobConfig, storage : s) : Result(String, String) do
     Conduit.Queue.enqueue_in(storage, job_type, payload, delay, config)
   end
 
@@ -166,12 +166,12 @@ mod Conduit.API do
   `storage` — storage backend
   `sched`   — full CronSchedule row to upsert
   """
-  fn schedule_cron(storage, sched : Conduit.CronSchedule) : Result((), String) do
+  fn schedule_cron(storage : s, sched : Conduit.CronSchedule) : Result((), String) do
     Conduit.Storage.cron_upsert(storage, sched)
   end
 
   doc "Disable a cron schedule by id."
-  fn pause_cron(storage, cron_id : String) : Result((), String) do
+  fn pause_cron(storage : s, cron_id : String) : Result((), String) do
     match pcron_set_enabled(storage, cron_id, false) do
       Err(e)    -> Err(e)
       Ok(sched) -> Conduit.Storage.cron_upsert(storage, sched)
@@ -180,7 +180,7 @@ mod Conduit.API do
   end
 
   doc "Re-enable a paused cron schedule by id."
-  fn resume_cron(storage, cron_id : String) : Result((), String) do
+  fn resume_cron(storage : s, cron_id : String) : Result((), String) do
     match pcron_set_enabled(storage, cron_id, true) do
       Err(e)    -> Err(e)
       Ok(sched) -> Conduit.Storage.cron_upsert(storage, sched)
@@ -189,7 +189,7 @@ mod Conduit.API do
   end
 
   doc "Cancel a cron schedule permanently (deletes the DB row)."
-  fn cancel_cron(storage, cron_id : String) : Result((), String) do
+  fn cancel_cron(storage : s, cron_id : String) : Result((), String) do
     Conduit.Storage.cron_delete(storage, cron_id)
   end
 
@@ -230,7 +230,7 @@ mod Conduit.API do
   `input_json`    — JSON-serialized input
   `storage`       — storage backend
   """
-  fn start_workflow(workflow_type : String, input_json : String, storage) : Result(WorkflowHandle, String) do
+  fn start_workflow(workflow_type : String, input_json : String, storage : s) : Result(WorkflowHandle, String) do
     let id      = uuid_v4()
     let now     = DateTime.from_timestamp(DateTime.now())
     let config  = match Conduit.WorkflowRegistry.lookup_config(workflow_type) do
@@ -270,7 +270,7 @@ mod Conduit.API do
   Returns the workflow status string (running | completed | failed | cancelled | timed_out)
   or None if the workflow does not exist.
   """
-  fn workflow_status(workflow_id : String, storage) : Result(Option(String), String) do
+  fn workflow_status(workflow_id : String, storage : s) : Result(Option(String), String) do
     Conduit.Storage.workflow_status_get(storage, workflow_id)
   end
 
@@ -285,7 +285,7 @@ mod Conduit.API do
   `payload_json` — JSON payload carried with the signal
   `storage`      — storage backend
   """
-  fn signal_workflow(workflow_id : String, signal_type : String, payload_json : String, storage) : Result(Int, String) do
+  fn signal_workflow(workflow_id : String, signal_type : String, payload_json : String, storage : s) : Result(Int, String) do
     let now = DateTime.from_timestamp(DateTime.now())
     let signal : Conduit.WorkflowSignal = {
       id           = 0,
@@ -302,7 +302,7 @@ mod Conduit.API do
   end
 
   doc "Cancel a running workflow with a reason."
-  fn cancel_workflow(workflow_id : String, reason : String, storage) : Result((), String) do
+  fn cancel_workflow(workflow_id : String, reason : String, storage : s) : Result((), String) do
     Conduit.Storage.workflow_cancel(storage, workflow_id, reason)
   end
 
@@ -316,7 +316,7 @@ mod Conduit.API do
   Queries `conduit_workers` for nodes with status='running'.
   Useful for dashboards and monitoring.
   """
-  fn cluster_nodes(storage) : Result(List(NodeInfo), String) do
+  fn cluster_nodes(storage : s) : Result(List(NodeInfo), String) do
     Conduit.Storage.node_list_active(storage)
   end
 
@@ -347,7 +347,7 @@ mod Conduit.API do
   Deregisters the node from `conduit_workers` and releases the leader advisory
   lock if held. Call this during application shutdown before the process exits.
   """
-  fn stop(storage, config : Conduit.Config) : () do
+  fn stop(storage : s, config : Conduit.Config) : () do
     Conduit.Node.stop(storage, config.node_id)
   end
 
@@ -366,7 +366,7 @@ mod Conduit.API do
 
   Returns the workflow output or error.
   """
-  fn replay_workflow(workflow_id : String, storage) : Result(String, String) do
+  fn replay_workflow(workflow_id : String, storage : s) : Result(String, String) do
     match Conduit.Storage.workflow_load(storage, workflow_id) do
       Err(e)      -> Err("replay: load failed: " ++ e)
       Ok(None)    -> Err("replay: workflow not found: " ++ workflow_id)
@@ -399,7 +399,7 @@ mod Conduit.API do
 
   Useful for debugging: "show me what the workflow saw at step N".
   """
-  fn replay_workflow_to(workflow_id : String, max_sequence : Int, storage) : Result(String, String) do
+  fn replay_workflow_to(workflow_id : String, max_sequence : Int, storage : s) : Result(String, String) do
     match Conduit.Storage.workflow_load(storage, workflow_id) do
       Err(e)      -> Err("replay_to: load failed: " ++ e)
       Ok(None)    -> Err("replay_to: workflow not found: " ++ workflow_id)
@@ -426,7 +426,7 @@ mod Conduit.API do
   doc """
   Query the event history for a workflow. Returns all events in sequence order.
   """
-  fn workflow_events(workflow_id : String, storage) : Result(List(WorkflowEvent), String) do
+  fn workflow_events(workflow_id : String, storage : s) : Result(List(WorkflowEvent), String) do
     Conduit.EventStore.load_all(storage, workflow_id)
   end
 
@@ -436,11 +436,11 @@ mod Conduit.API do
   -- IMPORTANT: we must load the existing row before upserting — constructing a
   -- fresh struct with hardcoded defaults would silently overwrite the schedule,
   -- timezone, queue, and all other fields with incorrect values.
-  pfn pcron_set_enabled(storage, cron_id : String, enabled : Bool) : Result(Conduit.CronSchedule, String) do
+  pfn pcron_set_enabled(storage : s, cron_id : String, enabled : Bool) : Result(Conduit.CronSchedule, String) do
     match Conduit.Storage.cron_load_by_id(storage, cron_id) do
       Err(e)          -> Err(e)
       Ok(None)        -> Err("cron schedule not found: " ++ cron_id)
-      Ok(Some(sched)) -> Ok({ ..sched, enabled = enabled })
+      Ok(Some(sched)) -> Ok({ sched with enabled = enabled })
     end
   end
 end

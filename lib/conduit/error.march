@@ -1,5 +1,0 @@
-mod Conduit do
-  -- ConduitError controls retry behavior from within a job's perform function.
-  -- Types moved to conduit_types.march.
-  pfn perror_placeholder() : () do () end
-end

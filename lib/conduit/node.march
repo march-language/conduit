@@ -35,13 +35,13 @@ mod Conduit.Node do
   Must be called once at application startup (from `Conduit.API.start`).
   Returns the list of task handles; keep them alive for the lifetime of the node.
   """
-  fn start(storage, config : Conduit.Config) : List(Task) do
+  fn start(storage : s, config : Conduit.Config) : List(Task) do
     let node = pbuild_node_info(config)
     match Conduit.Storage.node_register(storage, node) do
       Ok(_)  -> ()
       Err(e)  -> Logger.warn("conduit_node: register failed: " ++ e)
     end
-    let cluster_tbl = Vault.new("conduit_cluster")
+    let cluster_tbl = pcluster_tbl()
     Vault.set(cluster_tbl, "node_id",   config.node_id)
     Vault.set(cluster_tbl, "is_leader",  false)
 
@@ -64,14 +64,14 @@ mod Conduit.Node do
   lock if this node currently holds it.  Call during application shutdown before
   the process exits.
   """
-  fn stop(storage, node_id : String) : () do
+  fn stop(storage : s, node_id : String) : () do
     match Conduit.Storage.node_deregister(storage, node_id) do
       Ok(_)  -> ()
       Err(e)  -> Logger.warn("conduit_node: deregister failed for " ++ node_id ++ ": " ++ e)
     end
     if is_leader() do
       let _ = Conduit.Storage.node_release_leader_lock(storage, leader_lock_id)
-      Vault.set(Vault.new("conduit_cluster"), "is_leader", false)
+      Vault.set(pcluster_tbl(), "is_leader", false)
     else () end
   end
 
@@ -82,7 +82,7 @@ mod Conduit.Node do
   on every heartbeat cycle.
   """
   fn is_leader() : Bool do
-    Vault.get(Vault.new("conduit_cluster"), "is_leader") |> unwrap_or(false)
+    Vault.get(pcluster_tbl(), "is_leader") |> unwrap_or(false)
   end
 
   doc """
@@ -92,7 +92,7 @@ mod Conduit.Node do
   May lag by up to one heartbeat interval when the leader changes.
   """
   fn leader_node_id() : Option(String) do
-    Vault.get(Vault.new("conduit_cluster"), "leader_node_id")
+    Vault.get(pcluster_tbl(), "leader_node_id")
   end
 
   -- Update this node's `last_seen_at` in the DB every `interval_ms`.
@@ -100,7 +100,7 @@ mod Conduit.Node do
   -- If the heartbeat fails (DB error), log a warning and continue — a single
   -- missed heartbeat does not remove the node; the stale threshold provides
   -- a grace period (default 30 s).
-  pfn pheartbeat_loop(storage, node_id : String, interval_ms : Int) : () do
+  pfn pheartbeat_loop(storage : s, node_id : String, interval_ms : Int) : () do
     match Conduit.Storage.node_heartbeat(storage, node_id) do
       Ok(_)  -> ()
       Err(e)  -> Logger.warn("conduit_node: heartbeat failed: " ++ e)
@@ -114,7 +114,7 @@ mod Conduit.Node do
   -- A node is stale if `last_seen_at` is older than `threshold_ms`.  Jobs
   -- owned by stale workers are reset to "pending" so healthy workers can
   -- re-claim them.
-  pfn pstale_loop(storage, threshold_ms : Int, interval_ms : Int) : () do
+  pfn pstale_loop(storage : s, threshold_ms : Int, interval_ms : Int) : () do
     let threshold_s = int_div(threshold_ms, 1000)
     match Conduit.Storage.node_reclaim_jobs(storage, threshold_s) do
       Ok(ids) ->
@@ -138,14 +138,14 @@ mod Conduit.Node do
   -- `node_try_leader_lock` is an idempotent try-acquire — if this node already
   -- holds the lock, it returns Ok(true) again.  The Vault state is updated each
   -- cycle so callers see the most recent election result.
-  pfn pleader_loop(storage, node_id : String, interval_ms : Int) : () do
+  pfn pleader_loop(storage : s, node_id : String, interval_ms : Int) : () do
     match Conduit.Storage.node_try_leader_lock(storage, leader_lock_id) do
       Ok(true) ->
-        let ct = Vault.new("conduit_cluster")
+        let ct = pcluster_tbl()
         Vault.set(ct, "is_leader",      true)
         Vault.set(ct, "leader_node_id", node_id)
       Ok(false) ->
-        Vault.set(Vault.new("conduit_cluster"), "is_leader", false)
+        Vault.set(pcluster_tbl(), "is_leader", false)
       Err(e) ->
         Logger.warn("conduit_node: leader election error: " ++ e)
     end
@@ -179,6 +179,17 @@ mod Conduit.Node do
       last_seen_at = now,
       status       = "running"
     }
+  end
+
+  -- Return (or create) the Vault table used for cluster state.
+  --
+  -- Uses Vault.whereis to find an existing table before creating a new one,
+  -- ensuring the cluster table is process-global and idempotent.
+  pfn pcluster_tbl() do
+    match Vault.whereis("conduit_cluster") do
+      Some(tbl) -> tbl
+      None      -> Vault.new("conduit_cluster")
+    end
   end
 
   pfn psleep_ms(ms : Int) : () do

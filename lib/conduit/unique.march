@@ -11,7 +11,7 @@ mod Conduit.Unique do
   The fingerprint is: SHA-256 hex of (prefix ++ ":" ++ field1=val1 ++ "," ++ ...).
   If `fields` is empty, the entire payload is included.
   """
-  fn fingerprint(job_type : String, queue : String, payload : String, fields : List(String), scope : Conduit.UniqueScope) : String do
+  fn fingerprint(job_type : String, queue : String, payload : String, fields : List(String), scope) : String do
     let prefix = match scope do
       PerQueue -> queue ++ ":" ++ job_type
       Global   -> job_type
@@ -23,14 +23,14 @@ mod Conduit.Unique do
       String.join(pairs, ",")
     end
     let input = prefix ++ ":" ++ extracted
-    Crypto.sha256(input) |> Bytes.to_hex
+    Crypto.sha256(input)
   end
 
   doc """
   Check whether a unique constraint is active (not expired) for the given
   fingerprint. Returns true if a conflicting active job exists.
   """
-  fn conflicts(storage, unique_key : String) : Result(Bool, String) do
+  fn conflicts(storage : s, unique_key : String) : Result(Bool, String) do
     Conduit.Storage.unique_check(storage, unique_key)
   end
 
@@ -38,7 +38,7 @@ mod Conduit.Unique do
   Release a unique constraint for a job (set unique_key = NULL).
   Called when the job completes, is discarded, or dead-lettered.
   """
-  fn release(storage, job_id : String) : Result((), String) do
+  fn release(storage : s, job_id : String) : Result((), String) do
     Conduit.Storage.unique_release(storage, job_id)
   end
 

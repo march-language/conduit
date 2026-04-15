@@ -35,7 +35,7 @@ mod Conduit.Dashboard.Router do
     GET  /nodes                     — cluster nodes
     GET  /api/summary               — JSON summary for polling
   """
-  fn handle(storage, auth : Conduit.Dashboard.Auth, base_path : String, conn : Conn) do
+  fn handle(storage : s, auth : Conduit.Dashboard.Auth, base_path : String, conn : Conn) do
     if Conduit.Dashboard.Auth.check(auth, conn) do
       let method   : Atom         = HttpServer.method(conn)
       let segments : List(String) = HttpServer.path_info(conn)
@@ -47,7 +47,7 @@ mod Conduit.Dashboard.Router do
     end
   end
 
-  pfn pdispatch(storage, base_path : String, method : Atom, segments : List(String), conn : Conn) do
+  pfn pdispatch(storage : s, base_path : String, method : Atom, segments : List(String), conn : Conn) do
     match segments do
 
       -- Overview

@@ -20,7 +20,7 @@ mod Conduit.Dashboard.Auth do
   """
   fn check(auth : Conduit.Auth, conn) : Bool do
     match auth do
-      None      -> true
+      Open      -> true
       Token(t)  ->
         let header = HttpServer.get_req_header(conn, "authorization") |> unwrap_or("")
         Crypto.secure_compare(header, "Bearer " ++ t)

@@ -1,5 +1,7 @@
 mod Conduit.WorkflowRegistry do
 
+  type WorkflowEntry = { config : Conduit.WorkflowConfig }
+
   fn register(
     workflow_type : String,
     runner        : String -> Conduit.WorkflowContext -> Result(String, Conduit.WorkflowError),
@@ -12,6 +14,13 @@ mod Conduit.WorkflowRegistry do
 
   fn lookup_config(workflow_type : String) : Option(Conduit.WorkflowConfig) do
     Vault.get(registry_key(), "cfg:" ++ workflow_type)
+  end
+
+  fn lookup(workflow_type : String) : Option(WorkflowEntry) do
+    match Vault.get(registry_key(), "cfg:" ++ workflow_type) do
+      None      -> None
+      Some(cfg) -> Some({ config = cfg })
+    end
   end
 
   fn run(
@@ -28,6 +37,9 @@ mod Conduit.WorkflowRegistry do
   end
 
   pfn registry_key() do
-    Vault.new("conduit_workflow_registry")
+    match Vault.whereis("conduit_workflow_registry") do
+      Some(tbl) -> tbl
+      None      -> Vault.new("conduit_workflow_registry")
+    end
   end
 end
