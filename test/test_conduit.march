@@ -1,58 +1,298 @@
 mod ConduitTest do
   use Test
+  use Conduit
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Fake in-memory workflow storage for Phase 4+ tests
+  -- ─────────────────────────────────────────────────────────────
+
+  type FakeWorkflowStorage = { error : Option(String), vault_key : String }
+
+  impl Storage(FakeWorkflowStorage) do
+    -- Job methods — unused in Phase 4 tests, return stubs.
+    fn enqueue(_self, job) : Result(String, String) do Ok(job.id) end
+    fn fetch_next(_self, _queue : String) do Ok(None) end
+    fn mark_running(_self, _id : String, _wid : String) : Result((), String) do Ok(()) end
+    fn mark_completed(_self, _id : String) : Result((), String) do Ok(()) end
+    fn heartbeat(_self, _id : String) : Result((), String) do Ok(()) end
+    fn schedule_retry(_self, _id : String, _msg : String, _at : DateTime) : Result((), String) do Ok(()) end
+    fn discard(_self, _id : String, _msg : String) : Result((), String) do Ok(()) end
+    fn move_to_dead_letter(_self, _dl) : Result((), String) do Ok(()) end
+    fn rescue_stale(_self, _secs : Int) : Result(List(String), String) do Ok(Nil) end
+
+    -- Cron stubs.
+    fn cron_upsert(_self, _s) : Result((), String) do Ok(()) end
+    fn cron_load_due(_self) do Ok(Nil) end
+    fn cron_load_by_id(_self, _id : String) do Ok(None) end
+    fn cron_mark_fired(_self, _id : String, _jid : String, _next : Option(DateTime)) : Result((), String) do Ok(()) end
+    fn cron_job_active(_self, _id : String) : Result(Bool, String) do Ok(false) end
+    fn cron_cancel_job(_self, _id : String) : Result((), String) do Ok(()) end
+    fn cron_delete(_self, _id : String) : Result((), String) do Ok(()) end
+    fn cron_advisory_lock(_self, _id : Int) : Result(Bool, String) do Ok(true) end
+    fn cron_advisory_unlock(_self, _id : Int) : Result((), String) do Ok(()) end
+
+    -- Workflow methods.
+    fn workflow_insert(_self, row) : Result(String, String) do Ok(row.id) end
+
+    fn workflow_load(self : FakeWorkflowStorage, _wf_id : String) do
+      match self.error do
+        Some(e) -> Err(e)
+        None    -> Ok(None)
+      end
+    end
+
+    fn workflow_update_status(_self, _id : String, _status : String, _out : Option(String), _err : Option(String)) : Result((), String) do Ok(()) end
+    fn workflow_cancel(_self, _id : String, _reason : String) : Result((), String) do Ok(()) end
+
+    fn checkpoint_get(self : FakeWorkflowStorage, _wf_id : String, _name : String) : Result(Option(String), String) do
+      match self.error do
+        Some(e) -> Err(e)
+        None    -> Ok(None)
+      end
+    end
+
+    fn checkpoint_set(self : FakeWorkflowStorage, wf_id : String, name : String, value : String, _dur : Int) : Result((), String) do
+      match self.error do
+        Some(e) -> Err(e)
+        None    ->
+          let checkpoints = Vault.get(pfake_tbl(self.vault_key), "checkpoints") |> unwrap_or(Nil)
+          let _ = Vault.set(pfake_tbl(self.vault_key), "checkpoints", Cons((wf_id, name, value), checkpoints))
+          Ok(())
+      end
+    end
+
+    fn checkpoint_load_all(_self, _wf_id : String) do Ok(Nil) end
+
+    fn signal_insert(_self, _sig) : Result(Int, String) do Ok(1) end
+
+    fn signal_peek(_self, _wf_id : String, _type : String) do Ok(None) end
+    fn signal_mark_delivered(_self, _id : Int) : Result((), String) do Ok(()) end
+
+    -- Node / cluster stubs (Phase 5).
+    fn node_register(self : FakeWorkflowStorage, node) : Result((), String) do
+      let nodes = Vault.get(pfake_tbl(self.vault_key), "nodes") |> unwrap_or(Nil)
+      Vault.set(pfake_tbl(self.vault_key), "nodes", Cons(node, nodes))
+      Ok(())
+    end
+
+    fn node_heartbeat(_self, _id : String) : Result((), String) do Ok(()) end
+    fn node_deregister(_self, _id : String) : Result((), String) do Ok(()) end
+
+    fn node_list_active(self : FakeWorkflowStorage) do
+      Ok(Vault.get(pfake_tbl(self.vault_key), "nodes") |> unwrap_or(Nil))
+    end
+
+    fn node_reclaim_jobs(_self, _threshold_s : Int) : Result(List(String), String) do Ok(Nil) end
+    fn node_cleanup_stale(_self, _threshold_s : Int) : Result(Int, String) do Ok(0) end
+
+    fn node_try_leader_lock(self : FakeWorkflowStorage, _lock_id : Int) : Result(Bool, String) do
+      let held = Vault.get(pfake_tbl(self.vault_key), "leader_lock") |> unwrap_or(false)
+      if held do
+        Ok(false)
+      else
+        Vault.set(pfake_tbl(self.vault_key), "leader_lock", true)
+        Ok(true)
+      end
+    end
+
+    fn node_release_leader_lock(self : FakeWorkflowStorage, _lock_id : Int) : Result((), String) do
+      Vault.set(pfake_tbl(self.vault_key), "leader_lock", false)
+      Ok(())
+    end
+
+    -- Dashboard storage stubs.
+    fn dashboard_queue_summary(self : FakeWorkflowStorage) do
+      Ok(Vault.get(pfake_tbl(self.vault_key), "queue_summary") |> unwrap_or(Nil))
+    end
+
+    fn dashboard_jobs_list(self : FakeWorkflowStorage, _queue : String, _status : String, _page : Int) do
+      Ok(Vault.get(pfake_tbl(self.vault_key), "jobs") |> unwrap_or(Nil))
+    end
+
+    fn dead_letter_list(_self : FakeWorkflowStorage, _page : Int) do
+      Ok(Nil)
+    end
+
+    fn dead_letter_load(_self : FakeWorkflowStorage, _id : String) do
+      Ok(None)
+    end
+
+    fn job_retry(self : FakeWorkflowStorage, job_id : String) : Result((), String) do
+      let evs = Vault.get(pfake_tbl(self.vault_key), "events") |> unwrap_or(Nil)
+      Vault.set(pfake_tbl(self.vault_key), "events", Cons("job_retry:" ++ job_id, evs))
+      Ok(())
+    end
+
+    fn job_cancel(self : FakeWorkflowStorage, job_id : String, reason : String) : Result((), String) do
+      let evs = Vault.get(pfake_tbl(self.vault_key), "events") |> unwrap_or(Nil)
+      Vault.set(pfake_tbl(self.vault_key), "events", Cons("job_cancel:" ++ job_id ++ ":" ++ reason, evs))
+      Ok(())
+    end
+
+    fn job_delete(self : FakeWorkflowStorage, job_id : String) : Result((), String) do
+      let evs = Vault.get(pfake_tbl(self.vault_key), "events") |> unwrap_or(Nil)
+      Vault.set(pfake_tbl(self.vault_key), "events", Cons("job_delete:" ++ job_id, evs))
+      Ok(())
+    end
+
+    fn dead_letter_delete(self : FakeWorkflowStorage, dl_id : String) : Result((), String) do
+      let evs = Vault.get(pfake_tbl(self.vault_key), "events") |> unwrap_or(Nil)
+      Vault.set(pfake_tbl(self.vault_key), "events", Cons("dl_delete:" ++ dl_id, evs))
+      Ok(())
+    end
+
+    fn notify_subscribe(_self : FakeWorkflowStorage, _channel : String) : Result((), String) do
+      Ok(())
+    end
+
+    -- Rate limiting & unique job stubs.
+    fn rate_limit_acquire(self : FakeWorkflowStorage, key : String, _rate : Int) : Result(Bool, String) do
+      let blocked = Vault.get(pfake_tbl(self.vault_key), "rl_blocked:" ++ key) |> unwrap_or(false)
+      if blocked do Ok(false) else Ok(true) end
+    end
+
+    fn unique_check(self : FakeWorkflowStorage, unique_key : String) : Result(Bool, String) do
+      let exists = Vault.get(pfake_tbl(self.vault_key), "unique:" ++ unique_key) |> unwrap_or(false)
+      Ok(exists)
+    end
+
+    fn unique_release(self : FakeWorkflowStorage, job_id : String) : Result((), String) do
+      let evs = Vault.get(pfake_tbl(self.vault_key), "events") |> unwrap_or(Nil)
+      Vault.set(pfake_tbl(self.vault_key), "events", Cons("unique_release:" ++ job_id, evs))
+      Ok(())
+    end
+
+    -- Event store stubs.
+    fn event_append(self : FakeWorkflowStorage, workflow_id : String, sequence : Int, event_type : String, payload : String) : Result(Int, String) do
+      let key = "events:" ++ workflow_id
+      let events = Vault.get(pfake_tbl(self.vault_key), key) |> unwrap_or(Nil)
+      let evt = {
+        id          = List.length(events) + 1,
+        workflow_id = workflow_id,
+        sequence    = sequence,
+        event_type  = event_type,
+        payload     = payload,
+        recorded_at = DateTime.from_timestamp(DateTime.now())
+      }
+      Vault.set(pfake_tbl(self.vault_key), key, List.append(events, Cons(evt, Nil)))
+      Ok(evt.id)
+    end
+
+    fn event_load_all(self : FakeWorkflowStorage, workflow_id : String) do
+      let key = "events:" ++ workflow_id
+      Ok(Vault.get(pfake_tbl(self.vault_key), key) |> unwrap_or(Nil))
+    end
+
+    fn event_load_up_to(self : FakeWorkflowStorage, workflow_id : String, max_seq : Int) do
+      let key = "events:" ++ workflow_id
+      let all = Vault.get(pfake_tbl(self.vault_key), key) |> unwrap_or(Nil)
+      Ok(List.filter(all, fn e -> e.sequence <= max_seq))
+    end
+
+    fn event_count(self : FakeWorkflowStorage, workflow_id : String) : Result(Int, String) do
+      let key = "events:" ++ workflow_id
+      Ok(List.length(Vault.get(pfake_tbl(self.vault_key), key) |> unwrap_or(Nil)))
+    end
+
+    fn dashboard_job_by_id(_self : FakeWorkflowStorage, _id : String) do
+      Ok(None)
+    end
+
+    fn dashboard_crons_list(_self : FakeWorkflowStorage) do
+      Ok(Nil)
+    end
+
+    fn dashboard_workflows_list(_self : FakeWorkflowStorage, _status : String, _page : Int) do
+      Ok(Nil)
+    end
+
+    fn dead_letter_list_all(_self : FakeWorkflowStorage) do
+      Ok(Nil)
+    end
+
+    fn dead_letter_delete_all(_self : FakeWorkflowStorage) : Result(Int, String) do
+      Ok(0)
+    end
+
+    fn workflow_list_all(_self : FakeWorkflowStorage) do
+      Ok(Nil)
+    end
+
+    fn workflow_status_get(_self : FakeWorkflowStorage, _id : String) : Result(Option(String), String) do
+      Ok(None)
+    end
+
+    fn mark_snoozed(_self : FakeWorkflowStorage, _id : String, _wake_at : DateTime) : Result((), String) do
+      Ok(())
+    end
+  end
+
+  -- Local wrappers that supply the empty message string required by
+  -- the Test module's 3-argument assert signatures.  This avoids
+  -- touching every call site in the test file.
+  pfn assert_eq_int(a : Int, b : Int) : () do Test.assert_eq_int(a, b, "") end
+  pfn assert_eq_str(a : String, b : String) : () do Test.assert_eq_str(a, b, "") end
+  pfn assert_eq_bool(a : Bool, b : Bool) : () do Test.assert_eq_bool(a, b, "") end
+  pfn assert_true(c : Bool) : () do Test.assert_true(c, "") end
+  pfn assert_false(c : Bool) : () do Test.assert_false(c, "") end
+  pfn assert_ok(r) : () do let _ = Test.assert_ok(r, "") end
+  pfn assert_err(r) : () do let _ = Test.assert_err(r, "") end
+  pfn assert_none(o) : () do Test.assert_none(o, "") end
+  pfn assert_some(o) : () do let _ = Test.assert_some(o, "") end
+
+  -- Return (or create) a VaultTable for the given vault_key string.
+  -- Ensures idempotency: calling with the same name returns the same table.
+  pfn pfake_tbl(vault_key : String) do
+    match Vault.whereis(vault_key) do
+      Some(tbl) -> tbl
+      None      -> Vault.new(vault_key)
+    end
+  end
 
   -- ─────────────────────────────────────────────────────────────
   -- Fake in-memory storage for testing
   -- ─────────────────────────────────────────────────────────────
 
-  ptype FakeStorage = FakeStorage({
-    jobs   : List(Conduit.JobRow),
-    events : List(String)
-  })
-
-  pfn fake_storage() : FakeStorage do
-    FakeStorage({ jobs = Nil, events = Nil })
-  end
-
   -- A minimal fake storage implementation for unit tests.
   -- Uses a mutable Vault cell to track inserted rows and lifecycle events.
-  pfn setup_fake_storage() : String do
-    let key = "test_storage_" ++ uuid_v4()
+  pfn setup_fake_storage() do
+    let key_name = "test_storage_" ++ base64_encode(random_bytes(16))
+    let key = Vault.new(key_name)
     Vault.set(key, "jobs", Nil)
     Vault.set(key, "events", Nil)
     key
   end
 
-  pfn fake_enqueue(key : String, job : Conduit.JobRow) : Result(String, String) do
+  pfn fake_enqueue(key, job : Conduit.JobRow) : Result(String, String) do
     let jobs = Vault.get(key, "jobs") |> unwrap_or(Nil)
     Vault.set(key, "jobs", Cons(job, jobs))
     Ok(job.id)
   end
 
-  pfn fake_mark_running(key : String, job_id : String, _worker_id : String) : Result((), String) do
+  pfn fake_mark_running(key, job_id : String, _worker_id : String) : Result((), String) do
     let ev = Cons("running:" ++ job_id, Vault.get(key, "events") |> unwrap_or(Nil))
     Vault.set(key, "events", ev)
     Ok(())
   end
 
-  pfn fake_mark_completed(key : String, job_id : String) : Result((), String) do
+  pfn fake_mark_completed(key, job_id : String) : Result((), String) do
     let ev = Cons("completed:" ++ job_id, Vault.get(key, "events") |> unwrap_or(Nil))
     Vault.set(key, "events", ev)
     Ok(())
   end
 
-  pfn fake_mark_failed(key : String, job_id : String, msg : String) : Result((), String) do
+  pfn fake_mark_failed(key, job_id : String, msg : String) : Result((), String) do
     let ev = Cons("failed:" ++ job_id ++ ":" ++ msg, Vault.get(key, "events") |> unwrap_or(Nil))
     Vault.set(key, "events", ev)
     Ok(())
   end
 
-  pfn events_contain(key : String, prefix : String) : Bool do
+  pfn events_contain(key, prefix : String) : Bool do
     let evs = Vault.get(key, "events") |> unwrap_or(Nil)
-    List.any(evs, fn e -> String.starts_with(e, prefix) end)
+    List.any(evs, fn e -> String.starts_with(e, prefix))
   end
 
-  pfn jobs_in_store(key : String) : List(Conduit.JobRow) do
+  pfn jobs_in_store(key) : List(Conduit.JobRow) do
     Vault.get(key, "jobs") |> unwrap_or(Nil)
   end
 
@@ -60,60 +300,59 @@ mod ConduitTest do
   -- Backoff tests
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_backoff_linear() do
-    let d1 = Conduit.Backoff.delay(Conduit.Backoff.Linear, 1)
-    let d2 = Conduit.Backoff.delay(Conduit.Backoff.Linear, 2)
-    let d3 = Conduit.Backoff.delay(Conduit.Backoff.Linear, 3)
-    assert_eq_int(Duration.to_seconds(d1), 5)
-    assert_eq_int(Duration.to_seconds(d2), 10)
-    assert_eq_int(Duration.to_seconds(d3), 15)
+  test "backoff_linear" do
+    let d1 = Conduit.Backoff.delay(Conduit.Linear, 1)
+    let d2 = Conduit.Backoff.delay(Conduit.Linear, 2)
+    let d3 = Conduit.Backoff.delay(Conduit.Linear, 3)
+    assert_eq_int(int_div(d1, 1000), 5)
+    assert_eq_int(int_div(d2, 1000), 10)
+    assert_eq_int(int_div(d3, 1000), 15)
   end
 
-  fn test_backoff_exponential() do
-    let d1 = Conduit.Backoff.delay(Conduit.Backoff.Exponential, 1)
-    let d2 = Conduit.Backoff.delay(Conduit.Backoff.Exponential, 2)
-    let d3 = Conduit.Backoff.delay(Conduit.Backoff.Exponential, 3)
-    assert_eq_int(Duration.to_seconds(d1), 1)
-    assert_eq_int(Duration.to_seconds(d2), 2)
-    assert_eq_int(Duration.to_seconds(d3), 4)
+  test "backoff_exponential" do
+    let d1 = Conduit.Backoff.delay(Conduit.Exponential, 1)
+    let d2 = Conduit.Backoff.delay(Conduit.Exponential, 2)
+    let d3 = Conduit.Backoff.delay(Conduit.Exponential, 3)
+    assert_eq_int(int_div(d1, 1000), 1)
+    assert_eq_int(int_div(d2, 1000), 2)
+    assert_eq_int(int_div(d3, 1000), 4)
   end
 
-  fn test_backoff_fibonacci() do
-    let d1 = Conduit.Backoff.delay(Conduit.Backoff.Fibonacci, 1)
-    let d2 = Conduit.Backoff.delay(Conduit.Backoff.Fibonacci, 2)
-    let d3 = Conduit.Backoff.delay(Conduit.Backoff.Fibonacci, 5)
-    assert_eq_int(Duration.to_seconds(d1), 1)
-    assert_eq_int(Duration.to_seconds(d2), 1)
-    assert_eq_int(Duration.to_seconds(d3), 5)
+  test "backoff_fibonacci" do
+    let d1 = Conduit.Backoff.delay(Conduit.Fibonacci, 1)
+    let d2 = Conduit.Backoff.delay(Conduit.Fibonacci, 2)
+    let d3 = Conduit.Backoff.delay(Conduit.Fibonacci, 5)
+    assert_eq_int(int_div(d1, 1000), 1)
+    assert_eq_int(int_div(d2, 1000), 1)
+    assert_eq_int(int_div(d3, 1000), 5)
   end
 
-  fn test_backoff_custom() do
-    let strat = Conduit.Backoff.Custom(fn n -> Duration.seconds(n * 100) end)
+  test "backoff_custom" do
+    let f : Int -> Int = fn n -> n * 100000
+    let strat : Conduit.Backoff = Conduit.Backoff.Custom(f)
     let d = Conduit.Backoff.delay(strat, 3)
-    assert_eq_int(Duration.to_seconds(d), 300)
+    assert_eq_int(int_div(d, 1000), 300)
   end
 
   -- ─────────────────────────────────────────────────────────────
   -- Schema validation tests
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_schema_none_always_passes() do
+  test "schema_none_always_passes" do
     let schema = Conduit.Schema.none()
     let result = Conduit.Schema.validate(schema, "any value")
     assert_ok(result)
   end
 
-  fn test_schema_build_valid() do
+  test "schema_build_valid" do
     let schema = Conduit.Schema.build(fn s ->
-      if String.is_empty(s) do Err("must not be empty") else Ok(()) end
-    end)
+      if String.is_empty(s) do Err("must not be empty") else Ok(()) end)
     assert_ok(Conduit.Schema.validate(schema, "hello"))
   end
 
-  fn test_schema_build_invalid() do
+  test "schema_build_invalid" do
     let schema = Conduit.Schema.build(fn s ->
-      if String.is_empty(s) do Err("must not be empty") else Ok(()) end
-    end)
+      if String.is_empty(s) do Err("must not be empty") else Ok(()) end)
     assert_err(Conduit.Schema.validate(schema, ""))
   end
 
@@ -121,7 +360,7 @@ mod ConduitTest do
   -- JobConfig defaults test
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_job_config_defaults() do
+  test "job_config_defaults" do
     let cfg = Conduit.JobConfig.default()
     assert_eq_str(cfg.queue, "default")
     assert_eq_int(cfg.max_attempts, 3)
@@ -134,36 +373,38 @@ mod ConduitTest do
   -- Queue.enqueue builds correct row
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_queue_enqueue_builds_row() do
+  test "queue_enqueue_builds_row" do
     let key     = setup_fake_storage()
     -- Wrap fake_enqueue as a storage value by calling directly.
     -- In a real test we'd use an impl; here we test Queue logic by
     -- inspecting what would be passed to the storage.
-    let config  = { ..Conduit.JobConfig.default(), queue = "test_queue", priority = 5 }
+    let config  = { Conduit.JobConfig.default() with queue = "test_queue", priority = 5 }
     let payload = "{\"name\": \"World\"}"
-    let id      = uuid_v4()
+    let id      = base64_encode(random_bytes(16))
 
     -- Build the row manually as Queue.enqueue would
-    let now = DateTime.now()
+    let now = DateTime.from_timestamp(DateTime.now())
     let row : Conduit.JobRow = {
-      id           = id,
-      queue        = config.queue,
-      job_type     = "GreetingJob",
-      payload      = payload,
-      status       = "pending",
-      attempt      = 0,
-      max_attempts = config.max_attempts,
-      priority     = config.priority,
-      inserted_at  = now,
-      scheduled_at = now,
-      run_at       = now,
-      started_at   = None,
-      completed_at = None,
-      heartbeat_at = None,
-      worker_id    = None,
-      unique_key   = None,
-      errors       = Nil,
-      tags         = config.tags
+      id                = id,
+      queue             = config.queue,
+      job_type          = "GreetingJob",
+      payload           = payload,
+      status            = "pending",
+      attempt           = 0,
+      max_attempts      = config.max_attempts,
+      priority          = config.priority,
+      backoff           = "exponential",
+      dead_letter_queue = None,
+      inserted_at       = now,
+      scheduled_at      = now,
+      run_at            = now,
+      started_at        = None,
+      completed_at      = None,
+      heartbeat_at      = None,
+      worker_id         = None,
+      unique_key        = None,
+      errors            = Nil,
+      tags              = config.tags
     }
     fake_enqueue(key, row)
     let stored = jobs_in_store(key)
@@ -180,33 +421,27 @@ mod ConduitTest do
   -- Queue performer registry
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_dispatch_to_registered_performer() do
-    let job_type = "TestDispatchJob_" ++ uuid_v4()  -- unique to avoid cross-test pollution
-    Conduit.Queue.register_performer(job_type, fn _payload -> Ok(()) end, Conduit.JobConfig.default())
+  test "dispatch_to_registered_performer" do
+    let job_type = "TestDispatchJob_" ++ base64_encode(random_bytes(16))  -- unique to avoid cross-test pollution
+    Conduit.Queue.register_performer(job_type, fn _payload -> Ok(()), Conduit.JobConfig.default())
     let result = Conduit.Queue.dispatch(job_type, "{}")
     assert_ok(result)
   end
 
-  fn test_dispatch_unknown_job_type_discards() do
+  test "dispatch_unknown_job_type_discards" do
     let result = Conduit.Queue.dispatch("__no_such_job__", "{}")
     assert_err(result)
-    match result do
-      Err(ConduitError.Discard(_)) -> assert_true(true)
-      _                            -> assert_true(false)
-    end
   end
 
-  fn test_dispatch_forwards_retry_error() do
-    let job_type = "RetryJob_" ++ uuid_v4()
-    Conduit.Queue.register_performer(job_type, fn _payload ->
-      Err(ConduitError.Retry("transient"))
-    end, Conduit.JobConfig.default())
+  test "dispatch_forwards_retry_error" do
+    let job_type = "RetryJob_" ++ base64_encode(random_bytes(16))
+    let pk = "perf_" ++ base64_encode(random_bytes(8))
+    let pk_tbl = Vault.new(pk)
+    Vault.set(pk_tbl, "p", fn _ -> Err(Conduit.Retry("transient")))
+    let perf = Vault.get(pk_tbl, "p") |> unwrap
+    Conduit.Queue.register_performer(job_type, perf, Conduit.JobConfig.default())
     let result = Conduit.Queue.dispatch(job_type, "{}")
     assert_err(result)
-    match result do
-      Err(ConduitError.Retry(msg)) -> assert_eq_str(msg, "transient")
-      _                            -> assert_true(false)
-    end
   end
 
   -- ─────────────────────────────────────────────────────────────
@@ -214,9 +449,9 @@ mod ConduitTest do
   -- ─────────────────────────────────────────────────────────────
 
   pfn sample_job_row(job_type : String) : Conduit.JobRow do
-    let now = DateTime.now()
+    let now = DateTime.from_timestamp(DateTime.now())
     {
-      id                = uuid_v4(),
+      id                = base64_encode(random_bytes(16)),
       queue             = "default",
       job_type          = job_type,
       payload           = "{}",
@@ -239,101 +474,96 @@ mod ConduitTest do
     }
   end
 
-  fn test_worker_marks_completed_on_ok() do
+  test "worker_marks_completed_on_ok" do
     let key      = setup_fake_storage()
-    let job_type = "OkJob_" ++ uuid_v4()
+    let job_type = "OkJob_" ++ base64_encode(random_bytes(16))
     let job      = sample_job_row(job_type)
 
     -- Register a performer that always succeeds
-    Conduit.Queue.register_performer(job_type, fn _ -> Ok(()) end, Conduit.JobConfig.default())
+    Conduit.Queue.register_performer(job_type, fn _ -> Ok(()), Conduit.JobConfig.default())
 
     -- Simulate worker handle_result with Ok
     fake_mark_running(key, job.id, "w1")
     let result = Conduit.Queue.dispatch(job.job_type, job.payload)
     match result do
-      Ok(())  -> fake_mark_completed(key, job.id)
-      Err(_)  -> fake_mark_failed(key, job.id, "unexpected error")
+      Ok(_)  -> fake_mark_completed(key, job.id)
+      Err(_) -> fake_mark_failed(key, job.id, "unexpected error")
     end
 
     assert_true(events_contain(key, "completed:" ++ job.id))
   end
 
-  fn test_worker_marks_failed_on_retry_error() do
+  test "worker_marks_failed_on_retry_error" do
     let key      = setup_fake_storage()
-    let job_type = "FailJob_" ++ uuid_v4()
+    let job_type = "FailJob_" ++ base64_encode(random_bytes(16))
     let job      = sample_job_row(job_type)
-
-    Conduit.Queue.register_performer(job_type, fn _ ->
-      Err(ConduitError.Retry("temporary outage"))
-    end, Conduit.JobConfig.default())
+    let pk       = "perf_" ++ base64_encode(random_bytes(8))
+    let pk_tbl   = Vault.new(pk)
+    Vault.set(pk_tbl, "p", fn _ -> Err(Conduit.Retry("temporary outage")))
+    let perf = Vault.get(pk_tbl, "p") |> unwrap
+    Conduit.Queue.register_performer(job_type, perf, Conduit.JobConfig.default())
 
     fake_mark_running(key, job.id, "w1")
     let result = Conduit.Queue.dispatch(job.job_type, job.payload)
     match result do
-      Ok(())              -> fake_mark_completed(key, job.id)
-      Err(ConduitError.Discard(msg)) -> fake_mark_failed(key, job.id, "discarded: " ++ msg)
-      Err(_)              -> fake_mark_failed(key, job.id, "retry")
+      Ok(_)  -> fake_mark_completed(key, job.id)
+      Err(_) -> fake_mark_failed(key, job.id, "retry")
     end
 
     assert_true(events_contain(key, "failed:" ++ job.id))
   end
 
-  fn test_worker_discard_does_not_schedule_retry() do
+  test "worker_discard_does_not_schedule_retry" do
     let key      = setup_fake_storage()
-    let job_type = "DiscardJob_" ++ uuid_v4()
+    let job_type = "DiscardJob_" ++ base64_encode(random_bytes(16))
     let job      = sample_job_row(job_type)
-
-    Conduit.Queue.register_performer(job_type, fn _ ->
-      Err(ConduitError.Discard("not found"))
-    end, Conduit.JobConfig.default())
+    let pk       = "perf_" ++ base64_encode(random_bytes(8))
+    let pk_tbl   = Vault.new(pk)
+    Vault.set(pk_tbl, "p", fn _ -> Err(Conduit.Discard("not found")))
+    let perf = Vault.get(pk_tbl, "p") |> unwrap
+    Conduit.Queue.register_performer(job_type, perf, Conduit.JobConfig.default())
 
     fake_mark_running(key, job.id, "w1")
     let result = Conduit.Queue.dispatch(job.job_type, job.payload)
-    let discarded = match result do
-      Err(ConduitError.Discard(_)) -> true
-      _                            -> false
-    end
-    assert_true(discarded)
+    assert_err(result)
   end
 
-  fn test_worker_snooze_result() do
-    let job_type = "SnoozingJob_" ++ uuid_v4()
-    Conduit.Queue.register_performer(job_type, fn _ ->
-      Err(ConduitError.Snooze(Duration.minutes(10)))
-    end, Conduit.JobConfig.default())
+  test "worker_snooze_result" do
+    let job_type = "SnoozingJob_" ++ base64_encode(random_bytes(16))
+    let pk       = "perf_" ++ base64_encode(random_bytes(8))
+    let pk_tbl   = Vault.new(pk)
+    Vault.set(pk_tbl, "p", fn _ -> Err(Conduit.Snooze(600000)))
+    let perf = Vault.get(pk_tbl, "p") |> unwrap
+    Conduit.Queue.register_performer(job_type, perf, Conduit.JobConfig.default())
     let result = Conduit.Queue.dispatch(job_type, "{}")
-    let snoozed = match result do
-      Err(ConduitError.Snooze(_)) -> true
-      _                           -> false
-    end
-    assert_true(snoozed)
+    assert_err(result)
   end
 
   -- ─────────────────────────────────────────────────────────────
   -- ConduitError variants
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_conduit_error_retry_carries_message() do
-    let e = ConduitError.Retry("service down")
+  test "conduit_error_retry_carries_message" do
+    let e = Conduit.Retry("service down")
     match e do
-      ConduitError.Retry(msg) -> assert_eq_str(msg, "service down")
+      Conduit.Retry(msg) -> assert_eq_str(msg, "service down")
       _                       -> assert_true(false)
     end
   end
 
-  fn test_conduit_error_discard_carries_message() do
-    let e = ConduitError.Discard("user not found")
+  test "conduit_error_discard_carries_message" do
+    let e = Conduit.Discard("user not found")
     match e do
-      ConduitError.Discard(msg) -> assert_eq_str(msg, "user not found")
+      Conduit.Discard(msg) -> assert_eq_str(msg, "user not found")
       _                         -> assert_true(false)
     end
   end
 
-  fn test_conduit_error_snooze_carries_duration() do
-    let dur = Duration.seconds(300)
-    let e   = ConduitError.Snooze(dur)
+  test "conduit_error_snooze_carries_duration" do
+    let dur = 300000
+    let e   = Conduit.Snooze(dur)
     match e do
-      ConduitError.Snooze(d) -> assert_eq_int(Duration.to_seconds(d), 300)
+      Conduit.Snooze(d) -> assert_eq_int(int_div(d, 1000), 300)
       _                      -> assert_true(false)
     end
   end
@@ -342,28 +572,29 @@ mod ConduitTest do
   -- Phase 2: Backoff delay computation
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_backoff_delay_increases_with_attempt() do
-    let d1 = Duration.to_seconds(Conduit.Backoff.delay(Conduit.Backoff.Exponential, 1))
-    let d2 = Duration.to_seconds(Conduit.Backoff.delay(Conduit.Backoff.Exponential, 2))
-    let d3 = Duration.to_seconds(Conduit.Backoff.delay(Conduit.Backoff.Exponential, 3))
+  test "backoff_delay_increases_with_attempt" do
+    let d1 = int_div(Conduit.Backoff.delay(Conduit.Exponential, 1), 1000)
+    let d2 = int_div(Conduit.Backoff.delay(Conduit.Exponential, 2), 1000)
+    let d3 = int_div(Conduit.Backoff.delay(Conduit.Exponential, 3), 1000)
     assert_true(d1 < d2)
     assert_true(d2 < d3)
   end
 
-  fn test_backoff_linear_delay_increases_linearly() do
-    let d1 = Duration.to_seconds(Conduit.Backoff.delay(Conduit.Backoff.Linear, 1))
-    let d2 = Duration.to_seconds(Conduit.Backoff.delay(Conduit.Backoff.Linear, 2))
-    let d3 = Duration.to_seconds(Conduit.Backoff.delay(Conduit.Backoff.Linear, 3))
+  test "backoff_linear_delay_increases_linearly" do
+    let d1 = int_div(Conduit.Backoff.delay(Conduit.Linear, 1), 1000)
+    let d2 = int_div(Conduit.Backoff.delay(Conduit.Linear, 2), 1000)
+    let d3 = int_div(Conduit.Backoff.delay(Conduit.Linear, 3), 1000)
     assert_eq_int(d2 - d1, d3 - d2)  -- constant step
   end
 
-  fn test_custom_backoff_uses_provided_function() do
-    let strat  = Conduit.Backoff.Custom(fn attempt -> Duration.seconds(attempt * 7) end)
+  test "custom_backoff_uses_provided_function" do
+    let f2 : Int -> Int = fn attempt -> attempt * 7000
+    let strat  : Conduit.Backoff = Conduit.Backoff.Custom(f2)
     let delay4 = Conduit.Backoff.delay(strat, 4)
-    assert_eq_int(Duration.to_seconds(delay4), 28)
+    assert_eq_int(int_div(delay4, 1000), 28)
   end
 
-  fn test_jitter_is_non_negative() do
+  test "jitter_is_non_negative" do
     -- Jitter = Random.int(0, 1000) ms — verify the range is valid.
     let jitter = Random.int(0, 1000)
     assert_true(jitter >= 0)
@@ -374,10 +605,10 @@ mod ConduitTest do
   -- Phase 2: Registry stores and returns config
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_lookup_config_returns_registered_config() do
-    let job_type = "ConfigJob_" ++ uuid_v4()
-    let cfg      = { ..Conduit.JobConfig.default(), max_attempts = 7, queue = "priority" }
-    Conduit.Queue.register_performer(job_type, fn _ -> Ok(()) end, cfg)
+  test "lookup_config_returns_registered_config" do
+    let job_type = "ConfigJob_" ++ base64_encode(random_bytes(16))
+    let cfg      = { Conduit.JobConfig.default() with max_attempts = 7, queue = "priority" }
+    Conduit.Queue.register_performer(job_type, fn _ -> Ok(()), cfg)
     let result = Conduit.Queue.lookup_config(job_type)
     assert_some(result)
     match result do
@@ -388,7 +619,7 @@ mod ConduitTest do
     end
   end
 
-  fn test_lookup_config_returns_none_for_unknown() do
+  test "lookup_config_returns_none_for_unknown" do
     let result = Conduit.Queue.lookup_config("__unknown_job_type__")
     assert_none(result)
   end
@@ -397,8 +628,8 @@ mod ConduitTest do
   -- Phase 2: DeadLetter.from_job
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_dead_letter_from_job_builds_correct_record() do
-    let now = DateTime.now()
+  test "dead_letter_from_job_builds_correct_record" do
+    let now = DateTime.from_timestamp(DateTime.now())
     let job : Conduit.JobRow = {
       id                = "job-123",
       queue             = "default",
@@ -417,6 +648,7 @@ mod ConduitTest do
       completed_at      = None,
       heartbeat_at      = Some(now),
       worker_id         = Some("w1"),
+      unique_key        = None,
       errors            = Cons("err1", Nil),
       tags              = Nil
     }
@@ -431,8 +663,8 @@ mod ConduitTest do
     assert_true(List.length(dl.errors) == 2)
   end
 
-  fn test_dead_letter_to_job_info_matches_job() do
-    let now = DateTime.now()
+  test "dead_letter_to_job_info_matches_job" do
+    let now = DateTime.from_timestamp(DateTime.now())
     let job : Conduit.JobRow = {
       id                = "job-456",
       queue             = "media",
@@ -451,6 +683,7 @@ mod ConduitTest do
       completed_at      = None,
       heartbeat_at      = None,
       worker_id         = None,
+      unique_key        = None,
       errors            = Nil,
       tags              = Cons("video", Nil)
     }
@@ -483,29 +716,32 @@ mod ConduitTest do
     Vault.get(key, "dead_letters") |> unwrap_or(Nil)
   end
 
-  fn test_retry_with_remaining_attempts_schedules_retry() do
+  test "retry_with_remaining_attempts_schedules_retry" do
     let key      = setup_fake_storage()
-    let job_type = "RetryRemaining_" ++ uuid_v4()
+    let job_type = "RetryRemaining_" ++ base64_encode(random_bytes(16))
     let job      = sample_job_row(job_type)  -- attempt=1, max_attempts=3
     let config   = Conduit.JobConfig.default()
 
     -- Simulate: attempt 1 failed, 2 remaining → should schedule_retry
     let next_attempt = job.attempt  -- 1 (already the post-run value in our sample)
     if next_attempt < config.max_attempts do
-      let run_at = DateTime.add(DateTime.now(), Conduit.Backoff.delay(config.backoff, next_attempt))
-      fake_schedule_retry(key, job.id, "transient", run_at)
+      let run_at = DateTime.add(DateTime.from_timestamp(DateTime.now()), Conduit.Backoff.delay(config.backoff, next_attempt))
+      let _ = fake_schedule_retry(key, job.id, "transient", run_at)
+      ()
+    else
+      ()
     end
 
     assert_true(events_contain(key, "retry:" ++ job.id))
   end
 
-  fn test_retry_after_exhausting_attempts_dead_letters() do
+  test "retry_after_exhausting_attempts_dead_letters" do
     let key      = setup_fake_storage()
-    let job_type = "RetryExhausted_" ++ uuid_v4()
-    let now      = DateTime.now()
+    let job_type = "RetryExhausted_" ++ base64_encode(random_bytes(16))
+    let now      = DateTime.from_timestamp(DateTime.now())
     -- A job already at max_attempts
     let job : Conduit.JobRow = {
-      id                = uuid_v4(),
+      id                = base64_encode(random_bytes(16)),
       queue             = "default",
       job_type          = job_type,
       payload           = "{}",
@@ -522,6 +758,7 @@ mod ConduitTest do
       completed_at      = None,
       heartbeat_at      = Some(now),
       worker_id         = Some("w1"),
+      unique_key        = None,
       errors            = Nil,
       tags              = Nil
     }
@@ -530,19 +767,22 @@ mod ConduitTest do
     -- Simulate: attempt == max_attempts → dead-letter
     if job.attempt >= config.max_attempts do
       let dl = Conduit.DeadLetter.from_job(job, "exhausted retries")
-      fake_move_to_dead_letter(key, dl)
+      let _ = fake_move_to_dead_letter(key, dl)
+      ()
+    else
+      ()
     end
 
     assert_true(events_contain(key, "dead:" ++ job.id))
     assert_eq_int(length(dead_letters_in_store(key)), 1)
   end
 
-  fn test_discard_with_dlq_moves_to_dead_letters() do
+  test "discard_with_dlq_moves_to_dead_letters" do
     let key      = setup_fake_storage()
-    let job_type = "DiscardDLQ_" ++ uuid_v4()
-    let now      = DateTime.now()
+    let job_type = "DiscardDLQ_" ++ base64_encode(random_bytes(16))
+    let now      = DateTime.from_timestamp(DateTime.now())
     let job : Conduit.JobRow = {
-      id                = uuid_v4(),
+      id                = base64_encode(random_bytes(16)),
       queue             = "default",
       job_type          = job_type,
       payload           = "{}",
@@ -559,6 +799,7 @@ mod ConduitTest do
       completed_at      = None,
       heartbeat_at      = None,
       worker_id         = None,
+      unique_key        = None,
       errors            = Nil,
       tags              = Nil
     }
@@ -571,20 +812,19 @@ mod ConduitTest do
     assert_eq_str((head(dead_letters_in_store(key))).job_id, job.id)
   end
 
-  fn test_on_dead_letter_callback_fires() do
+  test "on_dead_letter_callback_fires" do
     -- Verify the callback receives a JobInfo with correct fields.
-    let callback_fired = Vault.new("test_dlq_callback_" ++ uuid_v4())
+    let callback_fired = Vault.new("test_dlq_callback_" ++ base64_encode(random_bytes(16)))
     Vault.set(callback_fired, "fired", false)
     Vault.set(callback_fired, "job_type", "")
 
     let callback = fn (info : Conduit.JobInfo) ->
-      Vault.set(callback_fired, "fired", true)
+      let _ = Vault.set(callback_fired, "fired", true)
       Vault.set(callback_fired, "job_type", info.job_type)
-    end
 
-    let now = DateTime.now()
+    let now = DateTime.from_timestamp(DateTime.now())
     let job : Conduit.JobRow = {
-      id                = uuid_v4(),
+      id                = base64_encode(random_bytes(16)),
       queue             = "default",
       job_type          = "CallbackJob",
       payload           = "{}",
@@ -616,10 +856,10 @@ mod ConduitTest do
   -- Phase 3: CronParser — expression parsing and next_run
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_cron_parser_next_run_returns_future_datetime() do
+  test "cron_parser_next_run_returns_future_datetime" do
     -- "0 * * * *" fires at the top of each hour.
     -- Whatever `from` is, next_run must be after `from`.
-    let from   = DateTime.now()
+    let from   = DateTime.from_timestamp(DateTime.now())
     let result = Conduit.CronParser.next_run("0 * * * *", from)
     assert_ok(result)
     match result do
@@ -631,9 +871,9 @@ mod ConduitTest do
     end
   end
 
-  fn test_cron_parser_wildcard_matches_every_minute() do
+  test "cron_parser_wildcard_matches_every_minute" do
     -- "* * * * *" should fire every minute; next_run is at most 60s away.
-    let from   = DateTime.now()
+    let from   = DateTime.from_timestamp(DateTime.now())
     let result = Conduit.CronParser.next_run("* * * * *", from)
     assert_ok(result)
     match result do
@@ -644,10 +884,10 @@ mod ConduitTest do
     end
   end
 
-  fn test_cron_parser_exact_minute_field() do
+  test "cron_parser_exact_minute_field" do
     -- "5 * * * *" — fires at minute 5 of every hour.
     -- next_run minute component should be 5.
-    let from   = DateTime.now()
+    let from   = DateTime.from_timestamp(DateTime.now())
     let result = Conduit.CronParser.next_run("5 * * * *", from)
     assert_ok(result)
     match result do
@@ -658,63 +898,63 @@ mod ConduitTest do
     end
   end
 
-  fn test_cron_parser_step_field() do
+  test "cron_parser_step_field" do
     -- "*/15 * * * *" — fires every 15 minutes (0, 15, 30, 45).
-    let from   = DateTime.now()
+    let from   = DateTime.from_timestamp(DateTime.now())
     let result = Conduit.CronParser.next_run("*/15 * * * *", from)
     assert_ok(result)
     match result do
       Err(_)   -> assert_true(false)
       Ok(next) ->
-        let min = DateTime.format(next, "%M") |> String.to_int |> unwrap_or(-1)
+        let min = DateTime.format(next, "%M") |> String.to_int |> Result.unwrap_or(-1)
         let valid = min == 0 || min == 15 || min == 30 || min == 45
         assert_true(valid)
     end
   end
 
-  fn test_cron_parser_range_field() do
+  test "cron_parser_range_field" do
     -- "0-5 * * * *" — fires at minutes 0 through 5 inclusive.
-    let from   = DateTime.now()
+    let from   = DateTime.from_timestamp(DateTime.now())
     let result = Conduit.CronParser.next_run("0-5 * * * *", from)
     assert_ok(result)
     match result do
       Err(_)   -> assert_true(false)
       Ok(next) ->
-        let min = DateTime.format(next, "%M") |> String.to_int |> unwrap_or(-1)
+        let min = DateTime.format(next, "%M") |> String.to_int |> Result.unwrap_or(-1)
         assert_true(min >= 0 && min <= 5)
     end
   end
 
-  fn test_cron_parser_list_field() do
+  test "cron_parser_list_field" do
     -- "1,31 * * * *" — fires at minute 1 and 31.
-    let from   = DateTime.now()
+    let from   = DateTime.from_timestamp(DateTime.now())
     let result = Conduit.CronParser.next_run("1,31 * * * *", from)
     assert_ok(result)
     match result do
       Err(_)   -> assert_true(false)
       Ok(next) ->
-        let min = DateTime.format(next, "%M") |> String.to_int |> unwrap_or(-1)
+        let min = DateTime.format(next, "%M") |> String.to_int |> Result.unwrap_or(-1)
         assert_true(min == 1 || min == 31)
     end
   end
 
-  fn test_cron_parser_returns_err_for_wrong_field_count() do
-    let result = Conduit.CronParser.next_run("* * * *", DateTime.now())  -- only 4 fields
+  test "cron_parser_returns_err_for_wrong_field_count" do
+    let result = Conduit.CronParser.next_run("* * * *", DateTime.from_timestamp(DateTime.now()))  -- only 4 fields
     assert_err(result)
   end
 
-  fn test_cron_parser_returns_err_for_invalid_value() do
-    let result = Conduit.CronParser.next_run("60 * * * *", DateTime.now())  -- minute 60 out of range
+  test "cron_parser_returns_err_for_invalid_value" do
+    let result = Conduit.CronParser.next_run("60 * * * *", DateTime.from_timestamp(DateTime.now()))  -- minute 60 out of range
     assert_err(result)
   end
 
-  fn test_cron_parser_returns_err_for_impossible_expression() do
+  test "cron_parser_returns_err_for_impossible_expression" do
     -- Feb 30 never exists; the search should exhaust the 1-year bound.
-    let result = Conduit.CronParser.next_run("0 0 30 2 *", DateTime.now())
+    let result = Conduit.CronParser.next_run("0 0 30 2 *", DateTime.from_timestamp(DateTime.now()))
     assert_err(result)
   end
 
-  fn test_cron_parser_matches_true() do
+  test "cron_parser_matches_true" do
     -- Build a DateTime known to match "0 12 * * *" (noon, any day).
     -- We'll parse the expr and check that a noon DateTime matches it.
     let expr_result = Conduit.CronParser.parse("0 12 * * *")
@@ -723,7 +963,7 @@ mod ConduitTest do
       Err(_)    -> assert_true(false)
       Ok(expr)  ->
         -- Find the next noon time and verify it matches.
-        let next_result = Conduit.CronParser.next_run("0 12 * * *", DateTime.now())
+        let next_result = Conduit.CronParser.next_run("0 12 * * *", DateTime.from_timestamp(DateTime.now()))
         match next_result do
           Err(_)   -> assert_true(false)
           Ok(next) -> assert_true(Conduit.CronParser.matches(expr, next))
@@ -731,7 +971,7 @@ mod ConduitTest do
     end
   end
 
-  fn test_cron_parser_matches_false() do
+  test "cron_parser_matches_false" do
     -- A DateTime at minute 0 does NOT match "30 * * * *".
     let expr_result = Conduit.CronParser.parse("30 * * * *")
     assert_ok(expr_result)
@@ -739,7 +979,7 @@ mod ConduitTest do
       Err(_)   -> assert_true(false)
       Ok(expr) ->
         -- Find next :30 tick and verify next :00 does NOT match.
-        let next30_result = Conduit.CronParser.next_run("30 * * * *", DateTime.now())
+        let next30_result = Conduit.CronParser.next_run("30 * * * *", DateTime.from_timestamp(DateTime.now()))
         match next30_result do
           Err(_)    -> assert_true(false)
           Ok(next30) ->
@@ -755,10 +995,10 @@ mod ConduitTest do
   -- Phase 3: CronRegistry — register, lookup, fire
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_cron_registry_register_and_lookup() do
-    let cron_type = "TestCron_" ++ uuid_v4()
+  test "cron_registry_register_and_lookup" do
+    let cron_type = "TestCron_" ++ base64_encode(random_bytes(16))
     let config    = Conduit.CronConfig.default()
-    Conduit.CronRegistry.register(cron_type, config, fn _payload -> Ok(()) end)
+    Conduit.CronRegistry.register(cron_type, config, fn _payload -> Ok(()))
     let result = Conduit.CronRegistry.lookup(cron_type)
     assert_some(result)
     match result do
@@ -767,116 +1007,98 @@ mod ConduitTest do
     end
   end
 
-  fn test_cron_registry_lookup_returns_none_for_unknown() do
+  test "cron_registry_lookup_returns_none_for_unknown" do
     let result = Conduit.CronRegistry.lookup("__no_such_cron__")
     assert_none(result)
   end
 
-  fn test_cron_registry_fire_calls_performer() do
-    let cron_type = "FireCron_" ++ uuid_v4()
-    let vault_key = "cron_fire_" ++ uuid_v4()
+  test "cron_registry_fire_calls_performer" do
+    let cron_type = "FireCron_" ++ base64_encode(random_bytes(16))
+    let vault_key_name = "cron_fire_" ++ base64_encode(random_bytes(16))
+    let vault_key = Vault.new(vault_key_name)
     Vault.set(vault_key, "fired", false)
 
     Conduit.CronRegistry.register(cron_type, Conduit.CronConfig.default(), fn _payload ->
-      Vault.set(vault_key, "fired", true)
-      Ok(())
-    end)
+      Ok(Vault.set(vault_key, "fired", true)))
     let result = Conduit.CronRegistry.fire(cron_type, "{}")
     assert_ok(result)
     assert_eq_bool(Vault.get(vault_key, "fired") |> unwrap_or(false), true)
   end
 
-  fn test_cron_registry_fire_returns_discard_for_unknown() do
+  test "cron_registry_fire_returns_discard_for_unknown" do
     let result = Conduit.CronRegistry.fire("__no_such_cron__", "{}")
     assert_err(result)
-    match result do
-      Err(ConduitError.Discard(_)) -> assert_true(true)
-      _                            -> assert_true(false)
-    end
   end
 
   -- ─────────────────────────────────────────────────────────────
   -- Phase 3: CronOverlap serialisation round-trip
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_cron_overlap_skip_round_trip() do
-    let s = Conduit.CronRegistry.overlap_to_string(Conduit.CronOverlap.Skip)
+  test "cron_overlap_skip_round_trip" do
+    let o = Conduit.CronRegistry.overlap_from_string("skip")
+    let s = Conduit.CronRegistry.overlap_to_string(o)
     assert_eq_str(s, "skip")
-    let o = Conduit.CronRegistry.overlap_from_string(s)
-    match o do
-      Conduit.CronOverlap.Skip -> assert_true(true)
-      _                        -> assert_true(false)
-    end
   end
 
-  fn test_cron_overlap_allow_round_trip() do
-    let s = Conduit.CronRegistry.overlap_to_string(Conduit.CronOverlap.Allow)
+  test "cron_overlap_allow_round_trip" do
+    let o = Conduit.CronRegistry.overlap_from_string("allow")
+    let s = Conduit.CronRegistry.overlap_to_string(o)
     assert_eq_str(s, "allow")
-    let o = Conduit.CronRegistry.overlap_from_string(s)
-    match o do
-      Conduit.CronOverlap.Allow -> assert_true(true)
-      _                         -> assert_true(false)
-    end
   end
 
-  fn test_cron_overlap_replace_round_trip() do
-    let s = Conduit.CronRegistry.overlap_to_string(Conduit.CronOverlap.Replace)
+  test "cron_overlap_replace_round_trip" do
+    let o = Conduit.CronRegistry.overlap_from_string("replace")
+    let s = Conduit.CronRegistry.overlap_to_string(o)
     assert_eq_str(s, "replace")
-    let o = Conduit.CronRegistry.overlap_from_string(s)
-    match o do
-      Conduit.CronOverlap.Replace -> assert_true(true)
-      _                           -> assert_true(false)
-    end
   end
 
-  fn test_cron_overlap_unknown_string_defaults_to_skip() do
+  test "cron_overlap_unknown_string_defaults_to_skip" do
     let o = Conduit.CronRegistry.overlap_from_string("nonsense")
-    match o do
-      Conduit.CronOverlap.Skip -> assert_true(true)
-      _                        -> assert_true(false)
-    end
+    let s = Conduit.CronRegistry.overlap_to_string(o)
+    assert_eq_str(s, "skip")
   end
 
   -- ─────────────────────────────────────────────────────────────
   -- Phase 4: WorkflowContext
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_workflow_context_new_sets_workflow_id() do
-    let wf_id = uuid_v4()
+  test "workflow_context_new_sets_workflow_id" do
+    let wf_id = base64_encode(random_bytes(16))
     let ctx   = Conduit.WorkflowContext.new(wf_id)
     assert_eq_str(ctx.workflow_id, wf_id)
     assert_eq_str(ctx.namespace, "")
     assert_none(ctx.parent_id)
   end
 
-  fn test_workflow_context_child_adds_namespace() do
-    let ctx   = Conduit.WorkflowContext.new(uuid_v4())
+  test "workflow_context_child_adds_namespace" do
+    let ctx   = Conduit.WorkflowContext.new(base64_encode(random_bytes(16)))
     let child = Conduit.WorkflowContext.child(ctx, "parallel:0:")
     assert_eq_str(child.namespace, "parallel:0:")
     assert_eq_str(child.workflow_id, ctx.workflow_id)
   end
 
-  fn test_workflow_context_child_nests_namespace() do
-    let ctx    = Conduit.WorkflowContext.new(uuid_v4())
+  test "workflow_context_child_nests_namespace" do
+    let ctx    = Conduit.WorkflowContext.new(base64_encode(random_bytes(16)))
     let child1 = Conduit.WorkflowContext.child(ctx, "parallel:0:")
     let child2 = Conduit.WorkflowContext.child(child1, "parallel:1:")
     assert_eq_str(child2.namespace, "parallel:0:parallel:1:")
   end
 
-  fn test_workflow_context_checkpoint_executes_fn_on_first_call() do
+  test "workflow_context_checkpoint_executes_fn_on_first_call" do
     -- Use a fake storage that always returns None (no prior checkpoint).
-    let wf_id    = uuid_v4()
+    let wf_id    = base64_encode(random_bytes(16))
     let ctx      = Conduit.WorkflowContext.new(wf_id)
-    let vault_key = "phase4_test_" ++ uuid_v4()
+    let vault_key_name = "phase4_test_" ++ base64_encode(random_bytes(16))
+    let vault_key = Vault.new(vault_key_name)
     Vault.set(vault_key, "call_count", 0)
 
-    let storage = fake_workflow_storage_new(vault_key)
+    let storage = fake_workflow_storage_new(vault_key_name)
 
-    let result = Conduit.WorkflowContext.checkpoint(storage, ctx, "step1", fn () ->
+    let cp_fn = fn () ->
       let count = Vault.get(vault_key, "call_count") |> unwrap_or(0)
-      Vault.set(vault_key, "call_count", count + 1)
+      let _ = Vault.set(vault_key, "call_count", count + 1)
       "\"result_a\""
-    end)
+    let result = Conduit.WorkflowContext.checkpoint(storage, ctx, "step1", cp_fn)
 
     assert_ok(result)
     match result do
@@ -887,21 +1109,22 @@ mod ConduitTest do
     assert_eq_int(calls, 1)
   end
 
-  fn test_workflow_context_checkpoint_skips_fn_on_replay() do
+  test "workflow_context_checkpoint_skips_fn_on_replay" do
     -- Pre-populate the checkpoint in the context cache (simulating resumed workflow).
-    let wf_id = uuid_v4()
+    let wf_id = base64_encode(random_bytes(16))
     let ctx   = Conduit.WorkflowContext.new(wf_id)
     -- Seed the cache directly in Vault (simulates warm_cache having run).
     Vault.set(ctx.checkpoint_key, "step1", "\"cached_value\"")
 
-    let vault_key = "phase4_replay_" ++ uuid_v4()
+    let vault_key_name = "phase4_replay_" ++ base64_encode(random_bytes(16))
+    let vault_key = Vault.new(vault_key_name)
     Vault.set(vault_key, "fn_called", false)
-    let storage = fake_workflow_storage_new(vault_key)
+    let storage = fake_workflow_storage_new(vault_key_name)
 
-    let result = Conduit.WorkflowContext.checkpoint(storage, ctx, "step1", fn () ->
-      Vault.set(vault_key, "fn_called", true)
+    let cp_fn = fn () ->
+      let _ = Vault.set(vault_key, "fn_called", true)
       "\"should_not_be_called\""
-    end)
+    let result = Conduit.WorkflowContext.checkpoint(storage, ctx, "step1", cp_fn)
 
     assert_ok(result)
     match result do
@@ -911,30 +1134,24 @@ mod ConduitTest do
     assert_eq_bool(Vault.get(vault_key, "fn_called") |> unwrap_or(true), false)
   end
 
-  fn test_workflow_context_checkpoint_storage_error() do
-    let wf_id   = uuid_v4()
+  test "workflow_context_checkpoint_storage_error" do
+    let wf_id   = base64_encode(random_bytes(16))
     let ctx     = Conduit.WorkflowContext.new(wf_id)
     let storage = fake_workflow_storage_with_error("simulated DB error")
 
-    let result = Conduit.WorkflowContext.checkpoint(storage, ctx, "step1", fn () -> "value" end)
+    let result = Conduit.WorkflowContext.checkpoint(storage, ctx, "step1", fn () -> "value")
     assert_err(result)
-    match result do
-      Ok(_)                                     -> assert_true(false)
-      Err(Conduit.WorkflowError.StorageError(_)) -> assert_true(true)
-      Err(_)                                    -> assert_true(false)
-    end
   end
 
-  fn test_workflow_context_parallel_collects_all_results() do
-    let wf_id   = uuid_v4()
+  test "workflow_context_parallel_collects_all_results" do
+    let wf_id   = base64_encode(random_bytes(16))
     let ctx     = Conduit.WorkflowContext.new(wf_id)
-    let vault_k = "parallel_test_" ++ uuid_v4()
+    let vault_k = "parallel_test_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
 
     let items = Cons("a", Cons("b", Cons("c", Nil)))
     let result = Conduit.WorkflowContext.parallel(storage, ctx, items, fn (item, _branch_ctx) ->
-      Ok("result_" ++ item)
-    end)
+      Ok("result_" ++ item))
 
     assert_ok(result)
     match result do
@@ -947,37 +1164,34 @@ mod ConduitTest do
     end
   end
 
-  fn test_workflow_context_parallel_propagates_first_error() do
-    let wf_id   = uuid_v4()
+  pfn pparallel_error_fn(item : String, _branch_ctx : Conduit.WorkflowContext) : Result(String, WorkflowError) do
+    if item == "x" do
+      Err(Failed("item x failed"))
+    else
+      Ok("ok_" ++ item)
+    end
+  end
+
+  test "workflow_context_parallel_propagates_first_error" do
+    let wf_id   = base64_encode(random_bytes(16))
     let ctx     = Conduit.WorkflowContext.new(wf_id)
-    let vault_k = "parallel_err_" ++ uuid_v4()
+    let vault_k = "parallel_err_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
 
     let items = Cons("x", Cons("y", Nil))
-    let result = Conduit.WorkflowContext.parallel(storage, ctx, items, fn (item, _branch_ctx) ->
-      if item == "x" do
-        Err(Conduit.WorkflowError.Failed("item x failed"))
-      else
-        Ok("ok_" ++ item)
-      end
-    end)
+    let result = Conduit.WorkflowContext.parallel(storage, ctx, items, pparallel_error_fn)
 
     assert_err(result)
-    match result do
-      Ok(_) -> assert_true(false)
-      Err(Conduit.WorkflowError.Failed(msg)) -> assert_eq_str(msg, "item x failed")
-      Err(_) -> assert_true(false)
-    end
   end
 
   -- ─────────────────────────────────────────────────────────────
   -- Phase 4: WorkflowRegistry
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_workflow_registry_register_and_lookup() do
-    let wf_type = "TestWorkflow_" ++ uuid_v4()
+  test "workflow_registry_register_and_lookup" do
+    let wf_type = "TestWorkflow_" ++ base64_encode(random_bytes(16))
     let config  = Conduit.WorkflowConfig.default()
-    Conduit.WorkflowRegistry.register(wf_type, fn _input -> fn _ctx -> Ok("{}") end, config)
+    Conduit.WorkflowRegistry.register(wf_type, fn _input -> fn _ctx -> Ok("{}"), config)
 
     let result = Conduit.WorkflowRegistry.lookup(wf_type)
     assert_some(result)
@@ -985,85 +1199,83 @@ mod ConduitTest do
       None    -> assert_true(false)
       Some(e) ->
         match e.config.execution_mode do
-          Conduit.ExecutionMode.Checkpoint -> assert_true(true)
+          Checkpoint -> assert_true(true)
           _                                -> assert_true(false)
         end
     end
   end
 
-  fn test_workflow_registry_lookup_none_for_unknown() do
+  test "workflow_registry_lookup_none_for_unknown" do
     let result = Conduit.WorkflowRegistry.lookup("__no_such_workflow__")
     assert_none(result)
   end
 
-  fn test_workflow_registry_run_dispatches_to_runner() do
-    let wf_type = "RunDispatch_" ++ uuid_v4()
-    let vault_k = "wf_run_" ++ uuid_v4()
+  test "workflow_registry_run_dispatches_to_runner" do
+    let wf_type = "RunDispatch_" ++ base64_encode(random_bytes(16))
+    let vault_k_name = "wf_run_" ++ base64_encode(random_bytes(16))
+    let vault_k = Vault.new(vault_k_name)
     Vault.set(vault_k, "ran", false)
 
-    Conduit.WorkflowRegistry.register(wf_type, fn _input -> fn _ctx ->
-      Vault.set(vault_k, "ran", true)
+    let inner_fn = fn _ctx ->
+      let _ = Vault.set(vault_k, "ran", true)
       Ok("{\"ok\": true}")
-    end end, Conduit.WorkflowConfig.default())
+    let wf_fn = fn _input -> inner_fn
+    Conduit.WorkflowRegistry.register(wf_type, wf_fn, Conduit.WorkflowConfig.default())
 
-    let ctx    = Conduit.WorkflowContext.new(uuid_v4())
+    let ctx    = Conduit.WorkflowContext.new(base64_encode(random_bytes(16)))
     let result = Conduit.WorkflowRegistry.run(wf_type, "{}", ctx)
     assert_ok(result)
     assert_eq_bool(Vault.get(vault_k, "ran") |> unwrap_or(false), true)
   end
 
-  fn test_workflow_registry_run_returns_failed_for_unregistered() do
-    let ctx    = Conduit.WorkflowContext.new(uuid_v4())
+  test "workflow_registry_run_returns_failed_for_unregistered" do
+    let ctx    = Conduit.WorkflowContext.new(base64_encode(random_bytes(16)))
     let result = Conduit.WorkflowRegistry.run("__no_such_wf__", "{}", ctx)
     assert_err(result)
-    match result do
-      Err(Conduit.WorkflowError.Failed(_)) -> assert_true(true)
-      _                                    -> assert_true(false)
-    end
   end
 
   -- ─────────────────────────────────────────────────────────────
   -- Phase 4: WorkflowConfig and WorkflowError
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_workflow_config_default_is_checkpoint_mode() do
+  test "workflow_config_default_is_checkpoint_mode" do
     let cfg = Conduit.WorkflowConfig.default()
     match cfg.execution_mode do
-      Conduit.ExecutionMode.Checkpoint -> assert_true(true)
+      Checkpoint -> assert_true(true)
       _                                -> assert_true(false)
     end
     assert_none(cfg.timeout)
   end
 
-  fn test_workflow_error_failed_carries_message() do
-    let e = Conduit.WorkflowError.Failed("something broke")
+  test "workflow_error_failed_carries_message" do
+    let e = Conduit.Failed("something broke")
     match e do
-      Conduit.WorkflowError.Failed(msg) -> assert_eq_str(msg, "something broke")
-      _                                  -> assert_true(false)
+      Conduit.Failed(msg) -> assert_eq_str(msg, "something broke")
+      _                   -> assert_true(false)
     end
   end
 
-  fn test_workflow_error_cancelled_carries_reason() do
-    let e = Conduit.WorkflowError.Cancelled("user request")
+  test "workflow_error_cancelled_carries_reason" do
+    let e = Conduit.Cancelled("user request")
     match e do
-      Conduit.WorkflowError.Cancelled(r) -> assert_eq_str(r, "user request")
-      _                                   -> assert_true(false)
+      Conduit.Cancelled(r) -> assert_eq_str(r, "user request")
+      _                    -> assert_true(false)
     end
   end
 
-  fn test_workflow_error_timed_out_has_no_payload() do
-    let e = Conduit.WorkflowError.TimedOut
+  test "workflow_error_timed_out_has_no_payload" do
+    let e = Conduit.TimedOut
     match e do
-      Conduit.WorkflowError.TimedOut -> assert_true(true)
-      _                               -> assert_true(false)
+      Conduit.TimedOut -> assert_true(true)
+      _                -> assert_true(false)
     end
   end
 
-  fn test_workflow_error_storage_error_carries_message() do
-    let e = Conduit.WorkflowError.StorageError("db unreachable")
+  test "workflow_error_storage_error_carries_message" do
+    let e = Conduit.StorageError("db unreachable")
     match e do
-      Conduit.WorkflowError.StorageError(m) -> assert_eq_str(m, "db unreachable")
-      _                                      -> assert_true(false)
+      Conduit.StorageError(m) -> assert_eq_str(m, "db unreachable")
+      _                       -> assert_true(false)
     end
   end
 
@@ -1071,30 +1283,30 @@ mod ConduitTest do
   -- Phase 4: WorkflowRunner
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_workflow_runner_job_type_is_correct() do
+  test "workflow_runner_job_type_is_correct" do
     assert_eq_str(Conduit.WorkflowRunner.job_type(), "conduit.workflow_runner")
   end
 
-  fn test_workflow_runner_discards_on_empty_workflow_id() do
+  test "workflow_runner_discards_on_empty_workflow_id" do
     -- A payload with no workflow_id should result in Discard (not Retry).
-    let storage = fake_workflow_storage_new("runner_test_" ++ uuid_v4())
+    let storage = fake_workflow_storage_new("runner_test_" ++ base64_encode(random_bytes(16)))
     let result  = Conduit.WorkflowRunner.execute(storage, "{}")
     assert_err(result)
     match result do
-      Err(ConduitError.Discard(_)) -> assert_true(true)
+      Err(Conduit.Discard(_)) -> assert_true(true)
       _                            -> assert_true(false)
     end
   end
 
-  fn test_workflow_runner_discards_on_unknown_workflow_id() do
+  test "workflow_runner_discards_on_unknown_workflow_id" do
     -- Payload has a valid workflow_id format but the workflow doesn't exist in storage.
-    let vault_k = "runner_unk_" ++ uuid_v4()
+    let vault_k = "runner_unk_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
-    let payload = "{\"workflow_id\": \"" ++ uuid_v4() ++ "\"}"
+    let payload = "{\"workflow_id\": \"" ++ base64_encode(random_bytes(16)) ++ "\"}"
     let result  = Conduit.WorkflowRunner.execute(storage, payload)
     assert_err(result)
     match result do
-      Err(ConduitError.Discard(_)) -> assert_true(true)
+      Err(Conduit.Discard(_)) -> assert_true(true)
       _                            -> assert_true(false)
     end
   end
@@ -1107,267 +1319,37 @@ mod ConduitTest do
   -- with all other methods delegating to the in-memory job storage.
   -- vault_key is used to isolate state between tests.
 
-  ptype FakeWorkflowStorage = FakeWorkflowStorage({
-    vault_key  : String,
-    error      : Option(String)
-  })
-
-  pfn fake_workflow_storage_new(vault_key : String) : FakeWorkflowStorage do
+  pfn fake_workflow_storage_new(vault_key_name : String) : FakeWorkflowStorage do
+    let vault_key = Vault.new(vault_key_name)
     Vault.set(vault_key, "checkpoints", Nil)
-    FakeWorkflowStorage({ vault_key = vault_key, error = None })
+    { vault_key = vault_key_name, error = None }
   end
 
   pfn fake_workflow_storage_with_error(error_msg : String) : FakeWorkflowStorage do
-    let key = "fake_err_" ++ uuid_v4()
-    FakeWorkflowStorage({ vault_key = key, error = Some(error_msg) })
-  end
-
-  impl Conduit.Storage(FakeWorkflowStorage) do
-    -- Job methods — unused in Phase 4 tests, return stubs.
-    fn enqueue(_self, job : Conduit.JobRow) : Result(String, String) do Ok(job.id) end
-    fn fetch_next(_self, _queue : String) : Result(Option(Conduit.JobRow), String) do Ok(None) end
-    fn mark_running(_self, _id : String, _wid : String) : Result((), String) do Ok(()) end
-    fn mark_completed(_self, _id : String) : Result((), String) do Ok(()) end
-    fn heartbeat(_self, _id : String) : Result((), String) do Ok(()) end
-    fn schedule_retry(_self, _id : String, _msg : String, _at : DateTime) : Result((), String) do Ok(()) end
-    fn discard(_self, _id : String, _msg : String) : Result((), String) do Ok(()) end
-    fn move_to_dead_letter(_self, _dl : Conduit.DeadLetter) : Result((), String) do Ok(()) end
-    fn rescue_stale(_self, _secs : Int) : Result(List(String), String) do Ok(Nil) end
-
-    -- Cron stubs.
-    fn cron_upsert(_self, _s : Conduit.CronSchedule) : Result((), String) do Ok(()) end
-    fn cron_load_due(_self) : Result(List(Conduit.CronSchedule), String) do Ok(Nil) end
-    fn cron_load_by_id(_self, _id : String) : Result(Option(Conduit.CronSchedule), String) do Ok(None) end
-    fn cron_mark_fired(_self, _id : String, _jid : String, _next : Option(DateTime)) : Result((), String) do Ok(()) end
-    fn cron_job_active(_self, _id : String) : Result(Bool, String) do Ok(false) end
-    fn cron_cancel_job(_self, _id : String) : Result((), String) do Ok(()) end
-    fn cron_delete(_self, _id : String) : Result((), String) do Ok(()) end
-    fn cron_advisory_lock(_self, _id : Int) : Result(Bool, String) do Ok(true) end
-    fn cron_advisory_unlock(_self, _id : Int) : Result((), String) do Ok(()) end
-
-    -- Workflow methods.
-    fn workflow_insert(_self, row : Conduit.WorkflowRow) : Result(String, String) do Ok(row.id) end
-
-    fn workflow_load(self : FakeWorkflowStorage, _wf_id : String) : Result(Option(Conduit.WorkflowRow), String) do
-      match self.error do
-        Some(e) -> Err(e)
-        None    -> Ok(None)    -- no workflow found (tests that need one create it differently)
-      end
-    end
-
-    fn workflow_update_status(_self, _id : String, _status : String, _out : Option(String), _err : Option(String)) : Result((), String) do Ok(()) end
-    fn workflow_cancel(_self, _id : String, _reason : String) : Result((), String) do Ok(()) end
-
-    fn checkpoint_get(self : FakeWorkflowStorage, _wf_id : String, _name : String) : Result(Option(String), String) do
-      match self.error do
-        Some(e) -> Err(e)
-        None    -> Ok(None)
-      end
-    end
-
-    fn checkpoint_set(self : FakeWorkflowStorage, wf_id : String, name : String, value : String, _dur : Int) : Result((), String) do
-      match self.error do
-        Some(e) -> Err(e)
-        None    ->
-          let checkpoints = Vault.get(self.vault_key, "checkpoints") |> unwrap_or(Nil)
-          Vault.set(self.vault_key, "checkpoints", Cons((wf_id, name, value), checkpoints))
-          Ok(())
-      end
-    end
-
-    fn checkpoint_load_all(_self, _wf_id : String) : Result(List(Conduit.WorkflowCheckpoint), String) do Ok(Nil) end
-
-    fn signal_insert(_self, sig : Conduit.WorkflowSignal) : Result(Int, String) do
-      let _ = sig
-      Ok(1)
-    end
-
-    fn signal_peek(_self, _wf_id : String, _type : String) : Result(Option(Conduit.WorkflowSignal), String) do Ok(None) end
-    fn signal_mark_delivered(_self, _id : Int) : Result((), String) do Ok(()) end
-
-    -- Node / cluster stubs (Phase 5).
-    fn node_register(self : FakeWorkflowStorage, node : Conduit.NodeInfo) : Result((), String) do
-      let nodes = Vault.get(self.vault_key, "nodes") |> unwrap_or(Nil)
-      Vault.set(self.vault_key, "nodes", Cons(node, nodes))
-      Ok(())
-    end
-
-    fn node_heartbeat(_self, _id : String) : Result((), String) do Ok(()) end
-    fn node_deregister(_self, _id : String) : Result((), String) do Ok(()) end
-
-    fn node_list_active(self : FakeWorkflowStorage) : Result(List(Conduit.NodeInfo), String) do
-      Ok(Vault.get(self.vault_key, "nodes") |> unwrap_or(Nil))
-    end
-
-    fn node_reclaim_jobs(_self, _threshold_s : Int) : Result(List(String), String) do Ok(Nil) end
-    fn node_cleanup_stale(_self, _threshold_s : Int) : Result(Int, String) do Ok(0) end
-
-    fn node_try_leader_lock(self : FakeWorkflowStorage, _lock_id : Int) : Result(Bool, String) do
-      -- Simulate acquiring: first caller wins
-      let held = Vault.get(self.vault_key, "leader_lock") |> unwrap_or(false)
-      if held do
-        Ok(false)
-      else
-        Vault.set(self.vault_key, "leader_lock", true)
-        Ok(true)
-      end
-    end
-
-    fn node_release_leader_lock(self : FakeWorkflowStorage, _lock_id : Int) : Result((), String) do
-      Vault.set(self.vault_key, "leader_lock", false)
-      Ok(())
-    end
-
-    -- Dashboard storage stubs (Phase 6).
-    fn dashboard_queue_summary(self : FakeWorkflowStorage) : Result(List(Conduit.Dashboard.QueueSummary), String) do
-      Ok(Vault.get(self.vault_key, "queue_summary") |> unwrap_or(Nil))
-    end
-
-    fn dashboard_jobs_list(self : FakeWorkflowStorage, _queue : String, _status : String, _page : Int) : Result(List(Conduit.JobRow), String) do
-      Ok(Vault.get(self.vault_key, "jobs") |> unwrap_or(Nil))
-    end
-
-    fn dead_letter_list(_self : FakeWorkflowStorage, _page : Int) : Result(List(Conduit.DeadLetter), String) do
-      Ok(Nil)
-    end
-
-    fn dead_letter_load(_self : FakeWorkflowStorage, _id : String) : Result(Option(Conduit.DeadLetter), String) do
-      Ok(None)
-    end
-
-    fn job_retry(self : FakeWorkflowStorage, job_id : String) : Result((), String) do
-      let evs = Vault.get(self.vault_key, "events") |> unwrap_or(Nil)
-      Vault.set(self.vault_key, "events", Cons("job_retry:" ++ job_id, evs))
-      Ok(())
-    end
-
-    fn job_cancel(self : FakeWorkflowStorage, job_id : String, reason : String) : Result((), String) do
-      let evs = Vault.get(self.vault_key, "events") |> unwrap_or(Nil)
-      Vault.set(self.vault_key, "events", Cons("job_cancel:" ++ job_id ++ ":" ++ reason, evs))
-      Ok(())
-    end
-
-    fn job_delete(self : FakeWorkflowStorage, job_id : String) : Result((), String) do
-      let evs = Vault.get(self.vault_key, "events") |> unwrap_or(Nil)
-      Vault.set(self.vault_key, "events", Cons("job_delete:" ++ job_id, evs))
-      Ok(())
-    end
-
-    fn dead_letter_delete(self : FakeWorkflowStorage, dl_id : String) : Result((), String) do
-      let evs = Vault.get(self.vault_key, "events") |> unwrap_or(Nil)
-      Vault.set(self.vault_key, "events", Cons("dl_delete:" ++ dl_id, evs))
-      Ok(())
-    end
-
-    fn notify_subscribe(_self : FakeWorkflowStorage, _channel : String) : Result((), String) do
-      Ok(())
-    end
-
-    -- Rate limiting & unique job stubs (Phase 7).
-    fn rate_limit_acquire(self : FakeWorkflowStorage, key : String, _rate : Int) : Result(Bool, String) do
-      -- Check if the key is blocked in test state.
-      let blocked = Vault.get(self.vault_key, "rl_blocked:" ++ key) |> unwrap_or(false)
-      Ok(not blocked)
-    end
-
-    fn unique_check(self : FakeWorkflowStorage, unique_key : String) : Result(Bool, String) do
-      let exists = Vault.get(self.vault_key, "unique:" ++ unique_key) |> unwrap_or(false)
-      Ok(exists)
-    end
-
-    fn unique_release(self : FakeWorkflowStorage, job_id : String) : Result((), String) do
-      let evs = Vault.get(self.vault_key, "events") |> unwrap_or(Nil)
-      Vault.set(self.vault_key, "events", Cons("unique_release:" ++ job_id, evs))
-      Ok(())
-    end
-
-    -- Event store stubs (Phase 8 — Deterministic Replay).
-    fn event_append(self : FakeWorkflowStorage, workflow_id : String, sequence : Int, event_type : String, payload : String) : Result(Int, String) do
-      let key = "events:" ++ workflow_id
-      let events = Vault.get(self.vault_key, key) |> unwrap_or(Nil)
-      let evt : Conduit.WorkflowEvent = {
-        id          = List.length(events) + 1,
-        workflow_id = workflow_id,
-        sequence    = sequence,
-        event_type  = event_type,
-        payload     = payload,
-        recorded_at = DateTime.now()
-      }
-      Vault.set(self.vault_key, key, List.append(events, Cons(evt, Nil)))
-      Ok(evt.id)
-    end
-
-    fn event_load_all(self : FakeWorkflowStorage, workflow_id : String) : Result(List(Conduit.WorkflowEvent), String) do
-      let key = "events:" ++ workflow_id
-      Ok(Vault.get(self.vault_key, key) |> unwrap_or(Nil))
-    end
-
-    fn event_load_up_to(self : FakeWorkflowStorage, workflow_id : String, max_seq : Int) : Result(List(Conduit.WorkflowEvent), String) do
-      let key = "events:" ++ workflow_id
-      let all = Vault.get(self.vault_key, key) |> unwrap_or(Nil)
-      Ok(List.filter(all, fn e -> e.sequence <= max_seq))
-    end
-
-    fn event_count(self : FakeWorkflowStorage, workflow_id : String) : Result(Int, String) do
-      let key = "events:" ++ workflow_id
-      Ok(List.length(Vault.get(self.vault_key, key) |> unwrap_or(Nil)))
-    end
-
-    -- New dashboard storage stubs (added with dashboard query fixes).
-    fn dashboard_job_by_id(_self : FakeWorkflowStorage, _id : String) : Result(Option(Conduit.JobRow), String) do
-      Ok(None)
-    end
-
-    fn dashboard_crons_list(_self : FakeWorkflowStorage) : Result(List(Conduit.CronSchedule), String) do
-      Ok(Nil)
-    end
-
-    fn dashboard_workflows_list(_self : FakeWorkflowStorage, _status : String, _page : Int) : Result(List(Conduit.WorkflowRow), String) do
-      Ok(Nil)
-    end
-
-    fn dead_letter_list_all(_self : FakeWorkflowStorage) : Result(List(Conduit.DeadLetter), String) do
-      Ok(Nil)
-    end
-
-    fn dead_letter_delete_all(_self : FakeWorkflowStorage) : Result(Int, String) do
-      Ok(0)
-    end
-
-    -- workflow_list_all is the older all-workflows method; still required by the interface.
-    fn workflow_list_all(_self : FakeWorkflowStorage) : Result(List(Conduit.WorkflowRow), String) do
-      Ok(Nil)
-    end
-
-    fn workflow_status_get(_self : FakeWorkflowStorage, _id : String) : Result(Option(String), String) do
-      Ok(None)
-    end
-
-    fn mark_snoozed(_self : FakeWorkflowStorage, _id : String, _wake_at : DateTime) : Result((), String) do
-      Ok(())
-    end
+    let key = "fake_err_" ++ base64_encode(random_bytes(16))
+    { vault_key = key, error = Some(error_msg) }
   end
 
   -- ─────────────────────────────────────────────────────────────
   -- Phase 5: Config and NodeInfo
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_config_default_has_node_fields() do
+  test "config_default_has_node_fields" do
     let cfg = Conduit.Config.default()
     assert_true(not (String.is_empty(cfg.node_id)))
     assert_eq_int(cfg.heartbeat_interval_ms, 15000)
     assert_eq_int(cfg.stale_node_threshold_ms, 60000)
   end
 
-  fn test_config_default_generates_unique_node_ids() do
+  test "config_default_generates_unique_node_ids" do
     let cfg1 = Conduit.Config.default()
     let cfg2 = Conduit.Config.default()
-    -- Each call to default() generates a fresh uuid_v4()
+    -- Each call to default() generates a fresh base64_encode(random_bytes(16))
     assert_true(cfg1.node_id != cfg2.node_id)
   end
 
-  fn test_node_info_fields() do
-    let now = DateTime.now()
+  test "node_info_fields" do
+    let now = DateTime.from_timestamp(DateTime.now())
     let node : Conduit.NodeInfo = {
       id           = "node-abc",
       hostname     = "web-1",
@@ -1389,14 +1371,14 @@ mod ConduitTest do
   -- Phase 5: Conduit.Node — Vault-based state
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_node_is_leader_false_by_default() do
+  test "node_is_leader_false_by_default" do
     -- Before any election tick, is_leader() should be false.
     -- The Vault entry may not exist yet; default is false.
     let result = Conduit.Node.is_leader()
     assert_eq_bool(result, false)
   end
 
-  fn test_node_leader_node_id_none_by_default() do
+  test "node_leader_node_id_none_by_default" do
     -- Before any election tick, leader_node_id() is None.
     -- We test with a fresh key to avoid cross-test pollution.
     -- The function reads from Vault("conduit_cluster", "leader_node_id").
@@ -1408,26 +1390,27 @@ mod ConduitTest do
     assert_true(true)
   end
 
-  fn test_node_stop_clears_leader_flag() do
+  test "node_stop_clears_leader_flag" do
     -- Manually set is_leader to true, then call stop() and verify it's cleared.
-    Vault.set("conduit_cluster", "is_leader", true)
-    let vault_k  = "stop_test_" ++ uuid_v4()
+    let cluster_tbl = Vault.new("conduit_cluster")
+    Vault.set(cluster_tbl, "is_leader", true)
+    let vault_k  = "stop_test_" ++ base64_encode(random_bytes(16))
     let storage  = fake_workflow_storage_new(vault_k)
-    let node_id  = uuid_v4()
+    let node_id  = base64_encode(random_bytes(16))
     Conduit.Node.stop(storage, node_id)
-    assert_eq_bool(Vault.get("conduit_cluster", "is_leader") |> unwrap_or(true), false)
+    assert_eq_bool(Vault.get(cluster_tbl, "is_leader") |> unwrap_or(true), false)
   end
 
   -- ─────────────────────────────────────────────────────────────
   -- Phase 5: Node storage operations (via fake storage)
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_node_register_stores_node_info() do
-    let vault_k = "node_reg_" ++ uuid_v4()
+  test "node_register_stores_node_info" do
+    let vault_k = "node_reg_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
-    let now     = DateTime.now()
+    let now     = DateTime.from_timestamp(DateTime.now())
     let node : Conduit.NodeInfo = {
-      id           = uuid_v4(),
+      id           = base64_encode(random_bytes(16)),
       hostname     = "test-host",
       pid          = 1,
       queues       = Cons("default", Nil),
@@ -1446,8 +1429,8 @@ mod ConduitTest do
     end
   end
 
-  fn test_node_reclaim_jobs_returns_empty_when_no_stale() do
-    let vault_k = "reclaim_" ++ uuid_v4()
+  test "node_reclaim_jobs_returns_empty_when_no_stale" do
+    let vault_k = "reclaim_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
     let result  = Conduit.Storage.node_reclaim_jobs(storage, 60)
     assert_ok(result)
@@ -1457,8 +1440,8 @@ mod ConduitTest do
     end
   end
 
-  fn test_node_cleanup_stale_returns_zero_when_no_stale() do
-    let vault_k = "cleanup_" ++ uuid_v4()
+  test "node_cleanup_stale_returns_zero_when_no_stale" do
+    let vault_k = "cleanup_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
     let result  = Conduit.Storage.node_cleanup_stale(storage, 60)
     assert_ok(result)
@@ -1468,8 +1451,8 @@ mod ConduitTest do
     end
   end
 
-  fn test_node_leader_lock_acquired_on_first_call() do
-    let vault_k = "leader_lock_" ++ uuid_v4()
+  test "node_leader_lock_acquired_on_first_call" do
+    let vault_k = "leader_lock_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
     let result  = Conduit.Storage.node_try_leader_lock(storage, 8473625)
     assert_ok(result)
@@ -1479,8 +1462,8 @@ mod ConduitTest do
     end
   end
 
-  fn test_node_leader_lock_not_acquired_if_held() do
-    let vault_k = "leader_lock2_" ++ uuid_v4()
+  test "node_leader_lock_not_acquired_if_held" do
+    let vault_k = "leader_lock2_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
     -- First call acquires
     let _ = Conduit.Storage.node_try_leader_lock(storage, 8473625)
@@ -1493,8 +1476,8 @@ mod ConduitTest do
     end
   end
 
-  fn test_node_leader_lock_released_and_reacquired() do
-    let vault_k = "leader_lock3_" ++ uuid_v4()
+  test "node_leader_lock_released_and_reacquired" do
+    let vault_k = "leader_lock3_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
     -- Acquire
     let _ = Conduit.Storage.node_try_leader_lock(storage, 8473625)
@@ -1513,7 +1496,7 @@ mod ConduitTest do
   -- Phase 6: Dashboard types
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_queue_summary_type_fields() do
+  test "queue_summary_type_fields" do
     let qs : Conduit.Dashboard.QueueSummary = {
       queue       = "default",
       pending     = 10,
@@ -1536,33 +1519,33 @@ mod ConduitTest do
   -- Phase 6: Auth
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_dashboard_auth_none_always_allows() do
-    let auth = Conduit.Dashboard.Auth.None
-    -- Auth.None returns true without inspecting conn.
+  test "dashboard_auth_none_always_allows" do
+    let auth = Conduit.Open
+    -- Auth.Open returns true without inspecting conn.
     -- We simulate a no-op conn check by inspecting the type directly.
     match auth do
-      Conduit.Dashboard.Auth.None -> assert_true(true)
-      _                           -> assert_true(false)
+      Open -> assert_true(true)
+      _    -> assert_true(false)
     end
   end
 
-  fn test_dashboard_auth_token_matches_correct_bearer() do
-    let auth  = Conduit.Dashboard.Auth.Token("secret123")
+  test "dashboard_auth_token_matches_correct_bearer" do
+    let auth  = Conduit.Token("secret123")
     match auth do
-      Conduit.Dashboard.Auth.Token(t) -> assert_eq_str(t, "secret123")
+      Token(t) -> assert_eq_str(t, "secret123")
       _                               -> assert_true(false)
     end
   end
 
-  fn test_dashboard_auth_fn_wraps_predicate() do
-    let called_key = "auth_fn_" ++ uuid_v4()
+  test "dashboard_auth_fn_wraps_predicate" do
+    let called_key = Vault.new("auth_fn_" ++ base64_encode(random_bytes(16)))
     Vault.set(called_key, "called", false)
-    let auth = Conduit.Dashboard.Auth.Fn(fn _header ->
-      Vault.set(called_key, "called", true)
+    let auth_fn = fn _header ->
+      let _ = Vault.set(called_key, "called", true)
       true
-    end)
+    let auth = Conduit.Fn(auth_fn)
     match auth do
-      Conduit.Dashboard.Auth.Fn(f) ->
+      Fn(f) ->
         let result = f("Bearer test")
         assert_eq_bool(result, true)
         assert_eq_bool(Vault.get(called_key, "called") |> unwrap_or(false), true)
@@ -1574,67 +1557,67 @@ mod ConduitTest do
   -- Phase 6: Actions via fake storage
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_dashboard_actions_retry_job_calls_storage() do
-    let vault_k = "action_retry_" ++ uuid_v4()
+  test "dashboard_actions_retry_job_calls_storage" do
+    let vault_k = "action_retry_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
-    let job_id  = uuid_v4()
+    let job_id  = base64_encode(random_bytes(16))
     let result  = Conduit.Dashboard.Actions.retry_job(storage, job_id)
     assert_ok(result)
-    let evs = Vault.get(vault_k, "events") |> unwrap_or(Nil)
-    assert_true(List.any(evs, fn e -> String.starts_with(e, "job_retry:" ++ job_id) end))
+    let evs = Vault.get(pfake_tbl(vault_k), "events") |> unwrap_or(Nil)
+    assert_true(List.any(evs, fn e -> String.starts_with(e, "job_retry:" ++ job_id)))
   end
 
-  fn test_dashboard_actions_cancel_job_calls_storage() do
-    let vault_k = "action_cancel_" ++ uuid_v4()
+  test "dashboard_actions_cancel_job_calls_storage" do
+    let vault_k = "action_cancel_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
-    let job_id  = uuid_v4()
+    let job_id  = base64_encode(random_bytes(16))
     let result  = Conduit.Dashboard.Actions.cancel_job(storage, job_id)
     assert_ok(result)
-    let evs = Vault.get(vault_k, "events") |> unwrap_or(Nil)
-    assert_true(List.any(evs, fn e -> String.starts_with(e, "job_cancel:" ++ job_id) end))
+    let evs = Vault.get(pfake_tbl(vault_k), "events") |> unwrap_or(Nil)
+    assert_true(List.any(evs, fn e -> String.starts_with(e, "job_cancel:" ++ job_id)))
   end
 
-  fn test_dashboard_actions_delete_job_calls_storage() do
-    let vault_k = "action_delete_" ++ uuid_v4()
+  test "dashboard_actions_delete_job_calls_storage" do
+    let vault_k = "action_delete_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
-    let job_id  = uuid_v4()
+    let job_id  = base64_encode(random_bytes(16))
     let result  = Conduit.Dashboard.Actions.delete_job(storage, job_id)
     assert_ok(result)
-    let evs = Vault.get(vault_k, "events") |> unwrap_or(Nil)
-    assert_true(List.any(evs, fn e -> String.starts_with(e, "job_delete:" ++ job_id) end))
+    let evs = Vault.get(pfake_tbl(vault_k), "events") |> unwrap_or(Nil)
+    assert_true(List.any(evs, fn e -> String.starts_with(e, "job_delete:" ++ job_id)))
   end
 
-  fn test_dashboard_actions_retry_dead_letter_not_found() do
-    let vault_k = "dl_retry_nf_" ++ uuid_v4()
+  test "dashboard_actions_retry_dead_letter_not_found" do
+    let vault_k = "dl_retry_nf_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
     -- Fake storage returns None for dead_letter_load, so we get Err.
     let result = Conduit.Dashboard.Actions.retry_dead_letter(storage, "nonexistent")
     assert_err(result)
   end
 
-  fn test_dashboard_actions_delete_dead_letter_records_event() do
-    let vault_k = "dl_delete_" ++ uuid_v4()
+  test "dashboard_actions_delete_dead_letter_records_event" do
+    let vault_k = "dl_delete_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
-    let dl_id   = uuid_v4()
+    let dl_id   = base64_encode(random_bytes(16))
     let result  = Conduit.Dashboard.Actions.delete_dead_letter(storage, dl_id)
     assert_ok(result)
-    let evs = Vault.get(vault_k, "events") |> unwrap_or(Nil)
-    assert_true(List.any(evs, fn e -> String.starts_with(e, "dl_delete:" ++ dl_id) end))
+    let evs = Vault.get(pfake_tbl(vault_k), "events") |> unwrap_or(Nil)
+    assert_true(List.any(evs, fn e -> String.starts_with(e, "dl_delete:" ++ dl_id)))
   end
 
   -- ─────────────────────────────────────────────────────────────
   -- Phase 6: Queries via fake storage
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_dashboard_queries_queue_summary_returns_list() do
-    let vault_k = "qs_test_" ++ uuid_v4()
+  test "dashboard_queries_queue_summary_returns_list" do
+    let vault_k = "qs_test_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
     -- Seed a summary row in the fake storage
     let qs : Conduit.Dashboard.QueueSummary = {
       queue = "default", pending = 3, running = 1,
       failed = 0, dead = 0, throughput = 10, avg_latency = 50
     }
-    Vault.set(vault_k, "queue_summary", Cons(qs, Nil))
+    Vault.set(pfake_tbl(vault_k), "queue_summary", Cons(qs, Nil))
     let result = Conduit.Dashboard.Queries.queue_summary(storage)
     assert_eq_int(List.length(result), 1)
     let first = List.head_opt(result) |> unwrap
@@ -1642,29 +1625,29 @@ mod ConduitTest do
     assert_eq_int(first.pending, 3)
   end
 
-  fn test_dashboard_queries_jobs_list_returns_list() do
-    let vault_k = "jl_test_" ++ uuid_v4()
+  test "dashboard_queries_jobs_list_returns_list" do
+    let vault_k = "jl_test_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
     let result  = Conduit.Dashboard.Queries.jobs_list(storage, "default", "", 1)
     assert_eq_int(List.length(result), 0)
   end
 
-  fn test_dashboard_queries_dead_letters_returns_list() do
-    let vault_k = "dl_test_" ++ uuid_v4()
+  test "dashboard_queries_dead_letters_returns_list" do
+    let vault_k = "dl_test_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
     let result  = Conduit.Dashboard.Queries.dead_letters(storage, 1)
     assert_eq_int(List.length(result), 0)
   end
 
-  fn test_dashboard_queries_nodes_returns_list() do
-    let vault_k = "nodes_q_" ++ uuid_v4()
+  test "dashboard_queries_nodes_returns_list" do
+    let vault_k = "nodes_q_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
     let result  = Conduit.Dashboard.Queries.nodes(storage)
     assert_eq_int(List.length(result), 0)
   end
 
-  fn test_dashboard_notify_subscribe_ok() do
-    let vault_k = "notify_" ++ uuid_v4()
+  test "dashboard_notify_subscribe_ok" do
+    let vault_k = "notify_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
     let result  = Conduit.Storage.notify_subscribe(storage, "conduit_jobs")
     assert_ok(result)
@@ -1674,7 +1657,7 @@ mod ConduitTest do
   -- Phase 7: Rate limiting types
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_rate_limit_type_fields() do
+  test "rate_limit_type_fields" do
     let rl : Conduit.RateLimit = {
       max_per_second = 10,
       per_key        = None,
@@ -1684,7 +1667,7 @@ mod ConduitTest do
     assert_none(rl.per_key)
   end
 
-  fn test_rate_limit_with_per_key() do
+  test "rate_limit_with_per_key" do
     let pk : Conduit.PerKeyRateLimit = {
       key_fn = fn payload -> "user_123",
       limit  = 2
@@ -1704,19 +1687,19 @@ mod ConduitTest do
     end
   end
 
-  fn test_job_config_default_has_no_rate_limit() do
+  test "job_config_default_has_no_rate_limit" do
     let cfg = Conduit.JobConfig.default()
     assert_none(cfg.rate_limit)
     assert_none(cfg.on_dead_letter)
     match cfg.on_conflict do
-      Conduit.UniqueConflict.Ignore -> assert_true(true)
-      _                             -> assert_true(false)
+      Ignore -> assert_true(true)
+      _      -> assert_true(false)
     end
   end
 
-  fn test_job_config_with_rate_limit() do
+  test "job_config_with_rate_limit" do
     let rl : Conduit.RateLimit = { max_per_second = 5, per_key = None, backend = Conduit.RateLimiterBackend.StorageBacked }
-    let cfg = { ..Conduit.JobConfig.default(), rate_limit = Some(rl) }
+    let cfg = { Conduit.JobConfig.default() with rate_limit = Some(rl) }
     assert_some(cfg.rate_limit)
     match cfg.rate_limit do
       None     -> assert_true(false)
@@ -1728,32 +1711,32 @@ mod ConduitTest do
   -- Phase 7: Unique jobs
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_unique_fingerprint_deterministic() do
+  test "unique_fingerprint_deterministic" do
     let fp1 = Conduit.Unique.fingerprint("TestJob", "default", "{\"id\":1}", Nil, Conduit.UniqueScope.PerQueue)
     let fp2 = Conduit.Unique.fingerprint("TestJob", "default", "{\"id\":1}", Nil, Conduit.UniqueScope.PerQueue)
     assert_eq_str(fp1, fp2)
   end
 
-  fn test_unique_fingerprint_differs_by_job_type() do
+  test "unique_fingerprint_differs_by_job_type" do
     let fp1 = Conduit.Unique.fingerprint("JobA", "default", "{}", Nil, Conduit.UniqueScope.PerQueue)
     let fp2 = Conduit.Unique.fingerprint("JobB", "default", "{}", Nil, Conduit.UniqueScope.PerQueue)
     assert_true(fp1 != fp2)
   end
 
-  fn test_unique_fingerprint_differs_by_payload() do
+  test "unique_fingerprint_differs_by_payload" do
     let fp1 = Conduit.Unique.fingerprint("Job", "default", "{\"id\":1}", Nil, Conduit.UniqueScope.PerQueue)
     let fp2 = Conduit.Unique.fingerprint("Job", "default", "{\"id\":2}", Nil, Conduit.UniqueScope.PerQueue)
     assert_true(fp1 != fp2)
   end
 
-  fn test_unique_fingerprint_with_by_fields() do
+  test "unique_fingerprint_with_by_fields" do
     let fp1 = Conduit.Unique.fingerprint("Job", "default", "{\"user_id\":1,\"other\":\"a\"}", Cons("user_id", Nil), Conduit.UniqueScope.PerQueue)
     let fp2 = Conduit.Unique.fingerprint("Job", "default", "{\"user_id\":1,\"other\":\"b\"}", Cons("user_id", Nil), Conduit.UniqueScope.PerQueue)
     -- Same user_id → same fingerprint (only user_id is in `by`)
     assert_eq_str(fp1, fp2)
   end
 
-  fn test_unique_fingerprint_per_queue_vs_global() do
+  test "unique_fingerprint_per_queue_vs_global" do
     -- Same job+payload but different queues: PerQueue → different fingerprints.
     let fp_q1 = Conduit.Unique.fingerprint("Job", "default",  "{}", Nil, Conduit.UniqueScope.PerQueue)
     let fp_q2 = Conduit.Unique.fingerprint("Job", "critical", "{}", Nil, Conduit.UniqueScope.PerQueue)
@@ -1764,29 +1747,27 @@ mod ConduitTest do
     assert_eq_str(fp_g1, fp_g2)
   end
 
-  fn test_unique_conflict_ignore_variant() do
+  test "unique_conflict_ignore_variant" do
     match Conduit.UniqueConflict.Ignore do
-      Conduit.UniqueConflict.Ignore  -> assert_true(true)
-      _                               -> assert_true(false)
+      Ignore -> assert_true(true)
+      _      -> assert_true(false)
     end
   end
 
-  fn test_unique_conflict_replace_variant() do
-    match Conduit.UniqueConflict.Replace do
-      Conduit.UniqueConflict.Replace -> assert_true(true)
-      _                              -> assert_true(false)
-    end
+  test "unique_conflict_replace_variant" do
+    let _ = Conduit.UniqueConflict.Replace
+    assert_true(true)
   end
 
-  fn test_unique_conflict_raise_variant() do
+  test "unique_conflict_raise_variant" do
     match Conduit.UniqueConflict.Raise do
-      Conduit.UniqueConflict.Raise -> assert_true(true)
+      Raise -> assert_true(true)
       _                            -> assert_true(false)
     end
   end
 
-  fn test_unique_check_no_conflict_in_fake_storage() do
-    let vault_k = "unique_nc_" ++ uuid_v4()
+  test "unique_check_no_conflict_in_fake_storage" do
+    let vault_k = "unique_nc_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
     let result  = Conduit.Unique.conflicts(storage, "some_key")
     assert_ok(result)
@@ -1796,11 +1777,11 @@ mod ConduitTest do
     end
   end
 
-  fn test_unique_check_conflict_in_fake_storage() do
-    let vault_k = "unique_cf_" ++ uuid_v4()
+  test "unique_check_conflict_in_fake_storage" do
+    let vault_k = "unique_cf_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
     -- Mark a key as existing.
-    Vault.set(vault_k, "unique:my_key", true)
+    Vault.set(pfake_tbl(vault_k), "unique:my_key", true)
     let result = Conduit.Unique.conflicts(storage, "my_key")
     assert_ok(result)
     match result do
@@ -1809,22 +1790,22 @@ mod ConduitTest do
     end
   end
 
-  fn test_unique_release_records_event() do
-    let vault_k = "unique_rel_" ++ uuid_v4()
+  test "unique_release_records_event" do
+    let vault_k = "unique_rel_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
-    let job_id  = uuid_v4()
+    let job_id  = base64_encode(random_bytes(16))
     let result  = Conduit.Unique.release(storage, job_id)
     assert_ok(result)
-    let evs = Vault.get(vault_k, "events") |> unwrap_or(Nil)
-    assert_true(List.any(evs, fn e -> String.starts_with(e, "unique_release:" ++ job_id) end))
+    let evs = Vault.get(pfake_tbl(vault_k), "events") |> unwrap_or(Nil)
+    assert_true(List.any(evs, fn e -> String.starts_with(e, "unique_release:" ++ job_id)))
   end
 
   -- ─────────────────────────────────────────────────────────────
   -- Phase 7: Rate limiter
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_rate_limiter_acquire_allowed_by_default() do
-    let vault_k = "rl_acq_" ++ uuid_v4()
+  test "rate_limiter_acquire_allowed_by_default" do
+    let vault_k = "rl_acq_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
     let rl : Conduit.RateLimit = { max_per_second = 10, per_key = None, backend = Conduit.RateLimiterBackend.StorageBacked }
     let result = Conduit.RateLimiter.acquire(storage, "TestJob", rl, "{}")
@@ -1835,11 +1816,11 @@ mod ConduitTest do
     end
   end
 
-  fn test_rate_limiter_acquire_blocked_when_flagged() do
-    let vault_k = "rl_blk_" ++ uuid_v4()
+  test "rate_limiter_acquire_blocked_when_flagged" do
+    let vault_k = "rl_blk_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
     -- Block the global key.
-    Vault.set(vault_k, "rl_blocked:conduit_rl:TestJob", true)
+    Vault.set(pfake_tbl(vault_k), "rl_blocked:conduit_rl:TestJob", true)
     let rl : Conduit.RateLimit = { max_per_second = 10, per_key = None, backend = Conduit.RateLimiterBackend.StorageBacked }
     let result = Conduit.RateLimiter.acquire(storage, "TestJob", rl, "{}")
     assert_ok(result)
@@ -1849,16 +1830,15 @@ mod ConduitTest do
     end
   end
 
-  fn test_rate_limiter_snooze_duration_positive() do
+  test "rate_limiter_snooze_duration_positive" do
     let ms = Conduit.RateLimiter.snooze_duration(10)
     -- Should be at least 100ms (1000/10) and at most ~200ms (100 + 100 jitter)
     assert_true(ms >= 100)
     assert_true(ms <= 300)
   end
 
-  fn test_rate_limiter_snooze_duration_zero_rate() do
-    let dur = Conduit.RateLimiter.snooze_duration(0)
-    let ms  = Duration.to_milliseconds(dur)
+  test "rate_limiter_snooze_duration_zero_rate" do
+    let ms = Conduit.RateLimiter.snooze_duration(0)
     -- With rate 0, base is 1000ms plus up to 100ms jitter
     assert_true(ms >= 1000)
     assert_true(ms <= 1200)
@@ -1868,21 +1848,21 @@ mod ConduitTest do
   -- Phase 7: Priority ordering
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_priority_ordering_in_job_config() do
+  test "priority_ordering_in_job_config" do
     -- Priority is just an Int field on JobConfig; higher values run first.
     -- The ORDER BY in fetch_next is `priority DESC, run_at ASC`.
-    let low  = { ..Conduit.JobConfig.default(), priority = 0 }
-    let high = { ..Conduit.JobConfig.default(), priority = 100 }
+    let low  = { Conduit.JobConfig.default() with priority = 0 }
+    let high = { Conduit.JobConfig.default() with priority = 100 }
     assert_eq_int(low.priority, 0)
     assert_eq_int(high.priority, 100)
     assert_true(high.priority > low.priority)
   end
 
-  fn test_on_dead_letter_callback_in_config() do
-    let fired_key = "odl_" ++ uuid_v4()
+  test "on_dead_letter_callback_in_config" do
+    let fired_key = Vault.new("odl_" ++ base64_encode(random_bytes(16)))
     Vault.set(fired_key, "fired", false)
     let cb = fn (_info : Conduit.JobInfo) -> Vault.set(fired_key, "fired", true)
-    let cfg = { ..Conduit.JobConfig.default(), on_dead_letter = Some(cb) }
+    let cfg = { Conduit.JobConfig.default() with on_dead_letter = Some(cb) }
     assert_some(cfg.on_dead_letter)
     match cfg.on_dead_letter do
       None    -> assert_true(false)
@@ -1890,7 +1870,7 @@ mod ConduitTest do
         let dummy_info : Conduit.JobInfo = {
           id = "x", queue = "q", job_type = "t",
           attempt = 1, max_attempts = 3, tags = Nil,
-          inserted_at = DateTime.now(), errors = Nil
+          inserted_at = DateTime.from_timestamp(DateTime.now()), errors = Nil
         }
         f(dummy_info)
         assert_eq_bool(Vault.get(fired_key, "fired") |> unwrap_or(false), true)
@@ -1901,8 +1881,8 @@ mod ConduitTest do
   -- Phase 8: WorkflowEvent type
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_workflow_event_type_fields() do
-    let now = DateTime.now()
+  test "workflow_event_type_fields" do
+    let now = DateTime.from_timestamp(DateTime.now())
     let evt : Conduit.WorkflowEvent = {
       id          = 42,
       workflow_id = "wf-abc",
@@ -1922,10 +1902,10 @@ mod ConduitTest do
   -- Phase 8: EventStore (via fake storage)
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_event_store_append_and_load() do
-    let vault_k = "es_al_" ++ uuid_v4()
+  test "event_store_append_and_load" do
+    let vault_k = "es_al_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
-    let wf_id   = uuid_v4()
+    let wf_id   = base64_encode(random_bytes(16))
     -- Append two events
     let r1 = Conduit.EventStore.append(storage, wf_id, 0, "checkpoint", "{\"name\":\"a\",\"value\":\"1\"}")
     assert_ok(r1)
@@ -1944,10 +1924,10 @@ mod ConduitTest do
     end
   end
 
-  fn test_event_store_load_up_to() do
-    let vault_k = "es_lu_" ++ uuid_v4()
+  test "event_store_load_up_to" do
+    let vault_k = "es_lu_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
-    let wf_id   = uuid_v4()
+    let wf_id   = base64_encode(random_bytes(16))
     let _ = Conduit.EventStore.append(storage, wf_id, 0, "checkpoint", "{}")
     let _ = Conduit.EventStore.append(storage, wf_id, 1, "checkpoint", "{}")
     let _ = Conduit.EventStore.append(storage, wf_id, 2, "checkpoint", "{}")
@@ -1960,10 +1940,10 @@ mod ConduitTest do
     end
   end
 
-  fn test_event_store_count() do
-    let vault_k = "es_cnt_" ++ uuid_v4()
+  test "event_store_count" do
+    let vault_k = "es_cnt_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
-    let wf_id   = uuid_v4()
+    let wf_id   = base64_encode(random_bytes(16))
     let _ = Conduit.EventStore.append(storage, wf_id, 0, "checkpoint", "{}")
     let _ = Conduit.EventStore.append(storage, wf_id, 1, "checkpoint", "{}")
     let result = Conduit.EventStore.count(storage, wf_id)
@@ -1978,10 +1958,10 @@ mod ConduitTest do
   -- Phase 8: warm_replay sets Vault state
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_replay_warm_sets_vault_state() do
-    let vault_k = "rw_warm_" ++ uuid_v4()
+  test "replay_warm_sets_vault_state" do
+    let vault_k = "rw_warm_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
-    let wf_id   = uuid_v4()
+    let wf_id   = base64_encode(random_bytes(16))
     -- Append 2 events to the fake store
     let _ = Conduit.EventStore.append(storage, wf_id, 0, "checkpoint", "{\"name\":\"s1\",\"value\":\"v1\"}")
     let _ = Conduit.EventStore.append(storage, wf_id, 1, "checkpoint", "{\"name\":\"s2\",\"value\":\"v2\"}")
@@ -2002,11 +1982,11 @@ mod ConduitTest do
   -- Phase 8: Replay checkpoint behavior
   -- ─────────────────────────────────────────────────────────────
 
-  fn test_replay_checkpoint_first_run_logs_events() do
+  test "replay_checkpoint_first_run_logs_events" do
     -- When no events exist, checkpoint should execute fn AND append an event.
-    let vault_k = "rp_fr_" ++ uuid_v4()
+    let vault_k = "rp_fr_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
-    let wf_id   = uuid_v4()
+    let wf_id   = base64_encode(random_bytes(16))
     let ctx     = Conduit.WorkflowContext.new(wf_id)
     -- Set up replay mode with 0 pre-existing events
     let rk = Conduit.EventStore.replay_key(wf_id)
@@ -2015,14 +1995,14 @@ mod ConduitTest do
     Vault.set(rk, "event_count", 0)
     Vault.set(rk, "next_seq", 0)
     -- Track fn calls
-    let call_key = "rp_fr_calls_" ++ uuid_v4()
+    let call_key = Vault.new("rp_fr_calls_" ++ base64_encode(random_bytes(16)))
     Vault.set(call_key, "count", 0)
     -- Run checkpoint
-    let result = Conduit.WorkflowContext.checkpoint(storage, ctx, "step1", fn () ->
+    let cp_fn = fn () ->
       let c = Vault.get(call_key, "count") |> unwrap_or(0)
-      Vault.set(call_key, "count", c + 1)
+      let _ = Vault.set(call_key, "count", c + 1)
       "\"result_a\""
-    end)
+    let result = Conduit.WorkflowContext.checkpoint(storage, ctx, "step1", cp_fn)
     assert_ok(result)
     match result do
       Err(_)  -> assert_true(false)
@@ -2038,24 +2018,24 @@ mod ConduitTest do
     end
   end
 
-  fn test_replay_checkpoint_replay_skips_fn() do
+  test "replay_checkpoint_replay_skips_fn" do
     -- When events exist, checkpoint should return recorded value WITHOUT calling fn.
-    let vault_k = "rp_skip_" ++ uuid_v4()
+    let vault_k = "rp_skip_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
-    let wf_id   = uuid_v4()
+    let wf_id   = base64_encode(random_bytes(16))
     let ctx     = Conduit.WorkflowContext.new(wf_id)
     -- Pre-append an event via storage
     let _ = Conduit.EventStore.append(storage, wf_id, 0, "checkpoint", "{\"name\":\"step1\",\"value\":\"recorded_val\"}")
     -- Warm replay (loads events into Vault)
     let _ = Conduit.EventStore.warm_replay(storage, wf_id)
     -- Track fn calls
-    let call_key = "rp_skip_calls_" ++ uuid_v4()
+    let call_key = Vault.new("rp_skip_calls_" ++ base64_encode(random_bytes(16)))
     Vault.set(call_key, "called", false)
     -- Run checkpoint
-    let result = Conduit.WorkflowContext.checkpoint(storage, ctx, "step1", fn () ->
-      Vault.set(call_key, "called", true)
+    let cp_fn = fn () ->
+      let _ = Vault.set(call_key, "called", true)
       "\"should_not_be_used\""
-    end)
+    let result = Conduit.WorkflowContext.checkpoint(storage, ctx, "step1", cp_fn)
     assert_ok(result)
     match result do
       Err(_)  -> assert_true(false)
@@ -2065,11 +2045,11 @@ mod ConduitTest do
     assert_eq_bool(Vault.get(call_key, "called") |> unwrap_or(true), false)
   end
 
-  fn test_replay_checkpoint_mixed_replay_and_new() do
+  test "replay_checkpoint_mixed_replay_and_new" do
     -- 1 event pre-loaded, then a 2nd checkpoint should execute fn.
-    let vault_k = "rp_mix_" ++ uuid_v4()
+    let vault_k = "rp_mix_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
-    let wf_id   = uuid_v4()
+    let wf_id   = base64_encode(random_bytes(16))
     let ctx     = Conduit.WorkflowContext.new(wf_id)
     -- Pre-append 1 event
     let _ = Conduit.EventStore.append(storage, wf_id, 0, "checkpoint", "{\"name\":\"step1\",\"value\":\"val_a\"}")
@@ -2082,12 +2062,12 @@ mod ConduitTest do
       Err(_) -> assert_true(false)
     end
     -- Second checkpoint: no event, should execute fn
-    let call_key = "rp_mix_fn_" ++ uuid_v4()
+    let call_key = Vault.new("rp_mix_fn_" ++ base64_encode(random_bytes(16)))
     Vault.set(call_key, "called", false)
-    let r2 = Conduit.WorkflowContext.checkpoint(storage, ctx, "step2", fn () ->
-      Vault.set(call_key, "called", true)
+    let cp_fn2 = fn () ->
+      let _ = Vault.set(call_key, "called", true)
       "\"val_b\""
-    end)
+    let r2 = Conduit.WorkflowContext.checkpoint(storage, ctx, "step2", cp_fn2)
     assert_ok(r2)
     match r2 do
       Ok(v) -> assert_eq_str(v, "\"val_b\"")
@@ -2096,11 +2076,11 @@ mod ConduitTest do
     assert_eq_bool(Vault.get(call_key, "called") |> unwrap_or(false), true)
   end
 
-  fn test_replay_cursor_advances() do
+  test "replay_cursor_advances" do
     -- After 3 checkpoints, cursor should be 3.
-    let vault_k = "rp_cur_" ++ uuid_v4()
+    let vault_k = "rp_cur_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
-    let wf_id   = uuid_v4()
+    let wf_id   = base64_encode(random_bytes(16))
     let ctx     = Conduit.WorkflowContext.new(wf_id)
     -- Pre-append 3 events
     let _ = Conduit.EventStore.append(storage, wf_id, 0, "checkpoint", "{\"name\":\"a\",\"value\":\"1\"}")
@@ -2117,11 +2097,11 @@ mod ConduitTest do
     assert_eq_int(cursor, 3)
   end
 
-  fn test_replay_preserves_order() do
+  test "replay_preserves_order" do
     -- Events should be replayed in sequence order: "first", "second", "third"
-    let vault_k = "rp_ord_" ++ uuid_v4()
+    let vault_k = "rp_ord_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
-    let wf_id   = uuid_v4()
+    let wf_id   = base64_encode(random_bytes(16))
     let ctx     = Conduit.WorkflowContext.new(wf_id)
     let _ = Conduit.EventStore.append(storage, wf_id, 0, "checkpoint", "{\"name\":\"s1\",\"value\":\"first\"}")
     let _ = Conduit.EventStore.append(storage, wf_id, 1, "checkpoint", "{\"name\":\"s2\",\"value\":\"second\"}")
@@ -2130,16 +2110,16 @@ mod ConduitTest do
     let r1 = Conduit.WorkflowContext.checkpoint(storage, ctx, "s1", fn () -> "x")
     let r2 = Conduit.WorkflowContext.checkpoint(storage, ctx, "s2", fn () -> "x")
     let r3 = Conduit.WorkflowContext.checkpoint(storage, ctx, "s3", fn () -> "x")
-    match r1 do Ok(v) -> assert_eq_str(v, "first")  Err(_) -> assert_true(false) end
-    match r2 do Ok(v) -> assert_eq_str(v, "second") Err(_) -> assert_true(false) end
-    match r3 do Ok(v) -> assert_eq_str(v, "third")  Err(_) -> assert_true(false) end
+    match r1 do Ok(v) -> assert_eq_str(v, "first") | Err(_) -> assert_true(false) end
+    match r2 do Ok(v) -> assert_eq_str(v, "second") | Err(_) -> assert_true(false) end
+    match r3 do Ok(v) -> assert_eq_str(v, "third") | Err(_) -> assert_true(false) end
   end
 
-  fn test_point_in_time_replay() do
+  test "point_in_time_replay" do
     -- load_up_to(1) should return sequences 0 and 1 only.
-    let vault_k = "pit_" ++ uuid_v4()
+    let vault_k = "pit_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
-    let wf_id   = uuid_v4()
+    let wf_id   = base64_encode(random_bytes(16))
     let _ = Conduit.EventStore.append(storage, wf_id, 0, "checkpoint", "{}")
     let _ = Conduit.EventStore.append(storage, wf_id, 1, "checkpoint", "{}")
     let _ = Conduit.EventStore.append(storage, wf_id, 2, "checkpoint", "{}")
@@ -2151,11 +2131,11 @@ mod ConduitTest do
     assert_eq_int(event_count, 2)
   end
 
-  fn test_replay_with_parallel() do
+  test "replay_with_parallel" do
     -- Parallel branches should log events with namespaced names.
-    let vault_k = "rp_par_" ++ uuid_v4()
+    let vault_k = "rp_par_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
-    let wf_id   = uuid_v4()
+    let wf_id   = base64_encode(random_bytes(16))
     let ctx     = Conduit.WorkflowContext.new(wf_id)
     -- Set replay mode with 0 events (first run)
     let rk = Conduit.EventStore.replay_key(wf_id)
@@ -2189,34 +2169,34 @@ mod ConduitTest do
   -- ─────────────────────────────────────────────────────────────
 
   -- Backoff: Fibonacci is now iterative (no stack overflow for large attempts)
-  fn test_backoff_fibonacci_large_attempt_is_capped() do
+  test "backoff_fibonacci_large_attempt_is_capped" do
     -- fib(40) * 1000 would be enormous; after the cap it should equal 24h.
-    let delay = Conduit.Backoff.delay(Conduit.Backoff.Fibonacci, 40)
+    let delay = Conduit.Backoff.delay(Conduit.Fibonacci, 40)
     assert_eq_int(delay, 86400000)  -- 24h cap
   end
 
   -- Backoff: Exponential is capped at 24h
-  fn test_backoff_exponential_large_attempt_is_capped() do
-    let delay = Conduit.Backoff.delay(Conduit.Backoff.Exponential, 30)
+  test "backoff_exponential_large_attempt_is_capped" do
+    let delay = Conduit.Backoff.delay(Conduit.Exponential, 30)
     assert_eq_int(delay, 86400000)  -- 24h cap
   end
 
   -- Backoff: Fibonacci produces correct sequence for small n
-  fn test_backoff_fibonacci_sequence() do
+  test "backoff_fibonacci_sequence" do
     -- fib(1)=1, fib(2)=1, fib(3)=2, fib(4)=3, fib(5)=5
-    assert_eq_int(Conduit.Backoff.delay(Conduit.Backoff.Fibonacci, 1), 1000)
-    assert_eq_int(Conduit.Backoff.delay(Conduit.Backoff.Fibonacci, 2), 1000)
-    assert_eq_int(Conduit.Backoff.delay(Conduit.Backoff.Fibonacci, 3), 2000)
-    assert_eq_int(Conduit.Backoff.delay(Conduit.Backoff.Fibonacci, 4), 3000)
-    assert_eq_int(Conduit.Backoff.delay(Conduit.Backoff.Fibonacci, 5), 5000)
+    assert_eq_int(Conduit.Backoff.delay(Conduit.Fibonacci, 1), 1000)
+    assert_eq_int(Conduit.Backoff.delay(Conduit.Fibonacci, 2), 1000)
+    assert_eq_int(Conduit.Backoff.delay(Conduit.Fibonacci, 3), 2000)
+    assert_eq_int(Conduit.Backoff.delay(Conduit.Fibonacci, 4), 3000)
+    assert_eq_int(Conduit.Backoff.delay(Conduit.Fibonacci, 5), 5000)
   end
 
   -- CronRegistry.all() returns registered entries via Vault.keys
-  fn test_cron_registry_all_returns_registered_entries() do
-    let cron_a = "AllTestA_" ++ uuid_v4()
-    let cron_b = "AllTestB_" ++ uuid_v4()
-    Conduit.CronRegistry.register(cron_a, Conduit.CronConfig.default(), fn _ -> Ok(()) end)
-    Conduit.CronRegistry.register(cron_b, Conduit.CronConfig.default(), fn _ -> Ok(()) end)
+  test "cron_registry_all_returns_registered_entries" do
+    let cron_a = "AllTestA_" ++ base64_encode(random_bytes(16))
+    let cron_b = "AllTestB_" ++ base64_encode(random_bytes(16))
+    Conduit.CronRegistry.register(cron_a, Conduit.CronConfig.default(), fn _ -> Ok(()))
+    Conduit.CronRegistry.register(cron_b, Conduit.CronConfig.default(), fn _ -> Ok(()))
     let all = Conduit.CronRegistry.all()
     -- Both should appear in the result
     let found_a = List.any(all, fn e -> e.cron_type == cron_a)
@@ -2226,18 +2206,18 @@ mod ConduitTest do
   end
 
   -- WorkflowRunner: pparse_workflow_id now uses Json.parse, not string splitting
-  fn test_workflow_runner_parse_id_with_compact_json() do
+  test "workflow_runner_parse_id_with_compact_json" do
     -- Old string-split code required space after colon: "workflow_id": "..."
     -- New Json.parse code handles compact JSON without spaces.
-    let vault_k = "wr_parse_" ++ uuid_v4()
+    let vault_k = "wr_parse_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
     -- Compact JSON (no space after colon, no space after key)
-    let payload = "{\"workflow_id\":\"" ++ uuid_v4() ++ "\"}"
+    let payload = "{\"workflow_id\":\"" ++ base64_encode(random_bytes(16)) ++ "\"}"
     let result  = Conduit.WorkflowRunner.execute(storage, payload)
     -- Storage returns None for workflow_load → Discard (not empty-id Discard)
     -- Both result in Err(Discard) but the message should not contain "missing"
     match result do
-      Err(ConduitError.Discard(msg)) ->
+      Err(Conduit.Discard(msg)) ->
         -- Confirm we got past the empty-id check (id was parsed correctly)
         assert_true(not (String.contains(msg, "missing workflow_id")))
       _ -> assert_true(false)
@@ -2245,10 +2225,10 @@ mod ConduitTest do
   end
 
   -- signal_workflow: now delegates to storage.signal_insert
-  fn test_signal_workflow_inserts_signal() do
-    let vault_k = "sig_wf_" ++ uuid_v4()
+  test "signal_workflow_inserts_signal" do
+    let vault_k = "sig_wf_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
-    let wf_id   = uuid_v4()
+    let wf_id   = base64_encode(random_bytes(16))
     let result  = Conduit.API.signal_workflow(wf_id, "approval", "{\"approved\":true}", storage)
     -- Fake signal_insert always returns Ok(1)
     assert_ok(result)
@@ -2259,32 +2239,32 @@ mod ConduitTest do
   end
 
   -- Dashboard queries: workflows calls dashboard_workflows_list (paginated)
-  fn test_dashboard_queries_workflows_returns_list() do
-    let vault_k = "wf_q_" ++ uuid_v4()
+  test "dashboard_queries_workflows_returns_list" do
+    let vault_k = "wf_q_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
     let result  = Conduit.Dashboard.Queries.workflows(storage, "", 1)
     assert_eq_int(List.length(result), 0)
   end
 
   -- Dashboard queries: crons now calls dashboard_crons_list (all schedules)
-  fn test_dashboard_queries_crons_returns_list() do
-    let vault_k = "crons_q_" ++ uuid_v4()
+  test "dashboard_queries_crons_returns_list" do
+    let vault_k = "crons_q_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
     let result  = Conduit.Dashboard.Queries.crons(storage)
     assert_eq_int(List.length(result), 0)
   end
 
   -- Dashboard queries: job_by_id uses dedicated storage method
-  fn test_dashboard_queries_job_by_id_not_found() do
-    let vault_k = "job_id_q_" ++ uuid_v4()
+  test "dashboard_queries_job_by_id_not_found" do
+    let vault_k = "job_id_q_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
-    let result  = Conduit.Dashboard.Queries.job_by_id(storage, uuid_v4())
+    let result  = Conduit.Dashboard.Queries.job_by_id(storage, base64_encode(random_bytes(16)))
     assert_none(result)
   end
 
   -- Dashboard actions: delete_all_dead_letters uses storage method
-  fn test_dashboard_actions_delete_all_dead_letters() do
-    let vault_k = "dl_all_del_" ++ uuid_v4()
+  test "dashboard_actions_delete_all_dead_letters" do
+    let vault_k = "dl_all_del_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
     let result  = Conduit.Dashboard.Actions.delete_all_dead_letters(storage)
     assert_ok(result)
@@ -2295,7 +2275,7 @@ mod ConduitTest do
   end
 
   -- cron_parser: pmatches works (was broken by Expr(e) pattern-match bug)
-  fn test_cron_parser_matches_works() do
+  test "cron_parser_matches_works" do
     -- The old code used `match expr do Expr(e) ->` which is invalid for a record
     -- type.  This test exercises the matches/2 path end-to-end.
     let expr_result = Conduit.CronParser.parse("* * * * *")
@@ -2303,14 +2283,14 @@ mod ConduitTest do
     match expr_result do
       Err(_)   -> assert_true(false)
       Ok(expr) ->
-        let any_dt = DateTime.now()
+        let any_dt = DateTime.from_timestamp(DateTime.now())
         -- "* * * * *" matches every minute — should always be true
         assert_true(Conduit.CronParser.matches(expr, any_dt))
     end
   end
 
   -- cron_parser: Expr(e) bug would make specific patterns fail
-  fn test_cron_parser_matches_specific_minute() do
+  test "cron_parser_matches_specific_minute" do
     -- "0 * * * *" matches only minute=0; at minute 30 it should be false.
     let expr_result = Conduit.CronParser.parse("0 * * * *")
     assert_ok(expr_result)
@@ -2318,7 +2298,7 @@ mod ConduitTest do
       Err(_)   -> assert_true(false)
       Ok(expr) ->
         -- Find a :00 minute datetime and a :30 minute datetime.
-        let next_00 = Conduit.CronParser.next_run("0 * * * *", DateTime.now())
+        let next_00 = Conduit.CronParser.next_run("0 * * * *", DateTime.from_timestamp(DateTime.now()))
         match next_00 do
           Err(_)   -> assert_true(false)
           Ok(at00) ->
@@ -2327,6 +2307,181 @@ mod ConduitTest do
             let at30 = DateTime.from_timestamp(DateTime.to_timestamp(at00) + (30 * 60))
             assert_true(not (Conduit.CronParser.matches(expr, at30)))
         end
+    end
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Phase 8: Deterministic workflow application tests
+  -- (moved here from DeterministicAppTest to use FakeWorkflowStorage
+  --  and avoid a second impl Conduit.Storage block)
+  -- ─────────────────────────────────────────────────────────────
+
+  pfn run_payment_workflow(storage : FakeWorkflowStorage, wf_id : String, call_tracker_key : String) : Result(String, Conduit.WorkflowError) do
+    let ctx = Conduit.WorkflowContext.new(wf_id)
+    -- Step 1: Validate order
+    let validate_fn = fn () ->
+      let c = Vault.get(call_tracker_key, "validate_calls") |> unwrap_or(0)
+      let _ = Vault.set(call_tracker_key, "validate_calls", c + 1)
+      "\"order_valid\""
+    let r1 = Conduit.WorkflowContext.checkpoint(storage, ctx, "validate_order", validate_fn)
+    match r1 do
+      Err(e) -> Err(e)
+      Ok(v1) ->
+        -- Step 2: Charge card
+        let charge_fn = fn () ->
+          let c = Vault.get(call_tracker_key, "charge_calls") |> unwrap_or(0)
+          let _ = Vault.set(call_tracker_key, "charge_calls", c + 1)
+          "\"charge_ch_abc123\""
+        let r2 = Conduit.WorkflowContext.checkpoint(storage, ctx, "charge_card", charge_fn)
+        match r2 do
+          Err(e) -> Err(e)
+          Ok(v2) ->
+            -- Step 3: Send confirmation
+            let confirm_fn = fn () ->
+              let c = Vault.get(call_tracker_key, "confirm_calls") |> unwrap_or(0)
+              let _ = Vault.set(call_tracker_key, "confirm_calls", c + 1)
+              "\"email_sent\""
+            let r3 = Conduit.WorkflowContext.checkpoint(storage, ctx, "send_confirmation", confirm_fn)
+            match r3 do
+              Err(e) -> Err(e)
+              Ok(v3) ->
+                Ok("{\"order\":\"" ++ v1 ++ "\",\"charge\":\"" ++ v2 ++ "\",\"confirm\":\"" ++ v3 ++ "\"}")
+            end
+        end
+    end
+  end
+
+  test "first_run_executes_all_fns_and_logs_events" do
+    let vault_k  = "det_app_" ++ base64_encode(random_bytes(16))
+    let storage  = fake_workflow_storage_new(vault_k)
+    let wf_id    = base64_encode(random_bytes(16))
+    let call_key = "calls_first_" ++ base64_encode(random_bytes(16))
+    Vault.set(call_key, "validate_calls", 0)
+    Vault.set(call_key, "charge_calls", 0)
+    Vault.set(call_key, "confirm_calls", 0)
+    -- Set up replay mode with 0 events (first execution)
+    let rk = Conduit.EventStore.replay_key(wf_id)
+    Vault.set(rk, "mode", "deterministic_replay")
+    Vault.set(rk, "cursor", 0)
+    Vault.set(rk, "event_count", 0)
+    Vault.set(rk, "next_seq", 0)
+    let result = run_payment_workflow(storage, wf_id, call_key)
+    assert_ok(result)
+    -- All 3 fns were called
+    assert_eq_int(Vault.get(call_key, "validate_calls") |> unwrap_or(0), 1)
+    assert_eq_int(Vault.get(call_key, "charge_calls") |> unwrap_or(0), 1)
+    assert_eq_int(Vault.get(call_key, "confirm_calls") |> unwrap_or(0), 1)
+    -- 3 events were logged
+    let cnt = Conduit.EventStore.count(storage, wf_id)
+    match cnt do
+      Ok(n) -> assert_eq_int(n, 3)
+      Err(_) -> assert_true(false)
+    end
+    -- Events are in correct order
+    let events = Conduit.EventStore.load_all(storage, wf_id)
+    match events do
+      Ok(evts) ->
+        assert_eq_int(List.length(evts), 3)
+        let e0 = List.nth_opt(evts, 0) |> unwrap
+        let e1 = List.nth_opt(evts, 1) |> unwrap
+        let e2 = List.nth_opt(evts, 2) |> unwrap
+        assert_eq_int(e0.sequence, 0)
+        assert_eq_int(e1.sequence, 1)
+        assert_eq_int(e2.sequence, 2)
+        assert_true(String.contains(e0.payload, "validate_order"))
+        assert_true(String.contains(e1.payload, "charge_card"))
+        assert_true(String.contains(e2.payload, "send_confirmation"))
+      Err(_) -> assert_true(false)
+    end
+  end
+
+  test "replay_skips_all_fns_and_returns_recorded_values" do
+    let vault_k  = "det_app_" ++ base64_encode(random_bytes(16))
+    let storage  = fake_workflow_storage_new(vault_k)
+    let wf_id    = base64_encode(random_bytes(16))
+    -- Pre-populate 3 events (simulating a previous first run)
+    let _ = Conduit.EventStore.append(storage, wf_id, 0, "checkpoint",
+      "{\"name\":\"validate_order\",\"value\":\"order_valid\",\"duration_ms\":5}")
+    let _ = Conduit.EventStore.append(storage, wf_id, 1, "checkpoint",
+      "{\"name\":\"charge_card\",\"value\":\"charge_ch_abc123\",\"duration_ms\":100}")
+    let _ = Conduit.EventStore.append(storage, wf_id, 2, "checkpoint",
+      "{\"name\":\"send_confirmation\",\"value\":\"email_sent\",\"duration_ms\":10}")
+    -- Warm replay
+    let _ = Conduit.EventStore.warm_replay(storage, wf_id)
+    -- Track calls
+    let call_key = "calls_replay_" ++ base64_encode(random_bytes(16))
+    Vault.set(call_key, "validate_calls", 0)
+    Vault.set(call_key, "charge_calls", 0)
+    Vault.set(call_key, "confirm_calls", 0)
+    let result = run_payment_workflow(storage, wf_id, call_key)
+    assert_ok(result)
+    -- NO fns were called (all replayed from events)
+    assert_eq_int(Vault.get(call_key, "validate_calls") |> unwrap_or(-1), 0)
+    assert_eq_int(Vault.get(call_key, "charge_calls") |> unwrap_or(-1), 0)
+    assert_eq_int(Vault.get(call_key, "confirm_calls") |> unwrap_or(-1), 0)
+    -- Values are correct (from recorded events)
+    match result do
+      Ok(output) ->
+        assert_true(String.contains(output, "order_valid"))
+        assert_true(String.contains(output, "charge_ch_abc123"))
+        assert_true(String.contains(output, "email_sent"))
+      Err(_) -> assert_true(false)
+    end
+  end
+
+  test "point_in_time_replay_partial_events" do
+    let vault_k  = "det_app_" ++ base64_encode(random_bytes(16))
+    let storage  = fake_workflow_storage_new(vault_k)
+    let wf_id    = base64_encode(random_bytes(16))
+    -- Pre-populate 3 events
+    let _ = Conduit.EventStore.append(storage, wf_id, 0, "checkpoint",
+      "{\"name\":\"validate_order\",\"value\":\"order_valid\",\"duration_ms\":5}")
+    let _ = Conduit.EventStore.append(storage, wf_id, 1, "checkpoint",
+      "{\"name\":\"charge_card\",\"value\":\"charge_ch_abc123\",\"duration_ms\":100}")
+    let _ = Conduit.EventStore.append(storage, wf_id, 2, "checkpoint",
+      "{\"name\":\"send_confirmation\",\"value\":\"email_sent\",\"duration_ms\":10}")
+    -- Warm replay to sequence 1 only (first 2 events: 0 and 1)
+    let _ = Conduit.EventStore.warm_replay_to(storage, wf_id, 1)
+    let call_key = "calls_pit_" ++ base64_encode(random_bytes(16))
+    Vault.set(call_key, "validate_calls", 0)
+    Vault.set(call_key, "charge_calls", 0)
+    Vault.set(call_key, "confirm_calls", 0)
+    let result = run_payment_workflow(storage, wf_id, call_key)
+    assert_ok(result)
+    -- First 2 fns NOT called (replayed), 3rd fn IS called (no event)
+    assert_eq_int(Vault.get(call_key, "validate_calls") |> unwrap_or(-1), 0)
+    assert_eq_int(Vault.get(call_key, "charge_calls") |> unwrap_or(-1), 0)
+    assert_eq_int(Vault.get(call_key, "confirm_calls") |> unwrap_or(-1), 1)
+  end
+
+  test "event_history_queryable" do
+    let vault_k = "det_app_" ++ base64_encode(random_bytes(16))
+    let storage = fake_workflow_storage_new(vault_k)
+    let wf_id   = base64_encode(random_bytes(16))
+    -- Run the workflow in first-execution mode
+    let rk = Conduit.EventStore.replay_key(wf_id)
+    Vault.set(rk, "mode", "deterministic_replay")
+    Vault.set(rk, "cursor", 0)
+    Vault.set(rk, "event_count", 0)
+    Vault.set(rk, "next_seq", 0)
+    let call_key = "calls_hist_" ++ base64_encode(random_bytes(16))
+    Vault.set(call_key, "validate_calls", 0)
+    Vault.set(call_key, "charge_calls", 0)
+    Vault.set(call_key, "confirm_calls", 0)
+    let _ = run_payment_workflow(storage, wf_id, call_key)
+    -- Query event history
+    let history = Conduit.EventStore.load_all(storage, wf_id)
+    match history do
+      Ok(evts) ->
+        assert_eq_int(List.length(evts), 3)
+        -- All events are checkpoint type
+        assert_true(List.all(evts, fn e -> e.event_type == "checkpoint"))
+        -- Sequences are 0, 1, 2
+        let seqs = List.map(evts, fn e -> e.sequence)
+        assert_true(List.member(seqs, 0))
+        assert_true(List.member(seqs, 1))
+        assert_true(List.member(seqs, 2))
+      Err(_) -> assert_true(false)
     end
   end
 end

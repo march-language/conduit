@@ -115,8 +115,8 @@ mod Conduit.CronParser do
 
   pfn pparse_step_field(step_str : String, s : String, lo : Int, hi : Int) : Result(Field, String) do
     match String.to_int(step_str) do
-      None    -> Err("invalid step in */N: " ++ s)
-      Some(n) ->
+      Err(_)  -> Err("invalid step in */N: " ++ s)
+      Ok(n)   ->
         if n <= 0 do
           Err("step must be > 0: " ++ s)
         else
@@ -144,8 +144,8 @@ mod Conduit.CronParser do
 
   pfn pparse_literal_field(s : String, lo : Int, hi : Int) : Result(Field, String) do
     match String.to_int(s) do
-      None    -> Err("invalid field value: " ++ s)
-      Some(n) ->
+      Err(_)  -> Err("invalid field value: " ++ s)
+      Ok(n)   ->
         if n < lo || n > hi do
           Err("value " ++ int_to_string(n) ++ " out of range [" ++ int_to_string(lo) ++ "," ++ int_to_string(hi) ++ "]")
         else
@@ -158,14 +158,19 @@ mod Conduit.CronParser do
     -- May be N-M or N-M/S
     let (range_part, step_opt) = match String.split_first(s, "/") do
       None        -> (s, None)
-      Some((r, step_s)) -> (r, String.to_int(step_s))
+      Some((r, step_s)) ->
+        let step_i = match String.to_int(step_s) do
+          Ok(n)  -> Some(n)
+          Err(_) -> None
+        end
+        (r, step_i)
     end
     match String.split_first(range_part, "-") do
       None ->
         Err("expected range N-M in: " ++ s)
       Some((lo_s, hi_s)) ->
         match (String.to_int(lo_s), String.to_int(hi_s)) do
-          (Some(rlo), Some(rhi)) ->
+          (Ok(rlo), Ok(rhi)) ->
             let step = Option.unwrap_or(step_opt, 1)
             if rlo < lo || rhi > hi || rlo > rhi do
               Err("range out of bounds in: " ++ s)
@@ -181,7 +186,7 @@ mod Conduit.CronParser do
   pfn pparse_list(items : List(String), lo : Int, hi : Int, acc : List(Int)) : Result(Field, String) do
     match items do
       Nil ->
-        Ok(Values(List.sort_by(acc, fn a -> fn b -> a < b)))
+        Ok(Values(List.sort_by(acc, fn (a, b) -> a < b)))
       Cons(item, rest) ->
         match pparse_field(item, lo, hi) do
           Err(e) -> Err(e)
@@ -256,22 +261,22 @@ mod Conduit.CronParser do
 
   -- Extract time components as integers from a UTC DateTime.
   pfn pdt_minute(dt : DateTime) : Int do
-    DateTime.format(dt, "%M") |> String.to_int |> unwrap_or(0)
+    DateTime.format(dt, "%M") |> String.to_int |> Result.unwrap_or(0)
   end
 
   pfn pdt_hour(dt : DateTime) : Int do
-    DateTime.format(dt, "%H") |> String.to_int |> unwrap_or(0)
+    DateTime.format(dt, "%H") |> String.to_int |> Result.unwrap_or(0)
   end
 
   pfn pdt_dom(dt : DateTime) : Int do
-    DateTime.format(dt, "%d") |> String.to_int |> unwrap_or(1)
+    DateTime.format(dt, "%d") |> String.to_int |> Result.unwrap_or(1)
   end
 
   pfn pdt_month(dt : DateTime) : Int do
-    DateTime.format(dt, "%m") |> String.to_int |> unwrap_or(1)
+    DateTime.format(dt, "%m") |> String.to_int |> Result.unwrap_or(1)
   end
 
   pfn pdt_dow(dt : DateTime) : Int do
-    DateTime.format(dt, "%w") |> String.to_int |> unwrap_or(0)
+    DateTime.format(dt, "%w") |> String.to_int |> Result.unwrap_or(0)
   end
 end

@@ -70,7 +70,7 @@ mod Conduit.CronRegistry do
   end
 
   doc "Serialise a CronOverlap variant to its DB string representation."
-  fn overlap_to_string(o : Conduit.CronOverlap) : String do
+  fn overlap_to_string(o) : String do
     match o do
       Skip    -> "skip"
       Allow   -> "allow"
@@ -84,7 +84,7 @@ mod Conduit.CronRegistry do
   Unknown strings default to Skip (the safest policy: don't start a second
   instance of the job if the previous one hasn't finished yet).
   """
-  fn overlap_from_string(s : String) : Conduit.CronOverlap do
+  fn overlap_from_string(s : String) do
     match s do
       "allow"   -> Conduit.CronOverlap.Allow
       "replace" -> Conduit.CronOverlap.Replace
@@ -94,8 +94,12 @@ mod Conduit.CronRegistry do
 
   -- Return (or create) the Vault table used as the cron registry.
   --
-  -- `Vault.new` is idempotent; all callers in the same process share one table.
+  -- Uses Vault.whereis to find an existing table before creating a new one,
+  -- ensuring the registry is process-global and idempotent.
   pfn registry_key() do
-    Vault.new("conduit_cron_registry")
+    match Vault.whereis("conduit_cron_registry") do
+      Some(tbl) -> tbl
+      None      -> Vault.new("conduit_cron_registry")
+    end
   end
 end

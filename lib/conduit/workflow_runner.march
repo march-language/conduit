@@ -9,7 +9,7 @@ mod Conduit.WorkflowRunner do
 
   Delegates to prun after loading and validating the workflow row.
   """
-  fn execute(storage, payload : String) : Result((), ConduitError) do
+  fn execute(storage : s, payload : String) : Result((), ConduitError) do
     Logger.debug("workflow_runner: execute payload=" ++ payload)
     let workflow_id = pparse_workflow_id(payload)
     Logger.debug("workflow_runner: execute workflow_id=" ++ workflow_id)
@@ -35,14 +35,13 @@ mod Conduit.WorkflowRunner do
   Enqueue a workflow_runner job for the given workflow_id.
   Called immediately after inserting a new workflow row.
   """
-  fn enqueue(storage, workflow_id : String, config : Conduit.WorkflowConfig) : Result(String, String) do
+  fn enqueue(storage : s, workflow_id : String, config : Conduit.WorkflowConfig) : Result(String, String) do
     -- Use the registered config for the workflow runner performer (which carries
     -- the queue, priority, etc. set at startup).  Fall back to safe defaults if
     -- the performer has not been registered yet (e.g. during testing).
     let base_config = Conduit.Queue.lookup_config(job_type())
       |> Option.unwrap_or(Conduit.JobConfig.default())
-    let job_config = {
-      ..base_config,
+    let job_config = { base_config with
       max_attempts  = 3,
       timeout       = 30000,
       backoff       = Conduit.Backoff.Exponential,
@@ -57,7 +56,7 @@ mod Conduit.WorkflowRunner do
   -- Private: execution
   -- ─────────────────────────────────────────────────────────────
 
-  pfn prun(storage, workflow_id : String, row : Conduit.WorkflowRow) : Result((), ConduitError) do
+  pfn prun(storage : s, workflow_id : String, row : Conduit.WorkflowRow) : Result((), ConduitError) do
     Logger.debug("workflow_runner: prun workflow_id=" ++ workflow_id ++ " wf_type=" ++ row.workflow_type)
     -- Check timeout.
     let timed_out = match row.timeout_at do
@@ -114,7 +113,7 @@ mod Conduit.WorkflowRunner do
     end
   end
 
-  pfn pmark_status(storage, workflow_id : String, status : String, output : Option(String), error : Option(String)) : () do
+  pfn pmark_status(storage : s, workflow_id : String, status : String, output : Option(String), error : Option(String)) : () do
     match Conduit.Storage.workflow_update_status(storage, workflow_id, status, output, error) do
       Ok(_)   -> ()
       Err(e)  -> Logger.error("workflow_runner: failed to mark " ++ workflow_id ++ " as " ++ status ++ ": " ++ e)

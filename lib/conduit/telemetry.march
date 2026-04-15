@@ -27,25 +27,22 @@
 
 mod Conduit.Telemetry do
 
-  doc """
-  All events emitted by the Conduit engine.
-
-  Positional field order (comment documents names):
-
-    JobEnqueued(job_id, job_type, queue)
-    JobStarted(job_id, job_type, worker_id, attempt)
-    JobCompleted(job_id, duration_ms)
-    JobFailed(job_id, error, attempt, will_retry)
-    JobDiscarded(job_id, reason)
-    JobSnoozed(job_id, until)
-    WorkflowStarted(workflow_id, workflow_type)
-    WorkflowCheckpointed(workflow_id, step, duration_ms)
-    WorkflowCompleted(workflow_id, duration_ms)
-    WorkflowFailed(workflow_id, error)
-    CronFired(cron_id, scheduled_at)
-    QueueDepth(queue, pending, running, failed)
-    WorkerPoolUtilization(active, total)
-  """
+  -- All events emitted by the Conduit engine.
+  --
+  -- Positional field order:
+  --   JobEnqueued(job_id, job_type, queue)
+  --   JobStarted(job_id, job_type, worker_id, attempt)
+  --   JobCompleted(job_id, duration_ms)
+  --   JobFailed(job_id, error, attempt, will_retry)
+  --   JobDiscarded(job_id, reason)
+  --   JobSnoozed(job_id, until)
+  --   WorkflowStarted(workflow_id, workflow_type)
+  --   WorkflowCheckpointed(workflow_id, step, duration_ms)
+  --   WorkflowCompleted(workflow_id, duration_ms)
+  --   WorkflowFailed(workflow_id, error)
+  --   CronFired(cron_id, scheduled_at)
+  --   QueueDepth(queue, pending, running, failed)
+  --   WorkerPoolUtilization(active, total)
   type ConduitTelemetryEvent =
       JobEnqueued(String, String, String)
     | JobStarted(String, String, String, Int)
@@ -74,7 +71,7 @@ mod Conduit.Telemetry do
 
   Registering under the same `name` replaces the previous handler.
   """
-  fn attach(name : String, handler_fn : fn ConduitTelemetryEvent -> ()) : () do
+  fn attach(name : String, handler_fn : ConduitTelemetryEvent -> ()) : () do
     Vault.set(ptable(), name, handler_fn)
   end
 
@@ -106,66 +103,7 @@ mod Conduit.Telemetry do
     end
   end
 
-end
-
--- ── TelemetryHandler interface ────────────────────────────────────────────────
-
-mod Conduit do
-
-  doc """
-  Interface for Conduit telemetry handlers.
-
-  Implement this to receive structured lifecycle events from the engine.
-  Use `Conduit.Telemetry.attach/2` to register the handler's `handle`
-  function in the global dispatch table.
-
-  Example:
-
-      mod MyTelemetry do
-        impl Conduit.TelemetryHandler(MyTelemetry) do
-          fn handle(_self, event) : () do
-            match event do
-              Conduit.Telemetry.JobCompleted(id, dur) ->
-                Logger.info("job " ++ id ++ " done in " ++ int_to_string(dur) ++ "ms")
-              _ -> ()
-            end
-          end
-        end
-      end
-
-      -- Registration:
-      Conduit.Telemetry.attach("my_telemetry",
-        fn event -> MyTelemetry.handle(MyTelemetry, event))
-  """
-  interface TelemetryHandler(t) do
-    fn handle : t -> Conduit.Telemetry.ConduitTelemetryEvent -> ()
-  end
-
-  doc """
-  Interface for job execution middleware.
-
-  Middleware wraps the actual `perform` call, allowing cross-cutting logic
-  (logging, tracing, authentication checks, etc.) to run before and after
-  every job.
-
-  `call` receives:
-    • `self`   — the middleware instance (typically the module itself)
-    • `info`   — a `JobInfo` snapshot of the job being executed
-    • `next`   — a zero-argument function that invokes the next middleware
-                 (or the actual performer when called from the last middleware)
-
-  Return the value of `next()` to pass through; return `Err(...)` to short-
-  circuit and fail the job immediately.
-  """
-  interface Middleware(m) do
-    fn call : m -> Conduit.JobInfo -> (fn () -> Result((), Conduit.ConduitError)) -> Result((), Conduit.ConduitError)
-  end
-
-end
-
--- ── Built-in Logger handler ───────────────────────────────────────────────────
-
-mod Conduit.Telemetry.Logger do
+  -- ── Built-in Logger handler ─────────────────────────────────────────────────
 
   doc """
   Attach the built-in Logger handler.
@@ -174,72 +112,66 @@ mod Conduit.Telemetry.Logger do
   INFO level as a single-line human-readable string.  Call this once at
   application startup:
 
-      Conduit.Telemetry.Logger.attach()
+      Conduit.Telemetry.attach_logger()
 
   To detach:
 
       Conduit.Telemetry.detach("conduit.logger")
   """
-  fn attach() : () do
-    Conduit.Telemetry.attach("conduit.logger", fn event ->
-      Logger.info("conduit.telemetry: " ++ pformat(event)))
+  fn attach_logger() : () do
+    attach("conduit.logger", fn event ->
+      Logger.info("conduit.telemetry: " ++ pformat_event(event)))
   end
 
-  impl Conduit.TelemetryHandler(Conduit.Telemetry.Logger) do
-    fn handle(_self, event : Conduit.Telemetry.ConduitTelemetryEvent) : () do
-      Logger.info("conduit.telemetry: " ++ pformat(event))
-    end
-  end
-
-  pfn pformat(event : Conduit.Telemetry.ConduitTelemetryEvent) : String do
+  pfn pformat_event(event : ConduitTelemetryEvent) : String do
     match event do
-      Conduit.Telemetry.JobEnqueued(id, job_type, queue) ->
+      JobEnqueued(id, job_type, queue) ->
         "job.enqueued job_id=" ++ id ++ " type=" ++ job_type ++ " queue=" ++ queue
 
-      Conduit.Telemetry.JobStarted(id, job_type, worker_id, attempt) ->
+      JobStarted(id, job_type, worker_id, attempt) ->
         "job.started job_id=" ++ id ++ " type=" ++ job_type ++
         " worker=" ++ worker_id ++ " attempt=" ++ int_to_string(attempt)
 
-      Conduit.Telemetry.JobCompleted(id, duration_ms) ->
+      JobCompleted(id, duration_ms) ->
         "job.completed job_id=" ++ id ++ " duration_ms=" ++ int_to_string(duration_ms)
 
-      Conduit.Telemetry.JobFailed(id, error, attempt, will_retry) ->
+      JobFailed(id, error, attempt, will_retry) ->
+        let retry_str = if will_retry do "true" else "false" end
         "job.failed job_id=" ++ id ++ " attempt=" ++ int_to_string(attempt) ++
-        " will_retry=" ++ if will_retry do "true" else "false" end ++
-        " error=" ++ error
+        " will_retry=" ++ retry_str ++ " error=" ++ error
 
-      Conduit.Telemetry.JobDiscarded(id, reason) ->
+      JobDiscarded(id, reason) ->
         "job.discarded job_id=" ++ id ++ " reason=" ++ reason
 
-      Conduit.Telemetry.JobSnoozed(id, until) ->
+      JobSnoozed(id, until) ->
         "job.snoozed job_id=" ++ id ++
         " until=" ++ int_to_string(DateTime.to_timestamp(until))
 
-      Conduit.Telemetry.WorkflowStarted(wf_id, wf_type) ->
+      WorkflowStarted(wf_id, wf_type) ->
         "workflow.started workflow_id=" ++ wf_id ++ " type=" ++ wf_type
 
-      Conduit.Telemetry.WorkflowCheckpointed(wf_id, step, duration_ms) ->
+      WorkflowCheckpointed(wf_id, step, duration_ms) ->
         "workflow.checkpointed workflow_id=" ++ wf_id ++ " step=" ++ step ++
         " duration_ms=" ++ int_to_string(duration_ms)
 
-      Conduit.Telemetry.WorkflowCompleted(wf_id, duration_ms) ->
+      WorkflowCompleted(wf_id, duration_ms) ->
         "workflow.completed workflow_id=" ++ wf_id ++
         " duration_ms=" ++ int_to_string(duration_ms)
 
-      Conduit.Telemetry.WorkflowFailed(wf_id, error) ->
+      WorkflowFailed(wf_id, error) ->
         "workflow.failed workflow_id=" ++ wf_id ++ " error=" ++ error
 
-      Conduit.Telemetry.CronFired(cron_id, scheduled_at) ->
+      CronFired(cron_id, scheduled_at) ->
         "cron.fired cron_id=" ++ cron_id ++
         " at=" ++ int_to_string(DateTime.to_timestamp(scheduled_at))
 
-      Conduit.Telemetry.QueueDepth(queue, pending, running, failed) ->
+      QueueDepth(queue, pending, running, failed) ->
         "queue.depth queue=" ++ queue ++
         " pending=" ++ int_to_string(pending) ++
         " running=" ++ int_to_string(running) ++
         " failed=" ++ int_to_string(failed)
 
-      Conduit.Telemetry.WorkerPoolUtilization(active, total) ->
+      WorkerPoolUtilization(active, total) ->
         "pool.utilization active=" ++ int_to_string(active) ++
         " total=" ++ int_to_string(total)
     end
@@ -247,44 +179,3 @@ mod Conduit.Telemetry.Logger do
 
 end
 
--- ── Middleware chain helper ───────────────────────────────────────────────────
-
-mod Conduit.Middleware.Chain do
-
-  doc """
-  Run a list of middleware closures around a performer call.
-
-  Each closure in `middlewares` is a partially applied call of the form
-  `fn next -> Middleware.call(mw, job_info, next)`.  The chain terminates
-  with `perform_fn`.
-
-  Build this at worker startup by folding over the registered middleware
-  list so the innermost call is `perform_fn` and the outermost is the
-  first middleware.
-
-  Example (innermost first, then build outward):
-
-      let chain = Conduit.Middleware.Chain.build(
-        middlewares,
-        fn () -> MyJob.perform(MyJob, decoded_args))
-  """
-  fn build(
-    middlewares : List(fn (fn () -> Result((), Conduit.ConduitError)) -> Result((), Conduit.ConduitError)),
-    perform_fn  : fn () -> Result((), Conduit.ConduitError)
-  ) : fn () -> Result((), Conduit.ConduitError) do
-    pbuild_loop(List.reverse(middlewares), perform_fn)
-  end
-
-  pfn pbuild_loop(
-    rest       : List(fn (fn () -> Result((), Conduit.ConduitError)) -> Result((), Conduit.ConduitError)),
-    inner      : fn () -> Result((), Conduit.ConduitError)
-  ) : fn () -> Result((), Conduit.ConduitError) do
-    match rest do
-      Nil           -> inner
-      Cons(mw, tail) ->
-        let wrapped = fn () -> mw(inner)
-        pbuild_loop(tail, wrapped)
-    end
-  end
-
-end

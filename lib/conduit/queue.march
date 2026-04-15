@@ -27,7 +27,7 @@ mod Conduit.Queue do
   The new row is inserted with status = "pending", attempt = 0, and
   run_at = NOW().
   """
-  fn enqueue(storage, job_type : String, payload : String, config : Conduit.JobConfig) : Result(String, String) do
+  fn enqueue(storage : s, job_type : String, payload : String, config : Conduit.JobConfig) : Result(String, String) do
     let id  = uuid_v4()
     let now = DateTime.from_timestamp(DateTime.now())
     let unique_key = punique_key(job_type, config.queue, payload, config)
@@ -79,7 +79,7 @@ mod Conduit.Queue do
   a delayed job and an immediate job for the same type+payload are considered the
   same unique job when `unique_for` is set.
   """
-  fn enqueue_in(storage, job_type : String, payload : String, delay : Int, config : Conduit.JobConfig) : Result(String, String) do
+  fn enqueue_in(storage : s, job_type : String, payload : String, delay : Int, config : Conduit.JobConfig) : Result(String, String) do
     let id     = uuid_v4()
     let now    = DateTime.from_timestamp(DateTime.now())
     let run_at = DateTime.add_ms(now, delay)
@@ -214,7 +214,7 @@ mod Conduit.Queue do
   --
   -- The Replace policy returns Ok(None) to proceed with the insert; cancelling
   -- the old job is delegated to the storage layer's unique index conflict handler.
-  pfn punique_guard(storage, unique_key : Option(String), config : Conduit.JobConfig) : Result(Option(String), String) do
+  pfn punique_guard(storage : s, unique_key : Option(String), config : Conduit.JobConfig) : Result(Option(String), String) do
     match unique_key do
       None     -> Ok(None)
       Some(uk) ->
@@ -233,10 +233,12 @@ mod Conduit.Queue do
 
   -- Return (or create) the Vault table used as the performer registry.
   --
-  -- `Vault.new` is idempotent: calling it with the same name always returns a
-  -- handle to the same table.  The registry is process-global; all workers in
-  -- this process share it.
+  -- Uses Vault.whereis to find an existing table before creating a new one,
+  -- ensuring the registry is process-global and idempotent.
   pfn registry_key() do
-    Vault.new("conduit_performer_registry")
+    match Vault.whereis("conduit_performer_registry") do
+      Some(tbl) -> tbl
+      None      -> Vault.new("conduit_performer_registry")
+    end
   end
 end

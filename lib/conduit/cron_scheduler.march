@@ -1,16 +1,16 @@
 mod Conduit.CronScheduler do
   doc "Start the cron scheduler as a background task."
-  fn start(storage, tick_interval_ms : Int) : Task do
+  fn start(storage : s, tick_interval_ms : Int) : Task do
     task_spawn(fn _ -> scheduler_loop(storage, tick_interval_ms))
   end
 
-  pfn scheduler_loop(storage, tick_interval_ms : Int) : () do
+  pfn scheduler_loop(storage : s, tick_interval_ms : Int) : () do
     ptick(storage)
     psleep_ms(tick_interval_ms)
     scheduler_loop(storage, tick_interval_ms)
   end
 
-  pfn ptick(storage) : () do
+  pfn ptick(storage : s) : () do
     -- Try to acquire the advisory lock. If another node holds it, skip this tick.
     match Conduit.Storage.cron_advisory_lock(storage, 7326482) do
       Err(e) ->
@@ -27,7 +27,7 @@ mod Conduit.CronScheduler do
     end
   end
 
-  pfn pfire_due(storage) : Result((), String) do
+  pfn pfire_due(storage : s) : Result((), String) do
     match Conduit.Storage.cron_load_due(storage) do
       Err(e)       -> Err(e)
       Ok(schedules) ->
@@ -36,7 +36,7 @@ mod Conduit.CronScheduler do
     end
   end
 
-  pfn pfire_one(storage, sched : Conduit.CronSchedule) : () do
+  pfn pfire_one(storage : s, sched : Conduit.CronSchedule) : () do
     let overlap = Conduit.CronRegistry.overlap_from_string(sched.overlap)
     let should_fire = match overlap do
       Skip ->
@@ -69,7 +69,7 @@ mod Conduit.CronScheduler do
     end
   end
 
-  pfn pdo_fire(storage, sched : Conduit.CronSchedule) : () do
+  pfn pdo_fire(storage : s, sched : Conduit.CronSchedule) : () do
     -- Look up registered config to get the queue and priority.
     let config = match Conduit.CronRegistry.lookup(sched.job_type) do
       None    ->
@@ -131,7 +131,7 @@ mod Conduit.CronScheduler do
   Upsert a static cron into conduit_cron_schedules so it survives restarts.
   Called during Conduit.start for each registered static cron.
   """
-  fn upsert_static(storage, cron_type : String, config : Conduit.CronConfig) : Result((), String) do
+  fn upsert_static(storage : s, cron_type : String, config : Conduit.CronConfig) : Result((), String) do
     let now  = DateTime.now()
     let next = match Conduit.CronParser.next_run(config.schedule, now) do
       Ok(t)  -> Some(t)

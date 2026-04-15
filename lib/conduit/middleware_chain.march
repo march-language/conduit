@@ -1,0 +1,26 @@
+-- Conduit.Middleware.Chain — helper for running a list of middleware closures.
+mod Conduit.Middleware.Chain do
+
+  -- Run a list of middleware closures around a performer call.
+  --
+  -- Each closure in `middlewares` is a partially applied call of the form
+  -- `fn next -> Middleware.call(mw, job_info, next)`.  The chain terminates
+  -- with `perform_fn`.
+  --
+  -- Build this at worker startup by folding over the registered middleware
+  -- list so the innermost call is `perform_fn` and the outermost is the
+  -- first middleware.
+  fn build(middlewares, perform_fn) do
+    pbuild_loop(List.reverse(middlewares), perform_fn)
+  end
+
+  pfn pbuild_loop(rest, inner) do
+    match rest do
+      Nil           -> inner
+      Cons(mw, tail) ->
+        let wrapped = fn () -> mw(inner)
+        pbuild_loop(tail, wrapped)
+    end
+  end
+
+end

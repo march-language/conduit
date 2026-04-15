@@ -27,7 +27,7 @@ mod Conduit.Backoff do
     Fibonacci   — fib(attempt) * 1 000 ms (1 s, 1 s, 2 s, 3 s, 5 s, …), capped at 24 h
     Custom(f)   — f(attempt); the returned value is used as-is (ms)
   """
-  fn delay(strat : Conduit.Backoff, attempt : Int) : Int do
+  fn delay(strat, attempt : Int) : Int do
     match strat do
       Linear ->
         5000 * attempt
