@@ -27,7 +27,7 @@ mod Conduit.WorkflowRegistry do
     workflow_type : String,
     input_json    : String,
     ctx           : Conduit.WorkflowContext
-  ) : Result(String, Conduit.WorkflowError) do
+  ) do
     match Vault.get(registry_key(), "fn:" ++ workflow_type) do
       None    -> Err(Conduit.WorkflowError.Failed("No workflow registered for type: " ++ workflow_type))
       Some(runner) ->

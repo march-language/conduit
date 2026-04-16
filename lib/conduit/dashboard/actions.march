@@ -40,7 +40,7 @@ mod Conduit.Dashboard.Actions do
               queue             = dl.queue,
               max_attempts      = 3,
               timeout           = 30000,
-              backoff           = Conduit.Backoff.Exponential,
+              backoff           = Conduit.Backoff.exponential,
               dead_letter_queue = None,
               unique_for        = None,
               on_conflict       = Conduit.UniqueConflict.Ignore,

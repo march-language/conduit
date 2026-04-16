@@ -20,7 +20,7 @@ mod Conduit.API do
     let storage = { repo: MyApp.Repo }
     Conduit.start(Conduit.Config.default(), storage)
   """
-  fn start(config : Conduit.Config, storage : s) : List(Task) do
+  fn start(config : Conduit.Config, storage : s) : List(Task(())) do
     -- Register the built-in workflow runner performer (closes over storage).
     Conduit.Queue.register_performer(
       Conduit.WorkflowRunner.job_type(),
@@ -119,7 +119,7 @@ mod Conduit.API do
       SendWelcomeEmail.config(SendWelcomeEmail)
     )
   """
-  fn register(job_type : String, performer : String -> Result((), ConduitError), config : JobConfig) : () do
+  fn register(job_type : String, performer : String -> Result((), Conduit.ConduitError), config : JobConfig) : () do
     Conduit.Queue.register_performer(job_type, performer, config)
   end
 
@@ -127,7 +127,7 @@ mod Conduit.API do
   Register a job performer using default config. Convenience wrapper for jobs
   that don't override fn config.
   """
-  fn register_default(job_type : String, performer : String -> Result((), ConduitError)) : () do
+  fn register_default(job_type : String, performer : String -> Result((), Conduit.ConduitError)) : () do
     Conduit.Queue.register_performer(job_type, performer, Conduit.JobConfig.default())
   end
 
@@ -153,7 +153,7 @@ mod Conduit.API do
       fn _payload -> HourlyCleanupJob.perform(HourlyCleanupJob) end
     )
   """
-  fn register_cron(cron_type : String, config : CronConfig, performer : String -> Result((), ConduitError)) : () do
+  fn register_cron(cron_type : String, config : CronConfig, performer : String -> Result((), Conduit.ConduitError)) : () do
     Conduit.CronRegistry.register(cron_type, config, performer)
   end
 
@@ -231,7 +231,7 @@ mod Conduit.API do
   `storage`       — storage backend
   """
   fn start_workflow(workflow_type : String, input_json : String, storage : s) : Result(WorkflowHandle, String) do
-    let id      = uuid_v4()
+    let id      = uuid_v7(())
     let now     = DateTime.from_timestamp(DateTime.now())
     let config  = match Conduit.WorkflowRegistry.lookup_config(workflow_type) do
       None    -> Conduit.WorkflowConfig.default()
@@ -379,11 +379,11 @@ mod Conduit.API do
               Err(e) -> Err("replay: event warm failed: " ++ e)
               Ok(_) ->
                 match Conduit.WorkflowRegistry.run(row.workflow_type, row.input, ctx) do
-                  Ok(output)         -> Ok(output)
-                  Err(Failed(msg))   -> Err("replay failed: " ++ msg)
-                  Err(Cancelled(msg))-> Err("replay cancelled: " ++ msg)
-                  Err(TimedOut)      -> Err("replay timed out")
-                  Err(StorageError(msg)) -> Err("replay storage error: " ++ msg)
+                  Ok(output)                          -> Ok(output)
+                  Err(WorkflowError.Failed(msg))      -> Err("replay failed: " ++ msg)
+                  Err(WorkflowError.Cancelled(msg))   -> Err("replay cancelled: " ++ msg)
+                  Err(WorkflowError.TimedOut)         -> Err("replay timed out")
+                  Err(WorkflowError.StorageError(msg))-> Err("replay storage error: " ++ msg)
                 end
             end
         end
@@ -412,11 +412,11 @@ mod Conduit.API do
               Err(e) -> Err("replay_to: event warm failed: " ++ e)
               Ok(_) ->
                 match Conduit.WorkflowRegistry.run(row.workflow_type, row.input, ctx) do
-                  Ok(output)         -> Ok(output)
-                  Err(Failed(msg))   -> Err("replay_to failed: " ++ msg)
-                  Err(Cancelled(msg))-> Err("replay_to cancelled: " ++ msg)
-                  Err(TimedOut)      -> Err("replay_to timed out")
-                  Err(StorageError(msg)) -> Err("replay_to storage error: " ++ msg)
+                  Ok(output)                           -> Ok(output)
+                  Err(WorkflowError.Failed(msg))       -> Err("replay_to failed: " ++ msg)
+                  Err(WorkflowError.Cancelled(msg))    -> Err("replay_to cancelled: " ++ msg)
+                  Err(WorkflowError.TimedOut)          -> Err("replay_to timed out")
+                  Err(WorkflowError.StorageError(msg)) -> Err("replay_to storage error: " ++ msg)
                 end
             end
         end

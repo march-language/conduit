@@ -56,11 +56,15 @@ mod Conduit do
   --   Custom(f)      — delay = f(attempt) ms, fully user-controlled.
   --                    `f` receives the 1-based attempt number and must return
   --                    a non-negative integer of milliseconds.
+  -- Internal constructor names are unique (prefixed with Conduit) so they do
+  -- not clash with the stdlib Backoff / QuantileMethod types that were added in
+  -- newer march releases.  The public API is exposed via let constants and a
+  -- fn Custom helper in lib/conduit/backoff.march.
   type Backoff =
-    Linear
-    | Exponential
-    | Fibonacci
-    | Custom(Int -> Int)
+    ConduitLinear
+    | ConduitExponential
+    | ConduitFibonacci
+    | ConduitCustom(Int -> Int)
 
   -- ── Unique job constraints ─────────────────────────────────────────────────
   --
@@ -729,4 +733,6 @@ mod Conduit do
   fn cluster_leader() : Option(String) do
     Conduit.API.cluster_leader()
   end
+
 end
+

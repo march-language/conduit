@@ -301,27 +301,27 @@ mod ConduitTest do
   -- ─────────────────────────────────────────────────────────────
 
   test "backoff_linear" do
-    let d1 = Conduit.Backoff.delay(Conduit.Linear, 1)
-    let d2 = Conduit.Backoff.delay(Conduit.Linear, 2)
-    let d3 = Conduit.Backoff.delay(Conduit.Linear, 3)
+    let d1 = Conduit.Backoff.delay(Conduit.Backoff.linear_strat, 1)
+    let d2 = Conduit.Backoff.delay(Conduit.Backoff.linear_strat, 2)
+    let d3 = Conduit.Backoff.delay(Conduit.Backoff.linear_strat, 3)
     assert_eq_int(int_div(d1, 1000), 5)
     assert_eq_int(int_div(d2, 1000), 10)
     assert_eq_int(int_div(d3, 1000), 15)
   end
 
   test "backoff_exponential" do
-    let d1 = Conduit.Backoff.delay(Conduit.Exponential, 1)
-    let d2 = Conduit.Backoff.delay(Conduit.Exponential, 2)
-    let d3 = Conduit.Backoff.delay(Conduit.Exponential, 3)
+    let d1 = Conduit.Backoff.delay(Conduit.Backoff.exponential, 1)
+    let d2 = Conduit.Backoff.delay(Conduit.Backoff.exponential, 2)
+    let d3 = Conduit.Backoff.delay(Conduit.Backoff.exponential, 3)
     assert_eq_int(int_div(d1, 1000), 1)
     assert_eq_int(int_div(d2, 1000), 2)
     assert_eq_int(int_div(d3, 1000), 4)
   end
 
   test "backoff_fibonacci" do
-    let d1 = Conduit.Backoff.delay(Conduit.Fibonacci, 1)
-    let d2 = Conduit.Backoff.delay(Conduit.Fibonacci, 2)
-    let d3 = Conduit.Backoff.delay(Conduit.Fibonacci, 5)
+    let d1 = Conduit.Backoff.delay(Conduit.Backoff.fibonacci, 1)
+    let d2 = Conduit.Backoff.delay(Conduit.Backoff.fibonacci, 2)
+    let d3 = Conduit.Backoff.delay(Conduit.Backoff.fibonacci, 5)
     assert_eq_int(int_div(d1, 1000), 1)
     assert_eq_int(int_div(d2, 1000), 1)
     assert_eq_int(int_div(d3, 1000), 5)
@@ -329,7 +329,7 @@ mod ConduitTest do
 
   test "backoff_custom" do
     let f : Int -> Int = fn n -> n * 100000
-    let strat : Conduit.Backoff = Conduit.Backoff.Custom(f)
+    let strat : Conduit.Backoff = Conduit.Backoff.custom(f)
     let d = Conduit.Backoff.delay(strat, 3)
     assert_eq_int(int_div(d, 1000), 300)
   end
@@ -573,23 +573,23 @@ mod ConduitTest do
   -- ─────────────────────────────────────────────────────────────
 
   test "backoff_delay_increases_with_attempt" do
-    let d1 = int_div(Conduit.Backoff.delay(Conduit.Exponential, 1), 1000)
-    let d2 = int_div(Conduit.Backoff.delay(Conduit.Exponential, 2), 1000)
-    let d3 = int_div(Conduit.Backoff.delay(Conduit.Exponential, 3), 1000)
+    let d1 = int_div(Conduit.Backoff.delay(Conduit.Backoff.exponential, 1), 1000)
+    let d2 = int_div(Conduit.Backoff.delay(Conduit.Backoff.exponential, 2), 1000)
+    let d3 = int_div(Conduit.Backoff.delay(Conduit.Backoff.exponential, 3), 1000)
     assert_true(d1 < d2)
     assert_true(d2 < d3)
   end
 
   test "backoff_linear_delay_increases_linearly" do
-    let d1 = int_div(Conduit.Backoff.delay(Conduit.Linear, 1), 1000)
-    let d2 = int_div(Conduit.Backoff.delay(Conduit.Linear, 2), 1000)
-    let d3 = int_div(Conduit.Backoff.delay(Conduit.Linear, 3), 1000)
+    let d1 = int_div(Conduit.Backoff.delay(Conduit.Backoff.linear_strat, 1), 1000)
+    let d2 = int_div(Conduit.Backoff.delay(Conduit.Backoff.linear_strat, 2), 1000)
+    let d3 = int_div(Conduit.Backoff.delay(Conduit.Backoff.linear_strat, 3), 1000)
     assert_eq_int(d2 - d1, d3 - d2)  -- constant step
   end
 
   test "custom_backoff_uses_provided_function" do
     let f2 : Int -> Int = fn attempt -> attempt * 7000
-    let strat  : Conduit.Backoff = Conduit.Backoff.Custom(f2)
+    let strat  : Conduit.Backoff = Conduit.Backoff.custom(f2)
     let delay4 = Conduit.Backoff.delay(strat, 4)
     assert_eq_int(int_div(delay4, 1000), 28)
   end
@@ -2187,24 +2187,24 @@ mod ConduitTest do
   -- Backoff: Fibonacci is now iterative (no stack overflow for large attempts)
   test "backoff_fibonacci_large_attempt_is_capped" do
     -- fib(40) * 1000 would be enormous; after the cap it should equal 24h.
-    let delay = Conduit.Backoff.delay(Conduit.Fibonacci, 40)
+    let delay = Conduit.Backoff.delay(Conduit.Backoff.fibonacci, 40)
     assert_eq_int(delay, 86400000)  -- 24h cap
   end
 
   -- Backoff: Exponential is capped at 24h
   test "backoff_exponential_large_attempt_is_capped" do
-    let delay = Conduit.Backoff.delay(Conduit.Exponential, 30)
+    let delay = Conduit.Backoff.delay(Conduit.Backoff.exponential, 30)
     assert_eq_int(delay, 86400000)  -- 24h cap
   end
 
   -- Backoff: Fibonacci produces correct sequence for small n
   test "backoff_fibonacci_sequence" do
     -- fib(1)=1, fib(2)=1, fib(3)=2, fib(4)=3, fib(5)=5
-    assert_eq_int(Conduit.Backoff.delay(Conduit.Fibonacci, 1), 1000)
-    assert_eq_int(Conduit.Backoff.delay(Conduit.Fibonacci, 2), 1000)
-    assert_eq_int(Conduit.Backoff.delay(Conduit.Fibonacci, 3), 2000)
-    assert_eq_int(Conduit.Backoff.delay(Conduit.Fibonacci, 4), 3000)
-    assert_eq_int(Conduit.Backoff.delay(Conduit.Fibonacci, 5), 5000)
+    assert_eq_int(Conduit.Backoff.delay(Conduit.Backoff.fibonacci, 1), 1000)
+    assert_eq_int(Conduit.Backoff.delay(Conduit.Backoff.fibonacci, 2), 1000)
+    assert_eq_int(Conduit.Backoff.delay(Conduit.Backoff.fibonacci, 3), 2000)
+    assert_eq_int(Conduit.Backoff.delay(Conduit.Backoff.fibonacci, 4), 3000)
+    assert_eq_int(Conduit.Backoff.delay(Conduit.Backoff.fibonacci, 5), 5000)
   end
 
   -- CronRegistry.all() returns registered entries via Vault.keys

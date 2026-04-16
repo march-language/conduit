@@ -45,7 +45,7 @@ mod Conduit.WorkflowContext do
   end
 
   -- Normal checkpoint: cache → DB → execute → persist (Phase 4 path).
-  pfn pnormal_checkpoint(storage : s, ctx : Conduit.WorkflowContext, full_name : String, f) : Result(String, Conduit.WorkflowError) do
+  pfn pnormal_checkpoint(storage : s, ctx : Conduit.WorkflowContext, full_name : String, f) do
     -- 1. In-memory cache hit
     match pvault_get(ctx.checkpoint_key, full_name) do
       Some(v) -> Ok(v)
@@ -73,7 +73,7 @@ mod Conduit.WorkflowContext do
   end
 
   -- Deterministic replay checkpoint: consume from event store or execute + append.
-  pfn preplay_checkpoint(storage : s, ctx : Conduit.WorkflowContext, replay_key, full_name : String, f) : Result(String, Conduit.WorkflowError) do
+  pfn preplay_checkpoint(storage : s, ctx : Conduit.WorkflowContext, replay_key, full_name : String, f) do
     let cursor      = Vault.get(replay_key, "cursor")      |> unwrap_or(0)
     let event_count = Vault.get(replay_key, "event_count") |> unwrap_or(0)
     if cursor < event_count do
@@ -145,29 +145,29 @@ mod Conduit.WorkflowContext do
 
   Returns Ok(payload_json) or Err(WorkflowError.TimedOut).
   """
-  fn wait_for_signal(storage : s, ctx : Conduit.WorkflowContext, signal_type : String, timeout : Option(Duration)) : Result(String, Conduit.WorkflowError) do
+  fn wait_for_signal(storage : s, ctx : Conduit.WorkflowContext, signal_type : String, timeout : Option(Duration)) do
     let deadline = Option.map(timeout, fn dur -> DateTime.now() + int_div(Duration.to_milliseconds(dur), 1000))
     pwait_loop(storage, ctx.workflow_id, signal_type, deadline)
   end
 
-  pfn pwait_loop(storage : s, workflow_id : String, signal_type : String, deadline : Option(Int)) : Result(String, Conduit.WorkflowError) do
+  pfn pwait_loop(storage : s, workflow_id : String, signal_type : String, deadline : Option(Int)) do
     let now_ts = DateTime.now()
     let timed_out = match deadline do
       None    -> false
       Some(d) -> now_ts >= d
     end
     if timed_out do
-      Err(Conduit.WorkflowError.TimedOut)
+      Err(TimedOut)
     else
       match Conduit.Storage.signal_peek(storage, workflow_id, signal_type) do
-        Err(e)        -> Err(Conduit.WorkflowError.StorageError(e))
+        Err(e)        -> Err(StorageError(e))
         Ok(Some(sr)) ->
           match Conduit.Storage.signal_mark_delivered(storage, sr.id) do
-            Err(e) -> Err(Conduit.WorkflowError.StorageError(e))
+            Err(e) -> Err(StorageError(e))
             Ok(_) -> Ok(sr.payload)
           end
         Ok(None) ->
-          psleep_ms(1000)
+          let _ = psleep_ms(1000)
           pwait_loop(storage, workflow_id, signal_type, deadline)
       end
     end

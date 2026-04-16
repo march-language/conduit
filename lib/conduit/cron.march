@@ -43,7 +43,7 @@ mod Conduit.CronRegistry do
   Returns the performer's result, or `Err(ConduitError.Discard(...))` if no
   performer is registered for the given cron type.
   """
-  fn fire(cron_type : String, payload : String) : Result((), Conduit.ConduitError) do
+  fn fire(cron_type : String, payload : String) do
     match Vault.get(registry_key(), cron_type) do
       None    -> Err(Conduit.ConduitError.Discard("No cron registered for type: " ++ cron_type))
       Some(e) -> e.performer(payload)
@@ -72,9 +72,9 @@ mod Conduit.CronRegistry do
   doc "Serialise a CronOverlap variant to its DB string representation."
   fn overlap_to_string(o) : String do
     match o do
-      Skip    -> "skip"
-      Allow   -> "allow"
-      Replace -> "replace"
+      Skip              -> "skip"
+      Allow             -> "allow"
+      CronOverlap.Replace -> "replace"
     end
   end
 

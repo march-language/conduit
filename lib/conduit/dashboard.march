@@ -29,12 +29,12 @@ mod Conduit.Dashboard do
   `storage` — any `Conduit.Storage` impl
   `auth`    — `Auth.None | Auth.Token(t) | Auth.Fn(f)`
   """
-  fn start_standalone(port : Int, storage, auth : Conduit.Dashboard.Auth) : Task do
+  fn start_standalone(port : Int, storage, auth) : Task(()) do
     let base_path = "/conduit"
-    task_spawn(fn () -> prun_server(port, storage, auth, base_path))
+    task_spawn(fn _ -> prun_server(port, storage, auth, base_path))
   end
 
-  pfn prun_server(port : Int, storage, auth : Conduit.Dashboard.Auth, base_path : String) : () do
+  pfn prun_server(port : Int, storage, auth, base_path : String) : () do
     HttpServer.new(port)
     |> HttpServer.plug(fn conn -> Conduit.Dashboard.Router.handle(storage, auth, base_path, conn))
     |> HttpServer.listen()

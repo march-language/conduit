@@ -25,14 +25,15 @@ mod Conduit.Dashboard.Pages.DeadLetters do
   end
 
   pfn prender_dl_row(base_path : String, dl : Conduit.DeadLetter) : List(String) do
-    let last_error_str = match List.last(dl.errors) do
-      Some(e) ->
-        if string_length(e) > 80 do
-          Html.escape(string_slice(e, 0, 80)) ++ "..."
-        else
-          Html.escape(e)
-        end
-      None    -> "—"
+    let last_error_str = if List.is_empty(dl.errors) do
+      "—"
+    else
+      let e = List.last(dl.errors)
+      if string_length(e) > 80 do
+        Html.escape(string_slice(e, 0, 80)) ++ "..."
+      else
+        Html.escape(e)
+      end
     end
     let discarded_str = Html.escape(DateTime.format(dl.discarded_at, "%Y-%m-%d %H:%M:%S"))
 
