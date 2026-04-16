@@ -3,7 +3,7 @@ mod Conduit.Dashboard.Pages.Queues do
   fn render_list(base_path : String, summary : List(Conduit.Dashboard.QueueSummary)) : String do
     let headers = Cons("Queue", Cons("Pending", Cons("Running", Cons("Failed", Cons("Dead", Nil)))))
     let rows = List.map(summary, fn s -> prender_queue_row(base_path, s))
-    let content = "<h1>Queues</h1><div class=\"section\">" ++ Conduit.Dashboard.Html.table(headers, rows) ++ "</div>"
+    let content = "<h1>Queues</h1><div class=\"section\">" ++ Conduit.Dashboard.Html.table_with_empty(headers, rows, "No queues yet — enqueue a job to see one here.") ++ "</div>"
     Conduit.Dashboard.Html.page_with_nav("Queues", base_path, "queues", content)
   end
 
@@ -21,12 +21,43 @@ mod Conduit.Dashboard.Pages.Queues do
 
     let rows = List.map(jobs, fn job -> prender_job_row(base_path, job))
 
-    let base_pagination_url = base_path ++ "/queues/" ++ Html.escape(queue) ++ "?status=" ++ status_filter
+    -- status_filter is attacker-controlled (raw query param).  Constrain it
+    -- to the known status set before concatenating into the pagination URL —
+    -- anything else collapses to "" so we cannot smuggle script-breakout
+    -- characters through the href even before Html.escape runs.
+    let safe_status = pwhitelist_status(status_filter)
+    let base_pagination_url = base_path ++ "/queues/" ++ Html.escape(queue) ++ "?status=" ++ safe_status
     let total_pages = if List.length(jobs) < 50 do page else page + 1 end
     let pagination_html = Conduit.Dashboard.Html.pagination(base_pagination_url, page, total_pages)
 
-    let content = "<h1>Queue: " ++ Html.escape(queue) ++ "</h1><div class=\"section\"><div class=\"tab-bar\">" ++ tab_html ++ "</div>" ++ Conduit.Dashboard.Html.table(headers, rows) ++ pagination_html ++ "</div>"
+    let status_word = pwhitelist_status_label(status_filter)
+    let empty_msg = if String.is_empty(status_word) do
+      "No jobs in queue \"" ++ queue ++ "\"."
+    else
+      "No " ++ status_word ++ " jobs in queue \"" ++ queue ++ "\"."
+    end
+    let content = "<h1>Queue: " ++ Html.escape(queue) ++ "</h1><div class=\"section\"><div class=\"tab-bar\">" ++ tab_html ++ "</div>" ++ Conduit.Dashboard.Html.table_with_empty(headers, rows, empty_msg) ++ pagination_html ++ "</div>"
     Conduit.Dashboard.Html.page_with_nav("Queue: " ++ queue, base_path, "queues", content)
+  end
+
+  pfn pwhitelist_status(s : String) : String do
+    match s do
+      "pending" -> "pending"
+      "running" -> "running"
+      "failed"  -> "failed"
+      "dead"    -> "dead"
+      _         -> ""
+    end
+  end
+
+  pfn pwhitelist_status_label(s : String) : String do
+    match s do
+      "pending" -> "pending"
+      "running" -> "running"
+      "failed"  -> "failed"
+      "dead"    -> "dead"
+      _         -> ""
+    end
   end
 
   pfn prender_status_tab(base_path : String, queue : String, status_filter : String, s : String) : String do
@@ -41,8 +72,8 @@ mod Conduit.Dashboard.Pages.Queues do
     let cancel_btn = Conduit.Dashboard.Html.action_btn(base_path ++ "/jobs/" ++ job.id ++ "/cancel", "Cancel", "Cancel this job?")
     let delete_btn = Conduit.Dashboard.Html.action_btn(base_path ++ "/jobs/" ++ job.id ++ "/delete", "Delete", "Delete this job?")
     let actions = retry_btn ++ " " ++ cancel_btn ++ " " ++ delete_btn
-    let enqueued = DateTime.format(job.inserted_at, "%Y-%m-%d %H:%M:%S")
-    let run_at = DateTime.format(job.run_at, "%Y-%m-%d %H:%M:%S")
+    let enqueued = Conduit.Dashboard.Html.relative_time(job.inserted_at)
+    let run_at = Conduit.Dashboard.Html.relative_time(job.run_at)
     Cons(
       job_link,
       Cons(
@@ -52,9 +83,9 @@ mod Conduit.Dashboard.Pages.Queues do
           Cons(
             int_to_string(job.attempt) ++ "/" ++ int_to_string(job.max_attempts),
             Cons(
-              Html.escape(enqueued),
+              enqueued,
               Cons(
-                Html.escape(run_at),
+                run_at,
                 Cons(actions, Nil)
               )
             )

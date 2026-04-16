@@ -106,7 +106,7 @@ mod Conduit.Worker do
           Conduit.Telemetry.JobStarted(job.id, job.job_type, worker_id, next_attempt))
 
         -- Capture wall-clock start so handle_result can compute duration_ms.
-        let started_at_ms = DateTime.now()
+        let started_at_s = DateTime.now()
 
         -- Rate limit check: if configured, try to acquire a token.
         let rate_ok = match config.rate_limit do
@@ -121,7 +121,7 @@ mod Conduit.Worker do
             Logger.warn("conduit: rate limit check failed for " ++ job.id ++ ": " ++ e)
             let result = Conduit.Queue.dispatch(job.job_type, job.payload)
             Vault.set(hb_flags, job.id, true)
-            handle_result(storage, job, next_attempt, config, result, started_at_ms)
+            handle_result(storage, job, next_attempt, config, result, started_at_s)
           Ok(b) ->
             if b do
               -- Rate check passed: dispatch the job.
@@ -130,7 +130,7 @@ mod Conduit.Worker do
               Logger.debug("conduit: execute: dispatch complete")
               -- Signal the heartbeat to stop on its next tick.
               Vault.set(hb_flags, job.id, true)
-              handle_result(storage, job, next_attempt, config, result, started_at_ms)
+              handle_result(storage, job, next_attempt, config, result, started_at_s)
             else
               -- Rate-limited: snooze the job.
               let snooze_dur = match config.rate_limit do
@@ -138,7 +138,7 @@ mod Conduit.Worker do
                 Some(rl) -> Conduit.RateLimiter.snooze_duration(rl.max_per_second)
               end
               Vault.set(hb_flags, job.id, true)
-              handle_result(storage, job, next_attempt, config, Err(Conduit.ConduitError.Snooze(snooze_dur)), started_at_ms)
+              handle_result(storage, job, next_attempt, config, Err(Conduit.ConduitError.Snooze(snooze_dur)), started_at_s)
             end
         end
     end
@@ -154,15 +154,16 @@ mod Conduit.Worker do
     Err(ConduitError.Discard(msg))→ phandle_discard (emit JobDiscarded; DLQ if configured)
     Err(ConduitError.Snooze(ms))  → mark_snoozed + emit JobSnoozed
 
-  `started_at_ms` is the epoch-ms captured just before the performer was
-  dispatched; it is used to compute `duration_ms` for the JobCompleted event.
+  `started_at_s` is the Unix timestamp in seconds (DateTime.now() resolution)
+  captured just before the performer was dispatched.  It is multiplied out to
+  milliseconds when computing `duration_ms` for the JobCompleted event.
   """
-  pfn handle_result(storage : s, job : Conduit.JobRow, attempt : Int, config : Conduit.JobConfig, result, started_at_ms : Int) : () do
+  pfn handle_result(storage : s, job : Conduit.JobRow, attempt : Int, config : Conduit.JobConfig, result, started_at_s : Int) : () do
     match result do
       Ok(_) ->
         match Conduit.Storage.mark_completed(storage, job.id) do
           Ok(_)  ->
-            let duration_ms = (DateTime.now() - started_at_ms) * 1000
+            let duration_ms = (DateTime.now() - started_at_s) * 1000
             Conduit.Telemetry.dispatch(
               Conduit.Telemetry.JobCompleted(job.id, duration_ms))
             -- Release unique key on successful completion.

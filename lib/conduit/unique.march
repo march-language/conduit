@@ -19,8 +19,18 @@ mod Conduit.Unique do
     let extracted = if is_nil(fields) do
       payload
     else
-      let pairs = List.map(fields, fn field -> field ++ "=" ++ pextract_json_field(payload, field))
-      String.join(pairs, ",")
+      -- If the payload cannot be parsed as JSON, the requested fields cannot
+      -- be extracted reliably.  Falling back to "" for every field would make
+      -- two malformed payloads collide on the same fingerprint, silently
+      -- de-duplicating jobs that should not be de-duplicated.  Mix the SHA of
+      -- the raw payload into the fingerprint instead so distinct malformed
+      -- payloads still produce distinct fingerprints.
+      match Json.parse(payload) do
+        Err(_) -> "raw:" ++ Crypto.sha256(payload)
+        Ok(json) ->
+          let pairs = List.map(fields, fn field -> field ++ "=" ++ pextract_field_from_json(json, field))
+          String.join(pairs, ",")
+      end
     end
     let input = prefix ++ ":" ++ extracted
     Crypto.sha256(input)
@@ -42,14 +52,14 @@ mod Conduit.Unique do
     Conduit.Storage.unique_release(storage, job_id)
   end
 
-  pfn pextract_json_field(payload : String, field : String) : String do
-    match Json.parse(payload) do
-      Err(_) -> ""
-      Ok(json) ->
-        match Json.get(json, field) do
-          None    -> ""
-          Some(v) -> Json.to_string(v)
-        end
+  -- Extract a field value from already-parsed JSON.  A missing field encodes
+  -- as the literal "<absent>" sentinel so that the absence is preserved in
+  -- the fingerprint and cannot collide with a present field whose value is
+  -- the empty string.
+  pfn pextract_field_from_json(json, field : String) : String do
+    match Json.get(json, field) do
+      None    -> "<absent>"
+      Some(v) -> Json.to_string(v)
     end
   end
 end
