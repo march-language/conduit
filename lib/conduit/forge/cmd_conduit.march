@@ -19,11 +19,6 @@ pfn source_dir() do
   Path.join(Path.join(Path.join("deps", "conduit"), "priv"), "migrations")
 end
 
--- Default destination in the user's app.
-pfn default_dest_dir() do
-  Path.join("priv", "migrations")
-end
-
 -- ---- Main entry point ----
 
 doc "forge conduit.gen.migrations — copy Conduit migrations to priv/migrations/."

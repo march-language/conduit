@@ -234,7 +234,6 @@ mod ConduitTest do
   pfn assert_eq_str(a : String, b : String) : () do Test.assert_eq_str(a, b, "") end
   pfn assert_eq_bool(a : Bool, b : Bool) : () do Test.assert_eq_bool(a, b, "") end
   pfn assert_true(c : Bool) : () do Test.assert_true(c, "") end
-  pfn assert_false(c : Bool) : () do Test.assert_false(c, "") end
   pfn assert_ok(r) : () do let _ = Test.assert_ok(r, "") end
   pfn assert_err(r) : () do let _ = Test.assert_err(r, "") end
   pfn assert_none(o) : () do Test.assert_none(o, "") end
