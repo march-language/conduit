@@ -4,9 +4,21 @@
 -- the 1-based retry count: attempt=1 is the first retry after the initial
 -- failure, attempt=2 is the second, etc.
 --
+-- The internal Conduit.Backoff type uses constructor names prefixed with
+-- "Conduit" (ConduitLinear, ConduitExponential, etc.) so they do not clash
+-- with march stdlib types (Backoff, QuantileMethod) that share the plain names.
+--
+-- Public API:
+--   Conduit.Backoff.exponential   — value alias for ConduitExponential
+--   Conduit.Backoff.fibonacci     — value alias for ConduitFibonacci
+--   Conduit.Backoff.linear_strat() — function returning ConduitLinear
+--                                    (named `linear_strat` because `linear` is
+--                                     a reserved March keyword)
+--   Conduit.Backoff.custom(f)     — wrap a user Int -> Int function
+--
 -- Caps
 -- ─────
--- Exponential and Fibonacci delays are capped at MAX_DELAY_MS (24 hours) to
+-- Exponential and Fibonacci delays are capped at max_delay_ms (24 hours) to
 -- prevent arithmetic overflow and to keep retry windows reasonable.  If a
 -- Custom function returns a value above the cap, it is not clamped — the
 -- caller is responsible for capping custom delays.
@@ -18,47 +30,67 @@ mod Conduit.Backoff do
   -- 24-hour cap applied to Exponential and Fibonacci delays.
   let max_delay_ms = 86400000
 
+  -- ── Public strategy constants ──────────────────────────────────────────────
+  -- Use these in job config: `backoff = Conduit.Backoff.exponential`
+
+  let exponential = ConduitExponential
+  let fibonacci   = ConduitFibonacci
+
+  -- `linear` is a reserved March keyword, so we cannot expose a `let linear`
+  -- or `fn linear` binding.  Use `linear_strat()` instead.
+  fn linear_strat() do ConduitLinear end
+
+  doc """
+  Create a custom backoff strategy from a user-supplied function.
+
+  `f` receives the 1-based attempt number and must return a non-negative
+  integer of milliseconds.  Example:
+
+      let my_backoff = Conduit.Backoff.custom(fn att -> att * 2000)
+  """
+  fn custom(f : Int -> Int) do
+    ConduitCustom(f)
+  end
+
   doc """
   Compute the retry delay in milliseconds for the given strategy and attempt.
 
   Strategies:
-    Linear      — 5 000 * attempt ms (5 s, 10 s, 15 s, …)
-    Exponential — 2^(attempt-1) * 1 000 ms (1 s, 2 s, 4 s, …), capped at 24 h
-    Fibonacci   — fib(attempt) * 1 000 ms (1 s, 1 s, 2 s, 3 s, 5 s, …), capped at 24 h
-    Custom(f)   — f(attempt); the returned value is used as-is (ms)
+    linear      — 5 000 * attempt ms (5 s, 10 s, 15 s, …)
+    exponential — 2^(attempt-1) * 1 000 ms (1 s, 2 s, 4 s, …), capped at 24 h
+    fibonacci   — fib(attempt) * 1 000 ms (1 s, 1 s, 2 s, 3 s, 5 s, …), capped at 24 h
+    custom(f)   — f(attempt); the returned value is used as-is (ms)
   """
   fn delay(strat, attempt : Int) : Int do
     match strat do
-      Linear ->
+      ConduitLinear ->
         5000 * attempt
-      Exponential ->
+      ConduitExponential ->
         pmin_int(int_pow(2, attempt - 1) * 1000, max_delay_ms)
-      Fibonacci ->
+      ConduitFibonacci ->
         pmin_int(pfib(attempt) * 1000, max_delay_ms)
-      Custom(f) ->
+      ConduitCustom(f) ->
         f(attempt)
     end
   end
 
-  -- Iterative Fibonacci to avoid O(2^n) recursive blowup.
-  --
-  -- Returns fib(n):  fib(0) = 0, fib(1) = 1, fib(2) = 1, fib(3) = 2, …
-  -- The recursive definition pfib(n-1) + pfib(n-2) is exponential; this
-  -- iterative version runs in O(n) time.
-  pfn pfib(n : Int) : Int do
-    if n <= 1 do
-      n
-    else
-      pfib_loop(n, 0, 1)
+  doc "Return the serialised name for a Backoff strategy."
+  fn name(strat) : String do
+    match strat do
+      ConduitLinear      -> "linear"
+      ConduitExponential -> "exponential"
+      ConduitFibonacci   -> "fibonacci"
+      ConduitCustom(_)   -> "custom"
     end
   end
 
+  -- Iterative Fibonacci to avoid O(2^n) recursive blowup.
+  pfn pfib(n : Int) : Int do
+    if n <= 1 do n else pfib_loop(n, 0, 1) end
+  end
+
   pfn pfib_loop(n : Int, a : Int, b : Int) : Int do
-    if n <= 1 do
-      b
-    else
-      pfib_loop(n - 1, b, a + b)
-    end
+    if n <= 1 do b else pfib_loop(n - 1, b, a + b) end
   end
 
   pfn pmin_int(a : Int, b : Int) : Int do

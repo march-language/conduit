@@ -1,11 +1,11 @@
 mod Conduit.Config do
-  fn default() : Conduit.Config do
+  fn default() do
     {
       queues                  = Cons("default", Nil),
       workers_per_queue       = 5,
       poll_interval_ms        = 1000,
       cron_tick_interval_ms   = 30000,
-      node_id                 = uuid_v4(),
+      node_id                 = uuid_v7(()),
       heartbeat_interval_ms   = 15000,
       stale_node_threshold_ms = 60000
     }

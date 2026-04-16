@@ -35,7 +35,7 @@ mod Conduit.Node do
   Must be called once at application startup (from `Conduit.API.start`).
   Returns the list of task handles; keep them alive for the lifetime of the node.
   """
-  fn start(storage : s, config : Conduit.Config) : List(Task) do
+  fn start(storage : s, config : Conduit.Config) : List(Task(())) do
     let node = pbuild_node_info(config)
     match Conduit.Storage.node_register(storage, node) do
       Ok(_)  -> ()

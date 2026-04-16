@@ -1,7 +1,7 @@
 mod Conduit.DeadLetter do
   fn from_job(job : Conduit.JobRow, final_error : String) : Conduit.DeadLetter do
     {
-      id                 = uuid_v4(),
+      id                 = uuid_v7(()),
       job_id             = job.id,
       queue              = job.queue,
       job_type           = job.job_type,

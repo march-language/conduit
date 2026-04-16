@@ -1,6 +1,6 @@
 mod Conduit.CronScheduler do
   doc "Start the cron scheduler as a background task."
-  fn start(storage : s, tick_interval_ms : Int) : Task do
+  fn start(storage : s, tick_interval_ms : Int) : Task(()) do
     task_spawn(fn _ -> scheduler_loop(storage, tick_interval_ms))
   end
 
@@ -50,7 +50,7 @@ mod Conduit.CronScheduler do
             end
         end
       Allow   -> true
-      Replace ->
+      CronOverlap.Replace ->
         -- Cancel the previous job (if any) before firing.
         match sched.last_job_id do
           None      -> ()
@@ -78,7 +78,7 @@ mod Conduit.CronScheduler do
           queue             = sched.queue,
           max_attempts      = 3,
           timeout           = 30000,
-          backoff           = Conduit.Backoff.Exponential,
+          backoff           = Conduit.Backoff.exponential,
           dead_letter_queue = None,
           unique_for        = None,
           on_conflict       = Conduit.UniqueConflict.Ignore,
@@ -93,7 +93,7 @@ mod Conduit.CronScheduler do
           queue             = e.config.queue,
           max_attempts      = 3,
           timeout           = 30000,
-          backoff           = Conduit.Backoff.Exponential,
+          backoff           = Conduit.Backoff.exponential,
           dead_letter_queue = None,
           unique_for        = None,
           on_conflict       = Conduit.UniqueConflict.Ignore,
@@ -110,7 +110,7 @@ mod Conduit.CronScheduler do
         Logger.error("conduit_cron: failed to enqueue " ++ sched.job_type ++ ": " ++ e)
       Ok(job_id) ->
         -- Compute next_run_at from now.
-        let next = match Conduit.CronParser.next_run(sched.schedule, DateTime.now()) do
+        let next = match Conduit.CronParser.next_run(sched.schedule, DateTime.from_timestamp(DateTime.now())) do
           Ok(t)  -> Some(t)
           Err(e) ->
             Logger.warn("conduit_cron: cannot compute next_run for " ++ sched.id ++ ": " ++ e)
@@ -132,7 +132,7 @@ mod Conduit.CronScheduler do
   Called during Conduit.start for each registered static cron.
   """
   fn upsert_static(storage : s, cron_type : String, config : Conduit.CronConfig) : Result((), String) do
-    let now  = DateTime.now()
+    let now  = DateTime.from_timestamp(DateTime.now())
     let next = match Conduit.CronParser.next_run(config.schedule, now) do
       Ok(t)  -> Some(t)
       Err(_) -> None

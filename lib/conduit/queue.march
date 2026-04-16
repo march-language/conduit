@@ -28,7 +28,7 @@ mod Conduit.Queue do
   run_at = NOW().
   """
   fn enqueue(storage : s, job_type : String, payload : String, config : Conduit.JobConfig) : Result(String, String) do
-    let id  = uuid_v4()
+    let id  = uuid_v7(())
     let now = DateTime.from_timestamp(DateTime.now())
     let unique_key = punique_key(job_type, config.queue, payload, config)
     match punique_guard(storage, unique_key, config) do
@@ -80,7 +80,7 @@ mod Conduit.Queue do
   same unique job when `unique_for` is set.
   """
   fn enqueue_in(storage : s, job_type : String, payload : String, delay : Int, config : Conduit.JobConfig) : Result(String, String) do
-    let id     = uuid_v4()
+    let id     = uuid_v7(())
     let now    = DateTime.from_timestamp(DateTime.now())
     let run_at = DateTime.add_ms(now, delay)
     let unique_key = punique_key(job_type, config.queue, payload, config)
@@ -135,7 +135,7 @@ mod Conduit.Queue do
   Calling `register_performer` a second time with the same `job_type` silently
   overwrites the previous entry — useful for testing but avoid in production.
   """
-  fn register_performer(job_type : String, performer : String -> Result((), Conduit.ConduitError), config : Conduit.JobConfig) : () do
+  fn register_performer(job_type : String, performer, config : Conduit.JobConfig) : () do
     let tbl = registry_key()
     Vault.set(tbl, "fn:" ++ job_type, performer)
     Vault.set(tbl, "cfg:" ++ job_type, config)
@@ -155,7 +155,7 @@ mod Conduit.Queue do
   `Err(ConduitError.Discard("No performer registered …"))` so the worker
   dead-letters the job instead of retrying forever.
   """
-  fn dispatch(job_type : String, payload : String) : Result((), Conduit.ConduitError) do
+  fn dispatch(job_type : String, payload : String) do
     Logger.debug("queue: dispatch job_type=" ++ job_type)
     match Vault.get(registry_key(), "fn:" ++ job_type) do
       None    ->
@@ -184,13 +184,8 @@ mod Conduit.Queue do
   -- was in use.  Custom functions cannot be serialised; they are stored as
   -- "custom" and will fall back to Exponential if the row is ever retried
   -- on a node that did not register the custom function.
-  pfn pbackoff_name(b : Conduit.Backoff) : String do
-    match b do
-      Linear      -> "linear"
-      Exponential -> "exponential"
-      Fibonacci   -> "fibonacci"
-      Custom(_)   -> "custom"
-    end
+  pfn pbackoff_name(b) : String do
+    Conduit.Backoff.name(b)
   end
 
   -- Compute the unique fingerprint for a job, or None if uniqueness is not configured.
@@ -225,7 +220,7 @@ mod Conduit.Queue do
             match config.on_conflict do
               Ignore  -> Ok(Some("existing"))
               Raise   -> Err("unique constraint violated for key: " ++ uk)
-              Replace -> Ok(None)
+              _       -> Ok(None)  -- Replace (ambiguous constructor name with CronOverlap)
             end
         end
     end

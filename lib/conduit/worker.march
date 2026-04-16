@@ -28,7 +28,7 @@ mod Conduit.Worker do
   Returns all task handles.  In production, wrap these in a supervisor for
   auto-restart on unexpected panics.
   """
-  fn start_workers(storage : s, queue : String, count : Int, poll_interval_ms : Int) : List(Task) do
+  fn start_workers(storage : s, queue : String, count : Int, poll_interval_ms : Int) : List(Task(())) do
     Logger.debug("conduit: start_workers queue=" ++ queue ++ " count=" ++ int_to_string(count))
     let workers = List.range(0, count - 1)
       |> List.map(fn _ ->
@@ -73,7 +73,7 @@ mod Conduit.Worker do
   --   6. Signal the heartbeat to stop, then route the result.
   pfn execute(storage : s, job : Conduit.JobRow) : () do
     Logger.debug("conduit: execute job.id=" ++ job.id ++ " job_type=" ++ job.job_type)
-    let worker_id = uuid_v4()
+    let worker_id : String = uuid_v7(())
     Logger.debug("conduit: execute: calling mark_running job.id=" ++ job.id)
     match Conduit.Storage.mark_running(storage, job.id, worker_id) do
       Err(e) ->
@@ -157,12 +157,12 @@ mod Conduit.Worker do
   `started_at_ms` is the epoch-ms captured just before the performer was
   dispatched; it is used to compute `duration_ms` for the JobCompleted event.
   """
-  pfn handle_result(storage : s, job : Conduit.JobRow, attempt : Int, config : Conduit.JobConfig, result : Result((), Conduit.ConduitError), started_at_ms : Int) : () do
+  pfn handle_result(storage : s, job : Conduit.JobRow, attempt : Int, config : Conduit.JobConfig, result, started_at_ms : Int) : () do
     match result do
       Ok(_) ->
         match Conduit.Storage.mark_completed(storage, job.id) do
           Ok(_)  ->
-            let duration_ms = DateTime.now() - started_at_ms
+            let duration_ms = (DateTime.now() - started_at_ms) * 1000
             Conduit.Telemetry.dispatch(
               Conduit.Telemetry.JobCompleted(job.id, duration_ms))
             -- Release unique key on successful completion.
