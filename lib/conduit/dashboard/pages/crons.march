@@ -2,20 +2,14 @@ mod Conduit.Dashboard.Pages.Crons do
   fn render(base_path : String, crons : List(Conduit.CronSchedule)) : String do
     let headers = Cons("ID", Cons("Job Type", Cons("Schedule", Cons("Timezone", Cons("Status", Cons("Last Run", Cons("Next Run", Cons("Actions", Nil))))))))
     let rows = List.map(crons, fn c -> prender_cron_row(base_path, c))
-    let content = "<h1>Cron Schedules</h1><div class=\"section\">" ++ Conduit.Dashboard.Html.table(headers, rows) ++ "</div>"
+    let content = "<h1>Cron Schedules</h1><div class=\"section\">" ++ Conduit.Dashboard.Html.table_with_empty(headers, rows, "No cron schedules registered.") ++ "</div>"
     Conduit.Dashboard.Html.page_with_nav("Crons", base_path, "crons", content)
   end
 
   pfn prender_cron_row(base_path : String, c : Conduit.CronSchedule) : List(String) do
     let status_str = if c.enabled do "enabled" else "disabled" end
-    let last_run_str = match c.last_run_at do
-      Some(dt) -> DateTime.format(dt, "%Y-%m-%d %H:%M:%S")
-      None     -> "-"
-    end
-    let next_run_str = match c.next_run_at do
-      Some(dt) -> DateTime.format(dt, "%Y-%m-%d %H:%M:%S")
-      None     -> "-"
-    end
+    let last_run_str = Conduit.Dashboard.Html.relative_time_opt(c.last_run_at)
+    let next_run_str = Conduit.Dashboard.Html.relative_time_opt(c.next_run_at)
     let trigger_btn = Conduit.Dashboard.Html.action_btn(base_path ++ "/crons/" ++ c.id ++ "/trigger", "Trigger Now", "")
     let toggle_action = if c.enabled do "pause" else "resume" end
     let toggle_label = if c.enabled do "Pause" else "Resume" end

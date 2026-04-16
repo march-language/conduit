@@ -20,7 +20,9 @@ mod Conduit.Dashboard.Pages.DeadLetters do
     let total_pages = if List.length(dls) < 50 do page else page + 1 end
     let pagination_html = Conduit.Dashboard.Html.pagination(base_path ++ "/dead-letters", page, total_pages)
 
-    let content = "<h1>Dead Letters</h1><div class=\"section\">" ++ bulk_actions_html ++ Conduit.Dashboard.Html.table(headers, rows) ++ pagination_html ++ "</div>"
+    -- Hide bulk-action buttons when there is nothing to act on.
+    let actions_block = if List.is_empty(dls) do "" else bulk_actions_html end
+    let content = "<h1>Dead Letters</h1><div class=\"section\">" ++ actions_block ++ Conduit.Dashboard.Html.table_with_empty(headers, rows, "No dead-lettered jobs.") ++ pagination_html ++ "</div>"
     Conduit.Dashboard.Html.page_with_nav("Dead Letters", base_path, "dead-letters", content)
   end
 
@@ -35,7 +37,7 @@ mod Conduit.Dashboard.Pages.DeadLetters do
         Html.escape(e)
       end
     end
-    let discarded_str = Html.escape(DateTime.format(dl.discarded_at, "%Y-%m-%d %H:%M:%S"))
+    let discarded_str = Conduit.Dashboard.Html.relative_time(dl.discarded_at)
 
     let retry_btn = Conduit.Dashboard.Html.action_btn(
       base_path ++ "/dead-letters/" ++ dl.id ++ "/retry",

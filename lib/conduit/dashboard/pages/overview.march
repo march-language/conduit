@@ -35,7 +35,7 @@ mod Conduit.Dashboard.Pages.Overview do
 
     let poll_script = "<script>setInterval(function(){ fetch(window.location.href).then(function(r){ if(r.ok) window.location.reload() }) }, 5000)</script>"
 
-    let content = "<h1>Overview</h1><div class=\"section\"><h2>Queue Summary</h2>" ++ Conduit.Dashboard.Html.table(summary_headers, summary_rows) ++ "</div>" ++ cluster_html ++ poll_script
+    let content = "<h1>Overview</h1><div class=\"section\"><h2>Queue Summary</h2>" ++ Conduit.Dashboard.Html.table_with_empty(summary_headers, summary_rows, "No queues yet — enqueue a job to see one here.") ++ "</div>" ++ cluster_html ++ poll_script
 
     Conduit.Dashboard.Html.page_with_nav("Overview", base_path, "overview", content)
   end

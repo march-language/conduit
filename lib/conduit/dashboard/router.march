@@ -39,12 +39,114 @@ mod Conduit.Dashboard.Router do
     if Conduit.Dashboard.Auth.check(auth, conn) do
       let method   : Atom         = HttpServer.method(conn)
       let segments : List(String) = HttpServer.path_info(conn)
-      pdispatch(storage, base_path, method, segments, conn)
+      -- Defence-in-depth CSRF check: state-changing requests must originate
+      -- from the same host.  The dashboard's primary auth (Bearer token in
+      -- Authorization header) is not vulnerable to classic CSRF, but operators
+      -- often deploy behind an SSO proxy that injects credentials via cookies,
+      -- which restores the risk.  Reject POST/PUT/DELETE/PATCH whose Origin
+      -- (preferred) or Referer header does not match the request Host.
+      if pis_state_changing(method) do
+        if pcheck_same_origin(conn) do
+          pdispatch(storage, base_path, method, segments, conn)
+        else
+          conn |> HttpServer.text(403, "Forbidden: cross-origin request blocked")
+        end
+      else
+        pdispatch(storage, base_path, method, segments, conn)
+      end
     else
       conn
       |> HttpServer.put_resp_header("www-authenticate", "Bearer realm=\"Conduit Dashboard\"")
       |> HttpServer.text(401, "Unauthorized")
     end
+  end
+
+  -- POST/PUT/DELETE/PATCH are mutations and must pass the same-origin check.
+  -- GET/HEAD/OPTIONS are reads and exempt.
+  pfn pis_state_changing(method : Atom) : Bool do
+    match method do
+      :post   -> true
+      :put    -> true
+      :delete -> true
+      :patch  -> true
+      _       -> false
+    end
+  end
+
+  -- Returns true if the request's Origin (or, as a fallback, Referer) header
+  -- targets the same host as the request itself.  Returns false if neither
+  -- header is present or if the host does not match.
+  --
+  -- This is intentionally strict: requests with no Origin AND no Referer are
+  -- rejected, because that combination is a hallmark of forged form posts.
+  pfn pcheck_same_origin(conn) : Bool do
+    let host    = HttpServer.get_req_header(conn, "host")    |> unwrap_or("")
+    let origin  = HttpServer.get_req_header(conn, "origin")  |> unwrap_or("")
+    let referer = HttpServer.get_req_header(conn, "referer") |> unwrap_or("")
+    if String.is_empty(host) do
+      false
+    else
+      if !String.is_empty(origin) do
+        porigin_host_matches(origin, host)
+      else
+        if !String.is_empty(referer) do
+          porigin_host_matches(referer, host)
+        else
+          false
+        end
+      end
+    end
+  end
+
+  -- Parse the host out of an Origin or Referer URL and compare to the
+  -- expected host.  Conservatively returns false on parse failure.
+  pfn porigin_host_matches(url : String, expected_host : String) : Bool do
+    -- Strip scheme: take the part after "://".
+    let after_scheme = match String.split(url, "://") do
+      Cons(_, Cons(rest, _)) -> rest
+      _                      -> ""
+    end
+    if String.is_empty(after_scheme) do
+      false
+    else
+      -- Take the host portion (up to the first "/", "?", or "#").
+      let host_part = match String.split(after_scheme, "/") do
+        Cons(h, _) -> h
+        Nil        -> after_scheme
+      end
+      host_part == expected_host
+    end
+  end
+
+  -- Inject any `?flash=<kind>&code=<code>` flash banner into the rendered HTML.
+  -- Inserted right after the opening <main> so it appears above the page H1.
+  pfn pinject_flash(html : String, qs : String) : String do
+    let kind = pquery_param(qs, "flash")
+    let code = pquery_param(qs, "code")
+    let banner = Conduit.Dashboard.Html.flash_from_query(kind, code)
+    if String.is_empty(banner) do
+      html
+    else
+      String.replace(html, "<main class=\"main-content\">", "<main class=\"main-content\">" ++ banner)
+    end
+  end
+
+  -- Render a successful redirect after an action, with a flash code preserved
+  -- in the query string so the destination page can show a confirmation banner.
+  pfn predirect_flash(conn, path : String, code : String) do
+    conn |> HttpServer.redirect(path ++ "?flash=success&code=" ++ code)
+  end
+
+  -- Render an error response after an action.  Encodes a generic error flash
+  -- (without leaking server details into URLs) and redirects to `path`.
+  pfn predirect_error(conn, path : String) do
+    conn |> HttpServer.redirect(path ++ "?flash=error&code=action_failed")
+  end
+
+  -- Render a 200 OK with the page HTML, injecting any active flash banner.
+  pfn psend_html_with_flash(conn, html : String) do
+    let qs = HttpServer.query_string(conn)
+    conn |> HttpServer.html(200, pinject_flash(html, qs))
   end
 
   pfn pdispatch(storage : s, base_path : String, method : Atom, segments : List(String), conn : Conn) do
@@ -57,7 +159,7 @@ mod Conduit.Dashboard.Router do
           let nodes   = Conduit.Dashboard.Queries.nodes(storage)
           let leader  = Conduit.cluster_leader()
           let html    = Conduit.Dashboard.Pages.Overview.render(base_path, summary, nodes, leader)
-          conn |> HttpServer.html(200, html)
+          psend_html_with_flash(conn, html)
         else
           conn |> HttpServer.text(405, "Method Not Allowed")
         end
@@ -69,7 +171,7 @@ mod Conduit.Dashboard.Router do
             if method == :get do
               let summary = Conduit.Dashboard.Queries.queue_summary(storage)
               let html    = Conduit.Dashboard.Pages.Queues.render_list(base_path, summary)
-              conn |> HttpServer.html(200, html)
+              psend_html_with_flash(conn, html)
             else
               conn |> HttpServer.text(405, "Method Not Allowed")
             end
@@ -80,7 +182,7 @@ mod Conduit.Dashboard.Router do
               let page    = pparse_page(qs)
               let jobs    = Conduit.Dashboard.Queries.jobs_list(storage, queue, status_filter, page)
               let html    = Conduit.Dashboard.Pages.Queues.render_detail(base_path, queue, status_filter, jobs, page)
-              conn |> HttpServer.html(200, html)
+              psend_html_with_flash(conn, html)
             else
               conn |> HttpServer.text(405, "Method Not Allowed")
             end
@@ -97,7 +199,7 @@ mod Conduit.Dashboard.Router do
                 None      -> conn |> HttpServer.text(404, "Job not found")
                 Some(job) ->
                   let html = Conduit.Dashboard.Pages.Jobs.render(base_path, job)
-                  conn |> HttpServer.html(200, html)
+                  psend_html_with_flash(conn, html)
               end
             else
               conn |> HttpServer.text(405, "Method Not Allowed")
@@ -105,8 +207,10 @@ mod Conduit.Dashboard.Router do
           Cons(job_id, Cons("retry", Nil)) ->
             if method == :post do
               match Conduit.Dashboard.Actions.retry_job(storage, job_id) do
-                Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/jobs/" ++ job_id)
-                Err(e) -> conn |> HttpServer.text(500, "Error: " ++ e)
+                Ok(_)  -> predirect_flash(conn, base_path ++ "/jobs/" ++ job_id, "job_retried")
+                Err(e) ->
+                  let _ = Logger.warn("conduit_dashboard: retry_job " ++ job_id ++ " failed: " ++ e)
+                  predirect_error(conn, base_path ++ "/jobs/" ++ job_id)
               end
             else
               conn |> HttpServer.text(405, "Method Not Allowed")
@@ -114,8 +218,10 @@ mod Conduit.Dashboard.Router do
           Cons(job_id, Cons("cancel", Nil)) ->
             if method == :post do
               match Conduit.Dashboard.Actions.cancel_job(storage, job_id) do
-                Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/jobs/" ++ job_id)
-                Err(e) -> conn |> HttpServer.text(500, "Error: " ++ e)
+                Ok(_)  -> predirect_flash(conn, base_path ++ "/jobs/" ++ job_id, "job_cancelled")
+                Err(e) ->
+                  let _ = Logger.warn("conduit_dashboard: cancel_job " ++ job_id ++ " failed: " ++ e)
+                  predirect_error(conn, base_path ++ "/jobs/" ++ job_id)
               end
             else
               conn |> HttpServer.text(405, "Method Not Allowed")
@@ -125,8 +231,10 @@ mod Conduit.Dashboard.Router do
               match Conduit.Dashboard.Actions.delete_job(storage, job_id) do
                 Ok(_) ->
                   let queue = pextract_queue_from_referer(conn)
-                  conn |> HttpServer.redirect(base_path ++ "/queues/" ++ queue)
-                Err(e) -> conn |> HttpServer.text(500, "Error: " ++ e)
+                  predirect_flash(conn, base_path ++ "/queues/" ++ queue, "job_deleted")
+                Err(e) ->
+                  let _ = Logger.warn("conduit_dashboard: delete_job " ++ job_id ++ " failed: " ++ e)
+                  predirect_error(conn, base_path ++ "/queues/default")
               end
             else
               conn |> HttpServer.text(405, "Method Not Allowed")
@@ -145,7 +253,7 @@ mod Conduit.Dashboard.Router do
               let page    = pparse_page(qs)
               let wfs     = Conduit.Dashboard.Queries.workflows(storage, status_filter, page)
               let html    = Conduit.Dashboard.Pages.Workflows.render_list(base_path, wfs, status_filter, page)
-              conn |> HttpServer.html(200, html)
+              psend_html_with_flash(conn, html)
             else
               conn |> HttpServer.text(405, "Method Not Allowed")
             end
@@ -157,7 +265,7 @@ mod Conduit.Dashboard.Router do
                   let cps     = Conduit.Dashboard.Queries.workflow_checkpoints(storage, wf_id)
                   let signals = Nil    -- Phase 6: signal list query deferred
                   let html    = Conduit.Dashboard.Pages.Workflows.render_detail(base_path, wf, cps, signals)
-                  conn |> HttpServer.html(200, html)
+                  psend_html_with_flash(conn, html)
               end
             else
               conn |> HttpServer.text(405, "Method Not Allowed")
@@ -165,8 +273,10 @@ mod Conduit.Dashboard.Router do
           Cons(wf_id, Cons("cancel", Nil)) ->
             if method == :post do
               match Conduit.Dashboard.Actions.cancel_workflow(storage, wf_id) do
-                Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/workflows/" ++ wf_id)
-                Err(e) -> conn |> HttpServer.text(500, "Error: " ++ e)
+                Ok(_)  -> predirect_flash(conn, base_path ++ "/workflows/" ++ wf_id, "workflow_cancelled")
+                Err(e) ->
+                  let _ = Logger.warn("conduit_dashboard: cancel_workflow " ++ wf_id ++ " failed: " ++ e)
+                  predirect_error(conn, base_path ++ "/workflows/" ++ wf_id)
               end
             else
               conn |> HttpServer.text(405, "Method Not Allowed")
@@ -182,15 +292,17 @@ mod Conduit.Dashboard.Router do
             if method == :get do
               let crons = Conduit.Dashboard.Queries.crons(storage)
               let html  = Conduit.Dashboard.Pages.Crons.render(base_path, crons)
-              conn |> HttpServer.html(200, html)
+              psend_html_with_flash(conn, html)
             else
               conn |> HttpServer.text(405, "Method Not Allowed")
             end
           Cons(cron_id, Cons("trigger", Nil)) ->
             if method == :post do
               match Conduit.Dashboard.Actions.trigger_cron_now(storage, cron_id) do
-                Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/crons")
-                Err(e) -> conn |> HttpServer.text(500, "Error: " ++ e)
+                Ok(_)  -> predirect_flash(conn, base_path ++ "/crons", "cron_triggered")
+                Err(e) ->
+                  let _ = Logger.warn("conduit_dashboard: trigger_cron " ++ cron_id ++ " failed: " ++ e)
+                  predirect_error(conn, base_path ++ "/crons")
               end
             else
               conn |> HttpServer.text(405, "Method Not Allowed")
@@ -198,8 +310,10 @@ mod Conduit.Dashboard.Router do
           Cons(cron_id, Cons("pause", Nil)) ->
             if method == :post do
               match Conduit.Dashboard.Actions.pause_cron(storage, cron_id) do
-                Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/crons")
-                Err(e) -> conn |> HttpServer.text(500, "Error: " ++ e)
+                Ok(_)  -> predirect_flash(conn, base_path ++ "/crons", "cron_paused")
+                Err(e) ->
+                  let _ = Logger.warn("conduit_dashboard: pause_cron " ++ cron_id ++ " failed: " ++ e)
+                  predirect_error(conn, base_path ++ "/crons")
               end
             else
               conn |> HttpServer.text(405, "Method Not Allowed")
@@ -207,8 +321,10 @@ mod Conduit.Dashboard.Router do
           Cons(cron_id, Cons("resume", Nil)) ->
             if method == :post do
               match Conduit.Dashboard.Actions.resume_cron(storage, cron_id) do
-                Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/crons")
-                Err(e) -> conn |> HttpServer.text(500, "Error: " ++ e)
+                Ok(_)  -> predirect_flash(conn, base_path ++ "/crons", "cron_resumed")
+                Err(e) ->
+                  let _ = Logger.warn("conduit_dashboard: resume_cron " ++ cron_id ++ " failed: " ++ e)
+                  predirect_error(conn, base_path ++ "/crons")
               end
             else
               conn |> HttpServer.text(405, "Method Not Allowed")
@@ -216,8 +332,10 @@ mod Conduit.Dashboard.Router do
           Cons(cron_id, Cons("delete", Nil)) ->
             if method == :post do
               match Conduit.Dashboard.Actions.delete_cron(storage, cron_id) do
-                Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/crons")
-                Err(e) -> conn |> HttpServer.text(500, "Error: " ++ e)
+                Ok(_)  -> predirect_flash(conn, base_path ++ "/crons", "cron_deleted")
+                Err(e) ->
+                  let _ = Logger.warn("conduit_dashboard: delete_cron " ++ cron_id ++ " failed: " ++ e)
+                  predirect_error(conn, base_path ++ "/crons")
               end
             else
               conn |> HttpServer.text(405, "Method Not Allowed")
@@ -235,29 +353,31 @@ mod Conduit.Dashboard.Router do
               let page = pparse_page(qs)
               let dls  = Conduit.Dashboard.Queries.dead_letters(storage, page)
               let html = Conduit.Dashboard.Pages.DeadLetters.render(base_path, dls, page)
-              conn |> HttpServer.html(200, html)
+              psend_html_with_flash(conn, html)
             else
               conn |> HttpServer.text(405, "Method Not Allowed")
             end
           Cons("retry-all", Nil) ->
             if method == :post do
               let _ = Conduit.Dashboard.Actions.retry_all_dead_letters(storage)
-              conn |> HttpServer.redirect(base_path ++ "/dead-letters")
+              predirect_flash(conn, base_path ++ "/dead-letters", "dl_all_retried")
             else
               conn |> HttpServer.text(405, "Method Not Allowed")
             end
           Cons("delete-all", Nil) ->
             if method == :post do
               let _ = Conduit.Dashboard.Actions.delete_all_dead_letters(storage)
-              conn |> HttpServer.redirect(base_path ++ "/dead-letters")
+              predirect_flash(conn, base_path ++ "/dead-letters", "dl_all_deleted")
             else
               conn |> HttpServer.text(405, "Method Not Allowed")
             end
           Cons(dl_id, Cons("retry", Nil)) ->
             if method == :post do
               match Conduit.Dashboard.Actions.retry_dead_letter(storage, dl_id) do
-                Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/dead-letters")
-                Err(e) -> conn |> HttpServer.text(500, "Error: " ++ e)
+                Ok(_)  -> predirect_flash(conn, base_path ++ "/dead-letters", "dl_retried")
+                Err(e) ->
+                  let _ = Logger.warn("conduit_dashboard: retry_dead_letter " ++ dl_id ++ " failed: " ++ e)
+                  predirect_error(conn, base_path ++ "/dead-letters")
               end
             else
               conn |> HttpServer.text(405, "Method Not Allowed")
@@ -265,8 +385,10 @@ mod Conduit.Dashboard.Router do
           Cons(dl_id, Cons("delete", Nil)) ->
             if method == :post do
               match Conduit.Dashboard.Actions.delete_dead_letter(storage, dl_id) do
-                Ok(_)  -> conn |> HttpServer.redirect(base_path ++ "/dead-letters")
-                Err(e) -> conn |> HttpServer.text(500, "Error: " ++ e)
+                Ok(_)  -> predirect_flash(conn, base_path ++ "/dead-letters", "dl_deleted")
+                Err(e) ->
+                  let _ = Logger.warn("conduit_dashboard: delete_dead_letter " ++ dl_id ++ " failed: " ++ e)
+                  predirect_error(conn, base_path ++ "/dead-letters")
               end
             else
               conn |> HttpServer.text(405, "Method Not Allowed")
@@ -281,7 +403,7 @@ mod Conduit.Dashboard.Router do
           let nodes  = Conduit.Dashboard.Queries.nodes(storage)
           let leader = Conduit.cluster_leader()
           let html   = Conduit.Dashboard.Pages.Nodes.render(base_path, nodes, leader)
-          conn |> HttpServer.html(200, html)
+          psend_html_with_flash(conn, html)
         else
           conn |> HttpServer.text(405, "Method Not Allowed")
         end
@@ -334,21 +456,46 @@ mod Conduit.Dashboard.Router do
   end
 
   -- Try to extract the originating queue from the Referer header (best-effort).
+  -- The Referer is attacker-controlled, so the candidate queue name must be
+  -- validated before being concatenated into a redirect URL.  Anything
+  -- containing characters outside [A-Za-z0-9_-] is rejected and we fall back
+  -- to "default", preventing path traversal, scheme injection, and quote
+  -- breakouts via a forged Referer header.
   pfn pextract_queue_from_referer(conn) : String do
     let referer = HttpServer.get_req_header(conn, "referer") |> unwrap_or("")
     if String.contains(referer, "/queues/") do
       let parts = String.split(referer, "/queues/")
-      match parts do
+      let candidate = match parts do
         Cons(_, Cons(rest, _)) ->
-          let queue_parts = String.split(rest, "/")
-          match queue_parts do
-            Cons(q, _) -> q
-            Nil        -> "default"
+          -- Strip everything after the queue segment: "/", "?", or "#".
+          let after_slash = match String.split(rest, "/") do
+            Cons(h, _) -> h
+            Nil        -> rest
           end
-        _ -> "default"
+          let after_q = match String.split(after_slash, "?") do
+            Cons(h, _) -> h
+            Nil        -> after_slash
+          end
+          match String.split(after_q, "#") do
+            Cons(h, _) -> h
+            Nil        -> after_q
+          end
+        _ -> ""
       end
+      if pis_safe_queue_name(candidate) do candidate else "default" end
     else
       "default"
+    end
+  end
+
+  -- True if `s` matches /^[A-Za-z0-9_-]+$/ — the queue naming convention used
+  -- elsewhere in the codebase.  Used to validate Referer-derived queue names
+  -- before they are concatenated into a redirect URL.
+  pfn pis_safe_queue_name(s : String) : Bool do
+    if String.is_empty(s) do
+      false
+    else
+      Regex.matches("^[A-Za-z0-9_-]+$", s)
     end
   end
 
