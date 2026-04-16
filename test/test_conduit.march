@@ -482,15 +482,20 @@ mod ConduitTest do
     -- Register a performer that always succeeds
     Conduit.Queue.register_performer(job_type, fn _ -> Ok(()), Conduit.JobConfig.default())
 
+    -- Bind job.id early so Perceus tracks it as a separate local.
+    -- Workaround for march Perceus bug: field projection on a record used both
+    -- inside a match branch and after the match can RC-underflow.
+    let job_id = job.id
+
     -- Simulate worker handle_result with Ok
-    fake_mark_running(key, job.id, "w1")
+    fake_mark_running(key, job_id, "w1")
     let result = Conduit.Queue.dispatch(job.job_type, job.payload)
     match result do
-      Ok(_)  -> fake_mark_completed(key, job.id)
-      Err(_) -> fake_mark_failed(key, job.id, "unexpected error")
+      Ok(_)  -> fake_mark_completed(key, job_id)
+      Err(_) -> fake_mark_failed(key, job_id, "unexpected error")
     end
 
-    assert_true(events_contain(key, "completed:" ++ job.id))
+    assert_true(events_contain(key, "completed:" ++ job_id))
   end
 
   test "worker_marks_failed_on_retry_error" do
@@ -503,14 +508,19 @@ mod ConduitTest do
     let perf = Vault.get(pk_tbl, "p") |> unwrap
     Conduit.Queue.register_performer(job_type, perf, Conduit.JobConfig.default())
 
-    fake_mark_running(key, job.id, "w1")
+    -- Bind job.id early so Perceus tracks it as a separate local.
+    -- Workaround for march Perceus bug: field projection on a record used both
+    -- inside a match branch and after the match can RC-underflow.
+    let job_id = job.id
+
+    fake_mark_running(key, job_id, "w1")
     let result = Conduit.Queue.dispatch(job.job_type, job.payload)
     match result do
-      Ok(_)  -> fake_mark_completed(key, job.id)
-      Err(_) -> fake_mark_failed(key, job.id, "retry")
+      Ok(_)  -> fake_mark_completed(key, job_id)
+      Err(_) -> fake_mark_failed(key, job_id, "retry")
     end
 
-    assert_true(events_contain(key, "failed:" ++ job.id))
+    assert_true(events_contain(key, "failed:" ++ job_id))
   end
 
   test "worker_discard_does_not_schedule_retry" do
@@ -722,17 +732,22 @@ mod ConduitTest do
     let job      = sample_job_row(job_type)  -- attempt=1, max_attempts=3
     let config   = Conduit.JobConfig.default()
 
+    -- Bind job.id early so Perceus tracks it as a separate local.
+    -- Workaround for march Perceus bug: field projection on a record used both
+    -- inside an if branch and after the if can RC-underflow.
+    let job_id = job.id
+
     -- Simulate: attempt 1 failed, 2 remaining → should schedule_retry
     let next_attempt = job.attempt  -- 1 (already the post-run value in our sample)
     if next_attempt < config.max_attempts do
       let run_at = DateTime.add(DateTime.from_timestamp(DateTime.now()), Conduit.Backoff.delay(config.backoff, next_attempt))
-      let _ = fake_schedule_retry(key, job.id, "transient", run_at)
+      let _ = fake_schedule_retry(key, job_id, "transient", run_at)
       ()
     else
       ()
     end
 
-    assert_true(events_contain(key, "retry:" ++ job.id))
+    assert_true(events_contain(key, "retry:" ++ job_id))
   end
 
   test "retry_after_exhausting_attempts_dead_letters" do
@@ -764,8 +779,14 @@ mod ConduitTest do
     }
     let config = Conduit.JobConfig.default()
 
+    -- Bind job fields early so Perceus tracks them as separate locals.
+    -- Workaround for march Perceus bug: field projection on a record used both
+    -- inside an if branch and after the if can RC-underflow.
+    let job_id      = job.id
+    let job_attempt = job.attempt
+
     -- Simulate: attempt == max_attempts → dead-letter
-    if job.attempt >= config.max_attempts do
+    if job_attempt >= config.max_attempts do
       let dl = Conduit.DeadLetter.from_job(job, "exhausted retries")
       let _ = fake_move_to_dead_letter(key, dl)
       ()
@@ -773,7 +794,7 @@ mod ConduitTest do
       ()
     end
 
-    assert_true(events_contain(key, "dead:" ++ job.id))
+    assert_true(events_contain(key, "dead:" ++ job_id))
     assert_eq_int(length(dead_letters_in_store(key)), 1)
   end
 
