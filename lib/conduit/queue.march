@@ -125,6 +125,29 @@ mod Conduit.Queue do
   end
 
   doc """
+  Enqueue multiple jobs in one call.  Returns results in the same order as input.
+
+  Each item is `(job_type, payload, config)`.  Jobs are inserted individually
+  using the existing `enqueue` logic (unique-key guard, telemetry, etc.).  This
+  is NOT a single atomic transaction — a failure on one job does not affect
+  the others.
+
+  Use this for fan-out patterns where you need to enqueue many jobs of
+  potentially different types in a single pass:
+
+    Conduit.Queue.enqueue_all(storage,
+      Cons(("EmailJob", payload1, email_cfg),
+      Cons(("AuditJob", payload2, audit_cfg), Nil)))
+  """
+  fn enqueue_all(storage : s, items : List((String, String, Conduit.JobConfig))) : List(Result(String, String)) do
+    List.map(items, fn item ->
+      match item do
+        (job_type, payload, config) -> enqueue(storage, job_type, payload, config)
+      end
+    )
+  end
+
+  doc """
   Register a performer and its config in the in-process registry.
 
   Must be called at application startup (before workers start) for each job type

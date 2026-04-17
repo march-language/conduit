@@ -1,0 +1,43 @@
+-- Conduit.Shutdown — in-process drain flag for graceful worker shutdown.
+--
+-- When `Conduit.API.stop` is called, it sets the draining flag here before
+-- waiting for in-flight jobs to complete and deregistering the node.  Each
+-- worker task checks `is_draining` at the top of its poll loop and exits
+-- cleanly rather than fetching another job.
+--
+-- The flag is local to the current OS process — each node must be stopped
+-- individually.  It is never reset automatically; restart the process to
+-- resume processing after a drain.
+mod Conduit.Shutdown do
+
+  doc """
+  Signal all workers on this node to stop polling for new jobs.
+
+  Workers finish any in-flight job they have already claimed, then exit their
+  poll loop cleanly.  Call `Conduit.API.stop` instead of this directly — it
+  sets the flag and also waits for the drain timeout and deregisters the node.
+  """
+  fn set_draining() : () do
+    Vault.set(pshutdown_tbl(), "draining", true)
+  end
+
+  doc "Return true if this node is in drain mode."
+  fn is_draining() : Bool do
+    match Vault.get(pshutdown_tbl(), "draining") do
+      Some(true) -> true
+      _          -> false
+    end
+  end
+
+  doc "Clear the drain flag.  Useful in tests to reset state between runs."
+  fn clear_draining() : () do
+    Vault.set(pshutdown_tbl(), "draining", false)
+  end
+
+  pfn pshutdown_tbl() do
+    match Vault.whereis("conduit_shutdown") do
+      Some(tbl) -> tbl
+      None      -> Vault.new("conduit_shutdown")
+    end
+  end
+end

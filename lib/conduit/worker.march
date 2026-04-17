@@ -40,6 +40,12 @@ mod Conduit.Worker do
 
   -- The inner poll loop for a single worker task.
   --
+  -- Before each fetch the loop checks two in-process flags:
+  --   1. Conduit.Shutdown.is_draining() — set by Conduit.API.stop; exits the
+  --      loop cleanly so in-flight tasks can finish within the drain window.
+  --   2. Conduit.QueueControl.is_paused(queue) — set by Conduit.API.pause_queue;
+  --      sleeps one poll interval and loops without fetching.
+  --
   -- On storage error: log and sleep one poll interval before retrying — avoids
   -- hammering a degraded DB with tight loops.
   --
@@ -48,17 +54,26 @@ mod Conduit.Worker do
   -- On job available: call execute/2, then immediately loop (no extra sleep)
   -- so the next job is picked up as fast as possible.
   pfn worker_loop(storage : s, queue : String, poll_interval_ms : Int) : () do
-    match Conduit.Storage.fetch_next(storage, queue) do
-      Err(e) ->
-        Logger.error("conduit: fetch_next error on queue " ++ queue ++ ": " ++ e)
+    if Conduit.Shutdown.is_draining() do
+      ()
+    else
+      if Conduit.QueueControl.is_paused(queue) do
         psleep_ms(poll_interval_ms)
         worker_loop(storage, queue, poll_interval_ms)
-      Ok(None) ->
-        psleep_ms(poll_interval_ms)
-        worker_loop(storage, queue, poll_interval_ms)
-      Ok(Some(job)) ->
-        execute(storage, job)
-        worker_loop(storage, queue, poll_interval_ms)
+      else
+        match Conduit.Storage.fetch_next(storage, queue) do
+          Err(e) ->
+            Logger.error("conduit: fetch_next error on queue " ++ queue ++ ": " ++ e)
+            psleep_ms(poll_interval_ms)
+            worker_loop(storage, queue, poll_interval_ms)
+          Ok(None) ->
+            psleep_ms(poll_interval_ms)
+            worker_loop(storage, queue, poll_interval_ms)
+          Ok(Some(job)) ->
+            execute(storage, job)
+            worker_loop(storage, queue, poll_interval_ms)
+        end
+      end
     end
   end
 
@@ -85,6 +100,23 @@ mod Conduit.Worker do
         let config = Conduit.Queue.lookup_config(job.job_type)
           |> Option.unwrap_or(Conduit.JobConfig.default())
         Logger.debug("conduit: execute: got config, timeout=" ++ int_to_string(config.timeout))
+
+        -- Enforce discard_after: if the job is older than the configured limit,
+        -- discard it immediately without spawning a heartbeat or dispatching.
+        -- Age is computed in ms from inserted_at to now.
+        let expired = match config.discard_after do
+          None             -> false
+          Some(max_age_ms) ->
+            let age_ms = (DateTime.now() - DateTime.to_timestamp(job.inserted_at)) * 1000
+            age_ms > max_age_ms
+        end
+
+        if expired do
+          Logger.info("conduit: discarding expired job " ++ job.id ++ " (" ++ job.job_type ++ "): exceeded discard_after")
+          handle_result(storage, job, next_attempt, config,
+            Err(Conduit.ConduitError.Discard("expired: job age exceeds discard_after")),
+            DateTime.now())
+        else
 
         -- Heartbeat interval: one third of the job timeout, minimum 5s.
         let heartbeat_interval_ms = int_div(config.timeout, 3)
@@ -141,6 +173,7 @@ mod Conduit.Worker do
               handle_result(storage, job, next_attempt, config, Err(Conduit.ConduitError.Snooze(snooze_dur)), started_at_s)
             end
         end
+        end  -- if expired else
     end
   end
 

@@ -7,7 +7,8 @@ mod Conduit.Config do
       cron_tick_interval_ms   = 30000,
       node_id                 = uuid_v7(()),
       heartbeat_interval_ms   = 15000,
-      stale_node_threshold_ms = 60000
+      stale_node_threshold_ms = 60000,
+      drain_timeout_ms        = 15000
     }
   end
 end

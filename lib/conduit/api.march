@@ -344,11 +344,51 @@ mod Conduit.API do
   doc """
   Gracefully stop this Conduit node.
 
-  Deregisters the node from `conduit_workers` and releases the leader advisory
-  lock if held. Call this during application shutdown before the process exits.
+  1. Sets the in-process drain flag so all workers stop fetching new jobs.
+  2. Waits up to `config.drain_timeout_ms` for in-flight jobs to finish.
+  3. Deregisters the node from `conduit_workers` and releases the leader
+     advisory lock.
+
+  Call this during application shutdown before the process exits.  The drain
+  timeout is a best-effort window; jobs that are still running after it will
+  be reclaimed by another node's stale-rescue loop.
   """
   fn stop(storage : s, config : Conduit.Config) : () do
+    Conduit.Shutdown.set_draining()
+    pstop_sleep(config.drain_timeout_ms)
     Conduit.Node.stop(storage, config.node_id)
+  end
+
+  doc "Pause all workers polling `queue` on this node."
+  fn pause_queue(queue : String) : () do
+    Conduit.QueueControl.pause(queue)
+  end
+
+  doc "Resume all workers polling `queue` on this node."
+  fn resume_queue(queue : String) : () do
+    Conduit.QueueControl.resume(queue)
+  end
+
+  doc """
+  Enqueue multiple jobs in one call.  Items: list of (job_type, payload, config).
+  Returns a list of results in input order.  Not atomic — a failure in one job
+  does not affect the others.
+  """
+  fn enqueue_all(items : List((String, String, JobConfig)), storage : s) : List(Result(String, String)) do
+    Conduit.Queue.enqueue_all(storage, items)
+  end
+
+  pfn pstop_sleep(ms : Int) : () do
+    pstop_sleep_loop(int_div(ms, 10))
+  end
+
+  pfn pstop_sleep_loop(n : Int) : () do
+    if n <= 0 do
+      ()
+    else
+      task_yield()
+      pstop_sleep_loop(n - 1)
+    end
   end
 
   -- ─────────────────────────────────────────────────────────────

@@ -1,0 +1,47 @@
+-- Conduit.QueueControl — per-node queue pause / resume.
+--
+-- Pausing a queue stops workers on this node from fetching new jobs from it.
+-- In-flight jobs are not interrupted; they run to completion.  The pause is
+-- local to the current OS process — for cluster-wide pause, call
+-- `pause_queue` on each node or add a `paused` column to the queue row in
+-- the storage backend.
+--
+-- State is stored in a Vault table so it is visible to all worker tasks in
+-- the same process without any DB round-trip.
+mod Conduit.QueueControl do
+
+  doc """
+  Pause all workers polling `queue` on this node.
+
+  Workers check this flag at the top of each poll loop.  They will finish
+  any job currently in-flight and then stop fetching until `resume` is called.
+  """
+  fn pause(queue : String) : () do
+    Vault.set(pcontrol_tbl(), "paused:" ++ queue, true)
+  end
+
+  doc """
+  Resume a previously paused queue.
+
+  Workers will start fetching jobs from `queue` on their next poll cycle.
+  """
+  fn resume(queue : String) : () do
+    Vault.set(pcontrol_tbl(), "paused:" ++ queue, false)
+  end
+
+  doc "Return true if `queue` is currently paused on this node."
+  fn is_paused(queue : String) : Bool do
+    match Vault.get(pcontrol_tbl(), "paused:" ++ queue) do
+      Some(true) -> true
+      _          -> false
+    end
+  end
+
+  -- Return (or create) the Vault table used as the queue-control registry.
+  pfn pcontrol_tbl() do
+    match Vault.whereis("conduit_queue_control") do
+      Some(tbl) -> tbl
+      None      -> Vault.new("conduit_queue_control")
+    end
+  end
+end
