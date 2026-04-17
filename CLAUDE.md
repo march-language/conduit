@@ -20,11 +20,13 @@ forge search "ModuleName"       # search for a module
 forge search "type_name"        # search for a type
 ```
 
-Always use `forge search` before grepping or manually reading files when looking for modules, functions, or types in March code.
+**`forge search` is always the preferred way to search `.march` files.** Use it instead of Grep/grep whenever the target is March code — names, types, docstrings, or constructors.
 
 ## Development
 
 This is a March library. Use `forge test` to run the test suite. The compiler is at `/Users/80197052/code/march` but files cannot be compiled directly — write correct March source and use the skill for syntax reference.
+
+**After editing any `.march` file, run `forge check` to typecheck the whole project quickly before proceeding.** For a full validation cycle: `forge check && forge build && forge lint --strict && forge test`.
 
 ## Language
 

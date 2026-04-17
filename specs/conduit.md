@@ -1,7 +1,7 @@
 # Conduit — Job/Workflow Platform for March
 
-> **Status:** Design Spec (pre-implementation)
-> **Last Updated:** 2026-03-31
+> **Status:** Implementation complete (Phases 1–4, 7–8); Phases 5–6 in progress
+> **Last Updated:** 2026-04-17
 
 ---
 
