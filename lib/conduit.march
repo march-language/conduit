@@ -237,6 +237,10 @@ mod Conduit do
   --   stale_node_threshold_ms — a node not seen within this window is considered
   --                             crashed; its in-flight jobs are reclaimed.
   --                             Defaults to 60 000 ms (must be > heartbeat_interval_ms).
+  --   drain_timeout_ms        — how long `Conduit.API.stop` waits for in-flight jobs
+  --                             to finish before deregistering the node.  Workers
+  --                             stop polling new jobs immediately when drain begins.
+  --                             Defaults to 15 000 ms.
   type Config = {
     queues                  : List(String),
     workers_per_queue       : Int,
@@ -244,7 +248,8 @@ mod Conduit do
     cron_tick_interval_ms   : Int,
     node_id                 : String,
     heartbeat_interval_ms   : Int,
-    stale_node_threshold_ms : Int
+    stale_node_threshold_ms : Int,
+    drain_timeout_ms        : Int
   }
 
   -- ── Cron ──────────────────────────────────────────────────────────────────
@@ -261,19 +266,23 @@ mod Conduit do
   --
   --   schedule  — standard 5-field cron expression ("min hr dom mon dow").
   --               Examples: "0 * * * *" (hourly), "*/15 * * * *" (every 15 min).
-  --   timezone  — IANA timezone name for schedule evaluation.  Defaults to "UTC".
-  --               Note: the cron parser currently always evaluates in UTC;
-  --               timezone is stored for future support.
+  --   timezone  — UTC offset string for schedule evaluation.  Defaults to "UTC".
+  --               Supported forms: "UTC", "UTC+N", "UTC-N", "UTC+N:MM", "UTC-N:MM".
+  --               Examples: "UTC+5:30" (India), "UTC-8" (US Pacific standard time).
   --   queue     — queue to enqueue fired jobs into.  Defaults to "default".
   --   overlap   — what to do when the previous firing is still running
   --               (see CronOverlap).  Defaults to Skip.
   --   tags      — labels forwarded to the job row on each firing.
+  --   jitter_ms — optional random delay (0..jitter_ms ms) added to each fired
+  --               job's run_at.  Prevents thundering-herd when many crons fire
+  --               at the same second.  Defaults to None (no jitter).
   type CronConfig = {
-    schedule : String,
-    timezone : String,
-    queue    : String,
-    overlap  : CronOverlap,
-    tags     : List(String)
+    schedule  : String,
+    timezone  : String,
+    queue     : String,
+    overlap   : CronOverlap,
+    tags      : List(String),
+    jitter_ms : Option(Int)
   }
 
   -- `CronSchedule` is the DB row stored in `conduit_cron_schedules`.  Static
@@ -284,7 +293,7 @@ mod Conduit do
   --                 string.  For dynamic crons use a UUID.
   --   job_type    — the performer registered under this name handles execution.
   --   schedule    — raw cron expression string.
-  --   timezone    — IANA timezone (stored; parser currently uses UTC).
+  --   timezone    — UTC offset string (see CronConfig.timezone).
   --   queue       — queue for fired jobs.
   --   payload     — JSON payload forwarded to the performer on each firing.
   --                 Defaults to "{}".
@@ -295,6 +304,7 @@ mod Conduit do
   --                 overlap check).
   --   next_run_at — pre-computed next fire time (set after each firing).
   --   tags        — forwarded to each fired job row.
+  --   jitter_ms   — optional per-firing random delay in ms (see CronConfig.jitter_ms).
   type CronSchedule = {
     id          : String,
     job_type    : String,
@@ -307,7 +317,8 @@ mod Conduit do
     last_run_at : Option(DateTime),
     last_job_id : Option(String),
     next_run_at : Option(DateTime),
-    tags        : List(String)
+    tags        : List(String),
+    jitter_ms   : Option(Int)
   }
 
   -- ── Job row ────────────────────────────────────────────────────────────────
@@ -732,6 +743,21 @@ mod Conduit do
   """
   fn cluster_leader() : Option(String) do
     Conduit.API.cluster_leader()
+  end
+
+  doc "Pause all workers polling `queue` on this node.  See `Conduit.API.pause_queue`."
+  fn pause_queue(queue : String) : () do
+    Conduit.API.pause_queue(queue)
+  end
+
+  doc "Resume all workers polling `queue` on this node.  See `Conduit.API.resume_queue`."
+  fn resume_queue(queue : String) : () do
+    Conduit.API.resume_queue(queue)
+  end
+
+  doc "Enqueue multiple jobs in one call.  See `Conduit.API.enqueue_all`."
+  fn enqueue_all(items : List((String, String, JobConfig)), storage : s) : List(Result(String, String)) do
+    Conduit.API.enqueue_all(items, storage)
   end
 
 end

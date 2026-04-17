@@ -2520,4 +2520,170 @@ mod ConduitTest do
       Err(_) -> assert_true(false)
     end
   end
+
+  -- =========================================================================
+  -- Stage 1: Cron timezone
+  -- =========================================================================
+
+  test "cron_scheduler: timezone_offset_s UTC is 0" do
+    let offset = Conduit.CronScheduler.timezone_offset_s("UTC")
+    assert_eq_int(offset, 0)
+  end
+
+  test "cron_scheduler: timezone_offset_s UTC+5:30 is 19800s" do
+    let offset = Conduit.CronScheduler.timezone_offset_s("UTC+5:30")
+    assert_eq_int(offset, 19800)
+  end
+
+  test "cron_scheduler: timezone_offset_s UTC-8 is -28800s" do
+    let offset = Conduit.CronScheduler.timezone_offset_s("UTC-8")
+    assert_eq_int(offset, -28800)
+  end
+
+  test "cron_scheduler: unknown timezone falls back to 0" do
+    let offset = Conduit.CronScheduler.timezone_offset_s("America/New_York")
+    assert_eq_int(offset, 0)
+  end
+
+  -- =========================================================================
+  -- Stage 1: Cron jitter
+  -- =========================================================================
+
+  test "cron_config: default jitter_ms is None" do
+    let cfg = Conduit.CronConfig.default()
+    match cfg.jitter_ms do
+      None    -> assert_true(true)
+      Some(_) -> assert_true(false)
+    end
+  end
+
+  test "cron_config: jitter_ms can be set to Some(5000)" do
+    let base = Conduit.CronConfig.default()
+    let cfg = { base with jitter_ms = Some(5000) }
+    match cfg.jitter_ms do
+      None    -> assert_true(false)
+      Some(j) -> assert_eq_int(j, 5000)
+    end
+  end
+
+  -- =========================================================================
+  -- Stage 1: Queue control — pause / resume
+  -- =========================================================================
+
+  test "queue_control: queue not paused by default" do
+    assert_true(Conduit.QueueControl.is_paused("__s1_default__") == false)
+  end
+
+  test "queue_control: pause sets flag" do
+    let q = "s1_pause_q"
+    Conduit.QueueControl.pause(q)
+    assert_true(Conduit.QueueControl.is_paused(q))
+    Conduit.QueueControl.resume(q)
+  end
+
+  test "queue_control: resume clears flag" do
+    let q = "s1_resume_q"
+    Conduit.QueueControl.pause(q)
+    Conduit.QueueControl.resume(q)
+    assert_true(Conduit.QueueControl.is_paused(q) == false)
+  end
+
+  test "queue_control: pause is per-queue" do
+    let qa = "s1_qa"
+    let qb = "s1_qb"
+    Conduit.QueueControl.pause(qa)
+    assert_true(Conduit.QueueControl.is_paused(qa))
+    assert_true(Conduit.QueueControl.is_paused(qb) == false)
+    Conduit.QueueControl.resume(qa)
+  end
+
+  -- =========================================================================
+  -- Stage 1: Bulk enqueue
+  -- =========================================================================
+
+  test "enqueue_all: empty list returns empty results" do
+    let storage = fake_workflow_storage_new()
+    let results = Conduit.Queue.enqueue_all(storage, Nil)
+    assert_eq_int(List.length(results), 0)
+  end
+
+  test "enqueue_all: two items returns two results" do
+    let storage = fake_workflow_storage_new()
+    let cfg = Conduit.JobConfig.default()
+    let items = Cons(("TypeA", "{}", cfg), Cons(("TypeB", "{}", cfg), Nil))
+    let results = Conduit.Queue.enqueue_all(storage, items)
+    assert_eq_int(List.length(results), 2)
+  end
+
+  test "enqueue_all: all results are Ok" do
+    let storage = fake_workflow_storage_new()
+    let cfg = Conduit.JobConfig.default()
+    let items = Cons(("TypeA", "{}", cfg), Cons(("TypeB", "{}", cfg), Nil))
+    let results = Conduit.Queue.enqueue_all(storage, items)
+    assert_true(List.all(results, fn r ->
+      match r do
+        Ok(_)  -> true
+        Err(_) -> false
+      end
+    ))
+  end
+
+  -- =========================================================================
+  -- Stage 1: Discard after
+  -- =========================================================================
+
+  test "job_config: default discard_after is None" do
+    let cfg = Conduit.JobConfig.default()
+    match cfg.discard_after do
+      None    -> assert_true(true)
+      Some(_) -> assert_true(false)
+    end
+  end
+
+  test "job_config: discard_after can be set" do
+    let base = Conduit.JobConfig.default()
+    let cfg = { base with discard_after = Some(86400000) }
+    match cfg.discard_after do
+      None    -> assert_true(false)
+      Some(v) -> assert_eq_int(v, 86400000)
+    end
+  end
+
+  -- =========================================================================
+  -- Stage 1: Shutdown drain flag
+  -- =========================================================================
+
+  test "shutdown: not draining by default" do
+    Conduit.Shutdown.clear_draining()
+    assert_true(Conduit.Shutdown.is_draining() == false)
+  end
+
+  test "shutdown: set_draining marks node as draining" do
+    Conduit.Shutdown.clear_draining()
+    Conduit.Shutdown.set_draining()
+    assert_true(Conduit.Shutdown.is_draining())
+    Conduit.Shutdown.clear_draining()
+  end
+
+  test "shutdown: clear_draining resets drain flag" do
+    Conduit.Shutdown.set_draining()
+    Conduit.Shutdown.clear_draining()
+    assert_true(Conduit.Shutdown.is_draining() == false)
+  end
+
+  -- =========================================================================
+  -- Stage 1: Config drain_timeout_ms
+  -- =========================================================================
+
+  test "config: default drain_timeout_ms is 15000" do
+    let cfg = Conduit.Config.default()
+    assert_eq_int(cfg.drain_timeout_ms, 15000)
+  end
+
+  test "config: drain_timeout_ms can be overridden" do
+    let base = Conduit.Config.default()
+    let cfg = { base with drain_timeout_ms = 30000 }
+    assert_eq_int(cfg.drain_timeout_ms, 30000)
+  end
+
 end

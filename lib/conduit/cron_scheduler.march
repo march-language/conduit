@@ -78,13 +78,29 @@ mod Conduit.CronScheduler do
       |> Option.unwrap_or(Conduit.JobConfig.default())
     let config = { base_config with queue = sched.queue, tags = sched.tags }
 
-    match Conduit.Queue.enqueue(storage, sched.job_type, sched.payload, config) do
+    -- Apply jitter: if jitter_ms is set, delay the job by a random amount within
+    -- [0, jitter_ms].  Prevents thundering-herd when many crons fire at the same second.
+    let jitter = match sched.jitter_ms do
+      None    -> 0
+      Some(j) -> if j > 0 do Random.int(0, j) else 0 end
+    end
+
+    let enqueue_result = if jitter > 0 do
+      Conduit.Queue.enqueue_in(storage, sched.job_type, sched.payload, jitter, config)
+    else
+      Conduit.Queue.enqueue(storage, sched.job_type, sched.payload, config)
+    end
+
+    match enqueue_result do
       Err(e) ->
         Logger.error("conduit_cron: failed to enqueue " ++ sched.job_type ++ ": " ++ e)
       Ok(job_id) ->
-        -- Compute next_run_at from now.
-        let next = match Conduit.CronParser.next_run(sched.schedule, DateTime.from_timestamp(DateTime.now())) do
-          Ok(t)  -> Some(t)
+        -- Compute next_run_at in the cron's configured timezone, then convert
+        -- the result back to UTC for storage.
+        let offset_s  = timezone_offset_s(sched.timezone)
+        let now_local = DateTime.from_timestamp(DateTime.now() + offset_s)
+        let next = match Conduit.CronParser.next_run(sched.schedule, now_local) do
+          Ok(t)  -> Some(DateTime.from_timestamp(DateTime.to_timestamp(t) - offset_s))
           Err(e) ->
             Logger.warn("conduit_cron: cannot compute next_run for " ++ sched.id ++ ": " ++ e)
             None
@@ -105,9 +121,12 @@ mod Conduit.CronScheduler do
   Called during Conduit.start for each registered static cron.
   """
   fn upsert_static(storage : s, cron_type : String, config : Conduit.CronConfig) : Result((), String) do
-    let now  = DateTime.from_timestamp(DateTime.now())
-    let next = match Conduit.CronParser.next_run(config.schedule, now) do
-      Ok(t)  -> Some(t)
+    -- Compute the first next_run_at in the cron's configured timezone, then
+    -- convert back to UTC so the scheduler fires at the correct wall-clock time.
+    let offset_s  = timezone_offset_s(config.timezone)
+    let now_local = DateTime.from_timestamp(DateTime.now() + offset_s)
+    let next = match Conduit.CronParser.next_run(config.schedule, now_local) do
+      Ok(t)  -> Some(DateTime.from_timestamp(DateTime.to_timestamp(t) - offset_s))
       Err(_) -> None
     end
     let sched : Conduit.CronSchedule = {
@@ -122,9 +141,65 @@ mod Conduit.CronScheduler do
       last_run_at = None,
       last_job_id = None,
       next_run_at = next,
-      tags        = config.tags
+      tags        = config.tags,
+      jitter_ms   = config.jitter_ms
     }
     Conduit.Storage.cron_upsert(storage, sched)
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Timezone offset helpers
+  -- ─────────────────────────────────────────────────────────────
+
+  -- Parse a UTC-offset timezone string into a signed offset in seconds.
+  --
+  -- Accepted forms:
+  --   "UTC"        →  0
+  --   "UTC+N"      →  N * 3600
+  --   "UTC-N"      → -N * 3600
+  --   "UTC+N:MM"   →  N * 3600 + MM * 60
+  --   "UTC-N:MM"   → -(N * 3600 + MM * 60)
+  --
+  -- Unrecognised strings fall back to 0 (UTC).
+  --
+  -- Exposed as a public function so it can be unit-tested directly.
+  fn timezone_offset_s(tz : String) : Int do
+    if tz == "UTC" do
+      0
+    else
+      if String.starts_with(tz, "UTC+") do
+        let rest = String.slice(tz, 4, String.byte_size(tz) - 4)
+        pparse_tz_hm(rest, 1)
+      else
+        if String.starts_with(tz, "UTC-") do
+          let rest = String.slice(tz, 4, String.byte_size(tz) - 4)
+          pparse_tz_hm(rest, -1)
+        else
+          0
+        end
+      end
+    end
+  end
+
+  -- Parse "H" or "H:MM" into seconds, then multiply by sign (+1 or -1).
+  pfn pparse_tz_hm(s : String, sign : Int) : Int do
+    match String.split_first(s, ":") do
+      None ->
+        match String.to_int(s) do
+          Ok(h)  -> sign * h * 3600
+          Err(_) -> 0
+        end
+      Some((h_str, m_str)) ->
+        let h = match String.to_int(h_str) do
+          Ok(n)  -> n
+          Err(_) -> 0
+        end
+        let m = match String.to_int(m_str) do
+          Ok(n)  -> n
+          Err(_) -> 0
+        end
+        sign * (h * 3600 + m * 60)
+    end
   end
 
   pfn psleep_ms(ms : Int) : () do
