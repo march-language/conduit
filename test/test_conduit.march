@@ -2609,13 +2609,13 @@ mod ConduitTest do
   -- =========================================================================
 
   test "enqueue_all: empty list returns empty results" do
-    let storage = fake_workflow_storage_new()
+    let storage = fake_workflow_storage_new("stage1_" ++ base64_encode(random_bytes(16)))
     let results = Conduit.Queue.enqueue_all(storage, Nil)
     assert_eq_int(List.length(results), 0)
   end
 
   test "enqueue_all: two items returns two results" do
-    let storage = fake_workflow_storage_new()
+    let storage = fake_workflow_storage_new("stage1_" ++ base64_encode(random_bytes(16)))
     let cfg = Conduit.JobConfig.default()
     let items = Cons(("TypeA", "{}", cfg), Cons(("TypeB", "{}", cfg), Nil))
     let results = Conduit.Queue.enqueue_all(storage, items)
@@ -2623,7 +2623,7 @@ mod ConduitTest do
   end
 
   test "enqueue_all: all results are Ok" do
-    let storage = fake_workflow_storage_new()
+    let storage = fake_workflow_storage_new("stage1_" ++ base64_encode(random_bytes(16)))
     let cfg = Conduit.JobConfig.default()
     let items = Cons(("TypeA", "{}", cfg), Cons(("TypeB", "{}", cfg), Nil))
     let results = Conduit.Queue.enqueue_all(storage, items)
