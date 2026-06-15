@@ -195,8 +195,9 @@ Then visit `http://localhost:3000` to see:
 
 - **[CLAUDE.md](./CLAUDE.md)** — Developer guide (language rules, critical runtime notes, architecture)
 - **[specs/conduit.md](./specs/conduit.md)** — Full design spec with phased roadmap and design principles
+- **[specs/roadmap.md](./specs/roadmap.md)** — Competitive roadmap: gaps vs Oban/Temporal/Airflow, positioning, and the sequenced plan
 - **[specs/features.md](./specs/features.md)** — Feature inventory by phase (what's shipped)
-- **[specs/todo.md](./specs/todo.md)** — Implementation checklist (upcoming work)
+- **[specs/todo.md](./specs/todo.md)** — Actionable checklist (keyed to the roadmap)
 
 ## Project Structure
 
