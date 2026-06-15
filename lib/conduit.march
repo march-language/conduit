@@ -628,8 +628,8 @@ mod Conduit do
   -- ── Storage interface ─────────────────────────────────────────────────────
   --
   -- Pluggable storage backend interface.  Implement it for your preferred
-  -- database to make Conduit work with that backend.  See
-  -- `lib/conduit/storage.march` for the full interface documentation.
+  -- database to make Conduit work with that backend.  The Postgres
+  -- implementation lives in `lib/conduit/storage/postgres.march`.
   interface Storage(s) do
 
     -- ── Job lifecycle ──────────────────────────────────────────────────────
