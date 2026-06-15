@@ -83,6 +83,13 @@ mod Conduit.Storage.Postgres do
   pfn ptxt_ts(dt : DateTime) do ParamText(int_to_string(DateTime.to_timestamp(dt))) end
   pfn pbool(b : Bool) do ParamText(if b do "true" else "false" end) end
 
+  pfn popt_int(o : Option(Int)) do
+    match o do
+      None    -> ParamNull
+      Some(n) -> ParamText(int_to_string(n))
+    end
+  end
+
   pfn popt_txt(o : Option(String)) do
     match o do
       None    -> ParamNull
@@ -185,6 +192,21 @@ mod Conduit.Storage.Postgres do
     end
   end
 
+  -- Postgres returns BOOLEAN in text format as 't' / 'f'.
+  pfn pdecode_bool(o : Option(String)) : Bool do
+    match o do
+      Some(s) -> s == "t" || s == "true" || s == "1"
+      None    -> false
+    end
+  end
+
+  pfn popt_int_dec(o : Option(String)) : Option(Int) do
+    match o do
+      None    -> None
+      Some(s) -> string_to_int(s)
+    end
+  end
+
   -- Column list shared by enqueue (INSERT) and fetch_next (RETURNING).
   -- The order MUST match pdecode_job's positional indices.
   pfn pjob_cols() : String do
@@ -218,6 +240,29 @@ mod Conduit.Storage.Postgres do
 
   pfn pids_from_rows(rows) do
     List.filter_map(rows, fn row -> pcell(row, 0))
+  end
+
+  -- Column list / decoder for conduit_cron_schedules (order must match pdecode_cron).
+  pfn pcron_cols() : String do
+    "id, job_type, schedule, timezone, queue, payload, overlap, enabled, last_run_at, last_job_id, next_run_at, tags, jitter_ms"
+  end
+
+  pfn pdecode_cron(cells : List(Option(String))) : Conduit.CronSchedule do
+    {
+      id          = preq_str(pcell(cells, 0)),
+      job_type    = preq_str(pcell(cells, 1)),
+      schedule    = preq_str(pcell(cells, 2)),
+      timezone    = preq_str(pcell(cells, 3)),
+      queue       = preq_str(pcell(cells, 4)),
+      payload     = preq_str(pcell(cells, 5)),
+      overlap     = preq_str(pcell(cells, 6)),
+      enabled     = pdecode_bool(pcell(cells, 7)),
+      last_run_at = popt_ts_dec(pcell(cells, 8)),
+      last_job_id = pcell(cells, 9),
+      next_run_at = popt_ts_dec(pcell(cells, 10)),
+      tags        = pdecode_str_list(preq_str(pcell(cells, 11))),
+      jitter_ms   = popt_int_dec(pcell(cells, 12))
+    }
   end
 
   -- Dead-letter INSERT helpers.
@@ -362,16 +407,98 @@ mod Conduit.Storage.Postgres do
         end)
     end
 
-    -- ── Cron (not yet implemented) ───────────────────────────────
-    fn cron_upsert(_self, _a) do pnot_impl("cron_upsert") end
-    fn cron_load_due(_self) do pnot_impl("cron_load_due") end
-    fn cron_load_by_id(_self, _a) do pnot_impl("cron_load_by_id") end
-    fn cron_mark_fired(_self, _a, _b, _c) do pnot_impl("cron_mark_fired") end
-    fn cron_job_active(_self, _a) do pnot_impl("cron_job_active") end
-    fn cron_cancel_job(_self, _a) do pnot_impl("cron_cancel_job") end
-    fn cron_delete(_self, _a) do pnot_impl("cron_delete") end
-    fn cron_advisory_lock(_self, _a) do pnot_impl("cron_advisory_lock") end
-    fn cron_advisory_unlock(_self, _a) do pnot_impl("cron_advisory_unlock") end
+    -- ── Cron ─────────────────────────────────────────────────────
+
+    fn cron_upsert(self : Store, sched) : Result((), String) do
+      let sql = "INSERT INTO conduit_cron_schedules (" ++ pcron_cols() ++ ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (id) DO UPDATE SET job_type = EXCLUDED.job_type, schedule = EXCLUDED.schedule, timezone = EXCLUDED.timezone, queue = EXCLUDED.queue, payload = EXCLUDED.payload, overlap = EXCLUDED.overlap, enabled = EXCLUDED.enabled, last_run_at = EXCLUDED.last_run_at, last_job_id = EXCLUDED.last_job_id, next_run_at = EXCLUDED.next_run_at, tags = EXCLUDED.tags, jitter_ms = EXCLUDED.jitter_ms"
+      pexec(self, sql, [
+        ParamText(sched.id),
+        ParamText(sched.job_type),
+        ParamText(sched.schedule),
+        ParamText(sched.timezone),
+        ParamText(sched.queue),
+        ParamText(sched.payload),
+        ParamText(sched.overlap),
+        pbool(sched.enabled),
+        popt_ts(sched.last_run_at),
+        popt_txt(sched.last_job_id),
+        popt_ts(sched.next_run_at),
+        ParamText(pencode_str_list(sched.tags)),
+        popt_int(sched.jitter_ms)
+      ])
+    end
+
+    fn cron_load_due(self : Store) : Result(List(Conduit.CronSchedule), String) do
+      pwith_conn(self, fn conn ->
+        match Connection.exec_prepared(conn, "SELECT " ++ pcron_cols() ++ " FROM conduit_cron_schedules WHERE enabled = TRUE AND next_run_at IS NOT NULL AND next_run_at <= $1 ORDER BY next_run_at ASC", [ParamText(int_to_string(DateTime.now()))]) do
+          Err(e)  -> Err("cron_load_due: " ++ e)
+          Ok(res) -> Ok(List.map(res.rows, fn row -> pdecode_cron(row)))
+        end)
+    end
+
+    fn cron_load_by_id(self : Store, id : String) : Result(Option(Conduit.CronSchedule), String) do
+      pwith_conn(self, fn conn ->
+        match Connection.exec_prepared(conn, "SELECT " ++ pcron_cols() ++ " FROM conduit_cron_schedules WHERE id = $1", [ParamText(id)]) do
+          Err(e)  -> Err("cron_load_by_id: " ++ e)
+          Ok(res) ->
+            match res.rows do
+              Nil          -> Ok(None)
+              Cons(row, _) -> Ok(Some(pdecode_cron(row)))
+            end
+        end)
+    end
+
+    fn cron_mark_fired(self : Store, id : String, job_id : String, next) : Result((), String) do
+      pexec(self, "UPDATE conduit_cron_schedules SET last_run_at = $2, last_job_id = $3, next_run_at = $4 WHERE id = $1",
+        [ParamText(id), ParamText(int_to_string(DateTime.now())), ParamText(job_id), popt_ts(next)])
+    end
+
+    -- The String arg is a JOB id (a cron's last_job_id), not the cron id.
+    fn cron_job_active(self : Store, job_id : String) : Result(Bool, String) do
+      pwith_conn(self, fn conn ->
+        match Connection.exec_prepared(conn, "SELECT 1 FROM conduit_jobs WHERE id = $1 AND status IN ('pending','running','snoozed') LIMIT 1", [ParamText(job_id)]) do
+          Err(e)  -> Err("cron_job_active: " ++ e)
+          Ok(res) ->
+            match res.rows do
+              Nil -> Ok(false)
+              _   -> Ok(true)
+            end
+        end)
+    end
+
+    fn cron_cancel_job(self : Store, job_id : String) : Result((), String) do
+      pexec(self, "UPDATE conduit_jobs SET status = 'dead' WHERE id = $1 AND status IN ('pending','running','snoozed')",
+        [ParamText(job_id)])
+    end
+
+    fn cron_delete(self : Store, id : String) : Result((), String) do
+      pexec(self, "DELETE FROM conduit_cron_schedules WHERE id = $1", [ParamText(id)])
+    end
+
+    -- NOTE: Postgres advisory locks are session-scoped. With connection-per-
+    -- operation the lock is released as soon as this connection closes, so this
+    -- does NOT provide cross-node mutual exclusion yet — that needs a pinned/
+    -- pooled connection held across the scheduler tick (roadmap T0.3). Single-
+    -- node scheduling is unaffected (the leader check still serialises locally).
+    fn cron_advisory_lock(self : Store, lock_id : Int) : Result(Bool, String) do
+      pwith_conn(self, fn conn ->
+        match Connection.exec_prepared(conn, "SELECT pg_try_advisory_lock($1)", [ParamText(int_to_string(lock_id))]) do
+          Err(e)  -> Err("cron_advisory_lock: " ++ e)
+          Ok(res) ->
+            match res.rows do
+              Cons(row, _) -> Ok(pdecode_bool(pcell(row, 0)))
+              Nil          -> Ok(false)
+            end
+        end)
+    end
+
+    fn cron_advisory_unlock(self : Store, lock_id : Int) : Result((), String) do
+      pwith_conn(self, fn conn ->
+        match Connection.exec_prepared(conn, "SELECT pg_advisory_unlock($1)", [ParamText(int_to_string(lock_id))]) do
+          Err(e) -> Err("cron_advisory_unlock: " ++ e)
+          Ok(_)  -> Ok(())
+        end)
+    end
 
     -- ── Node coordination (not yet implemented) ──────────────────
     fn node_register(_self, _a) do pnot_impl("node_register") end

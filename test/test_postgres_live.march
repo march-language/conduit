@@ -24,7 +24,7 @@ mod ConduitPostgresLiveTest do
                                database = "conduit_test", password = None }) do
       Err(e)   -> Err(e)
       Ok(conn) ->
-        let _ = Connection.simple_query(conn, "TRUNCATE conduit_jobs, conduit_dead_letters")
+        let _ = Connection.simple_query(conn, "TRUNCATE conduit_jobs, conduit_dead_letters, conduit_cron_schedules")
         let _ = Connection.close(conn)
         Ok(())
     end
@@ -43,6 +43,17 @@ mod ConduitPostgresLiveTest do
       run_at = DateTime.from_timestamp(now + run_offset),
       started_at = None, completed_at = None, heartbeat_at = None,
       worker_id = None, unique_key = None, errors = Nil, tags = Nil
+    }
+  end
+
+  -- Build a CronSchedule whose next_run_at is now + offset seconds.
+  pfn pmk_cron(id : String, next_offset : Int) : Conduit.CronSchedule do
+    {
+      id = id, job_type = "CronJob", schedule = "* * * * *", timezone = "UTC",
+      queue = "default", payload = "{}", overlap = "skip", enabled = true,
+      last_run_at = None, last_job_id = None,
+      next_run_at = Some(DateTime.from_timestamp(DateTime.now() + next_offset)),
+      tags = Nil, jitter_ms = None
     }
   end
 
@@ -191,6 +202,145 @@ mod ConduitPostgresLiveTest do
               Ok(Some(job)) -> Test.assert_eq_str(job.id, "j6", "rescued job is runnable again")
               _             -> Test.assert_true(false, "rescued job should be fetchable")
             end
+        end
+    end
+  end
+
+  -- ── Cron ───────────────────────────────────────────────────────
+
+  test "postgres: cron_upsert then cron_load_by_id round-trips" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.cron_upsert(store, pmk_cron("daily", 0))
+        match Conduit.Storage.cron_load_by_id(store, "daily") do
+          Err(e)        -> Test.assert_true(false, "cron_load_by_id errored: " ++ e)
+          Ok(None)      -> Test.assert_true(false, "expected the cron, got None")
+          Ok(Some(c))   ->
+            Test.assert_eq_str(c.id, "daily", "id round-trips")
+            Test.assert_eq_str(c.schedule, "* * * * *", "schedule round-trips")
+            Test.assert_true(c.enabled, "enabled round-trips")
+        end
+    end
+  end
+
+  test "postgres: cron_upsert is idempotent on id (update, not duplicate)" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.cron_upsert(store, pmk_cron("c1", 0))
+        let base = pmk_cron("c1", 0)
+        let _ = Conduit.Storage.cron_upsert(store, { base with queue = "high" })
+        match Conduit.Storage.cron_load_by_id(store, "c1") do
+          Ok(Some(c)) -> Test.assert_eq_str(c.queue, "high", "upsert updated the queue in place")
+          _           -> Test.assert_true(false, "expected the updated cron")
+        end
+    end
+  end
+
+  test "postgres: cron_load_due returns due, excludes future and disabled" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.cron_upsert(store, pmk_cron("due", -10))
+        let _ = Conduit.Storage.cron_upsert(store, pmk_cron("future", 3600))
+        let dis = pmk_cron("disabled", -10)
+        let _ = Conduit.Storage.cron_upsert(store, { dis with enabled = false })
+        match Conduit.Storage.cron_load_due(store) do
+          Err(e)  -> Test.assert_true(false, "cron_load_due errored: " ++ e)
+          Ok(due) ->
+            Test.assert_eq_int(List.length(due), 1, "exactly one schedule is due")
+            match due do
+              Cons(c, _) -> Test.assert_eq_str(c.id, "due", "the due one is returned")
+              Nil        -> Test.assert_true(false, "expected one due schedule")
+            end
+        end
+    end
+  end
+
+  test "postgres: cron_mark_fired records last_job_id and advances next_run_at" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.cron_upsert(store, pmk_cron("m", -10))
+        let next = DateTime.from_timestamp(DateTime.now() + 60)
+        let _ = Conduit.Storage.cron_mark_fired(store, "m", "job-123", Some(next))
+        match Conduit.Storage.cron_load_by_id(store, "m") do
+          Ok(Some(c)) ->
+            Test.assert_some(c.last_job_id)
+            Test.assert_some(c.last_run_at)
+            -- next_run_at advanced into the future, so it's no longer due
+            match Conduit.Storage.cron_load_due(store) do
+              Ok(Nil) -> Test.assert_true(true, "")
+              Ok(_)   -> Test.assert_true(false, "after mark_fired the schedule should not be due")
+              Err(e)  -> Test.assert_true(false, "cron_load_due errored: " ++ e)
+            end
+          _ -> Test.assert_true(false, "expected the cron after mark_fired")
+        end
+    end
+  end
+
+  test "postgres: cron_job_active reflects job lifecycle" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.enqueue(store, pmk_job("cj", "default", 0, 0))
+        match Conduit.Storage.cron_job_active(store, "cj") do
+          Ok(true) ->
+            let _ = Conduit.Storage.mark_completed(store, "cj")
+            match Conduit.Storage.cron_job_active(store, "cj") do
+              Ok(false) -> Test.assert_true(true, "")
+              _         -> Test.assert_true(false, "completed job should be inactive")
+            end
+          _ -> Test.assert_true(false, "pending job should be active")
+        end
+    end
+  end
+
+  test "postgres: cron_cancel_job kills a pending job" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.enqueue(store, pmk_job("ck", "default", 0, 0))
+        let _ = Conduit.Storage.cron_cancel_job(store, "ck")
+        match Conduit.Storage.cron_job_active(store, "ck") do
+          Ok(false) -> Test.assert_true(true, "")
+          _         -> Test.assert_true(false, "cancelled job should be inactive")
+        end
+    end
+  end
+
+  test "postgres: cron_delete removes the schedule" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.cron_upsert(store, pmk_cron("gone", 0))
+        let _ = Conduit.Storage.cron_delete(store, "gone")
+        match Conduit.Storage.cron_load_by_id(store, "gone") do
+          Ok(None) -> Test.assert_true(true, "")
+          _        -> Test.assert_true(false, "deleted cron should be gone")
+        end
+    end
+  end
+
+  test "postgres: cron_advisory_lock acquires single-node" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        match Conduit.Storage.cron_advisory_lock(pstore(), 7326482) do
+          Ok(true) ->
+            match Conduit.Storage.cron_advisory_unlock(pstore(), 7326482) do
+              Ok(_)  -> Test.assert_true(true, "")
+              Err(e) -> Test.assert_true(false, "unlock errored: " ++ e)
+            end
+          _ -> Test.assert_true(false, "expected to acquire the advisory lock")
         end
     end
   end

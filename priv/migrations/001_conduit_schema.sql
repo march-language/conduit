@@ -131,7 +131,8 @@ CREATE TABLE IF NOT EXISTS conduit_cron_schedules (
   last_run_at BIGINT,
   last_job_id TEXT,
   next_run_at BIGINT,
-  tags        TEXT     NOT NULL DEFAULT '[]'
+  tags        TEXT     NOT NULL DEFAULT '[]',
+  jitter_ms   BIGINT
 );
 
 -- Fast lookup for the scheduler tick: all enabled schedules that are due.

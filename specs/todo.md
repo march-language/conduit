@@ -21,7 +21,7 @@ work that remains to be competitive with Oban + Temporal.
 
 - [x] **T0.1** Fix `Bytes.slice` FBIP-reuse-under-aliasing bug in the March compiler *(done — fix in `llvm_emit.ml` ECase: dup extracted heap fields at branch entry when the scrutinee is both reused and shared; installed)*. Unblocked depot row decoding → `fetch_next` returns rows.
 - [x] `Conduit.Storage.Postgres` — job-lifecycle slice (enqueue, fetch_next w/ `SKIP LOCKED`, mark_running/completed/snoozed, heartbeat, schedule_retry, discard, move_to_dead_letter, rescue_stale). **Verified live end-to-end: 9/9 postgres tests, full suite 204/0.**
-- [ ] **T0.2a** Postgres impl — cron methods (`cron_upsert`, `cron_load_due`, `cron_load_by_id`, `cron_mark_fired`, `cron_job_active`, `cron_cancel_job`, `cron_delete`, `cron_advisory_lock/unlock`).
+- [x] **T0.2a** Postgres impl — cron methods (`cron_upsert` via `ON CONFLICT`, `cron_load_due`, `cron_load_by_id`, `cron_mark_fired`, `cron_job_active`, `cron_cancel_job`, `cron_delete`, `cron_advisory_lock/unlock`). 8 live tests. *(Advisory lock is single-node-correct only until T0.3 pooling — session-scoped lock can't span a tick on a per-op connection; documented in code.)* Added missing `jitter_ms` column to the schema.
 - [ ] **T0.2b** Postgres impl — workflow + checkpoint + signal methods (`workflow_insert/load/list_all/status_get/update_status/cancel`, `checkpoint_get/set/load_all`, `signal_insert/peek/mark_delivered`).
 - [ ] **T0.2c** Postgres impl — node methods (`node_register/heartbeat/deregister/list_active/reclaim_jobs/cleanup_stale/try_leader_lock/release_leader_lock`).
 - [ ] **T0.2d** Postgres impl — dashboard queries (`dashboard_queue_summary/jobs_list/job_by_id/crons_list/workflows_list`).
