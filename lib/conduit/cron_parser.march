@@ -24,7 +24,7 @@ mod Conduit.CronParser do
   ptype Field = Any | Values(List(Int))
 
   -- A parsed 5-field cron expression.
-  ptype Expr = {
+  ptype CronExpr = {
     minute : Field,
     hour   : Field,
     dom    : Field,
@@ -56,8 +56,8 @@ mod Conduit.CronParser do
     end
   end
 
-  doc "Parse a cron expression into its internal Expr representation."
-  fn parse(schedule : String) : Result(Expr, String) do
+  doc "Parse a cron expression into its internal CronExpr representation."
+  fn parse(schedule : String) : Result(CronExpr, String) do
     pparse_expr(schedule)
   end
 
@@ -66,7 +66,7 @@ mod Conduit.CronParser do
 
   Uses UTC time components (minute, hour, day-of-month, month, day-of-week).
   """
-  fn matches(expr : Expr, dt : DateTime) : Bool do
+  fn matches(expr : CronExpr, dt : DateTime) : Bool do
     pmatches(expr, dt)
   end
 
@@ -74,7 +74,7 @@ mod Conduit.CronParser do
   -- Private: parser
   -- ─────────────────────────────────────────────────────────────
 
-  pfn pparse_expr(s : String) : Result(Expr, String) do
+  pfn pparse_expr(s : String) : Result(CronExpr, String) do
     let parts = String.split(s, " ") |> List.filter(fn p -> if String.is_empty(p) do false else true end)
     match parts do
       Cons(min, Cons(hr, Cons(dom, Cons(mo, Cons(dow, Nil))))) ->
@@ -216,10 +216,10 @@ mod Conduit.CronParser do
 
   -- Check whether `dt` satisfies all five fields of `expr`.
   --
-  -- `expr` is a record type (ptype Expr = { minute, hour, dom, month, dow }),
+  -- `expr` is a record type (ptype CronExpr = { minute, hour, dom, month, dow }),
   -- so its fields are accessed with dot notation — not matched as a sum type
   -- constructor.
-  pfn pmatches(expr : Expr, dt : DateTime) : Bool do
+  pfn pmatches(expr : CronExpr, dt : DateTime) : Bool do
     pfield_matches(expr.minute, pdt_minute(dt)) &&
     pfield_matches(expr.hour,   pdt_hour(dt))   &&
     pfield_matches(expr.dom,    pdt_dom(dt))     &&
@@ -241,7 +241,7 @@ mod Conduit.CronParser do
   -- Linearly advance minute-by-minute until a matching DateTime is found.
   -- Bounded to 527 040 iterations (~1 year of minutes) to prevent infinite loops
   -- for expressions like "0 0 30 2 *" (February 30 never exists).
-  pfn pfind_next(expr : Expr, candidate : DateTime, count : Int) : Option(DateTime) do
+  pfn pfind_next(expr : CronExpr, candidate : DateTime, count : Int) : Option(DateTime) do
     if count > 527040 do
       None
     else

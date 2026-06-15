@@ -6,4 +6,4 @@ description = "Job and workflow platform for March"
 author = ""
 
 [deps]
-depot = { git = "https://github.com/march-language/depot" }
+depot = { path = "../depot" }

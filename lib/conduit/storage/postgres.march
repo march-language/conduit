@@ -1,6 +1,429 @@
 -- Conduit.Storage.Postgres — Postgres-backed implementation of Conduit.Storage.
 --
--- Phase 5: Not yet implemented. The Postgres stdlib module is not available.
--- This file is a stub to allow the project to compile.
+-- Built on the `depot` library (Connection / Message).  This is the durable,
+-- multi-node-safe storage backend; the in-memory VaultStore in the test suite
+-- is for unit tests only.
+--
+-- ── Status (vertical slice) ──────────────────────────────────────────────────
+-- The core JOB LIFECYCLE is fully implemented against a live database:
+--   enqueue, fetch_next (SELECT … FOR UPDATE SKIP LOCKED), mark_running,
+--   mark_completed, mark_snoozed, heartbeat, schedule_retry, discard,
+--   move_to_dead_letter, rescue_stale.
+-- The remaining cron / workflow / node / dashboard / event methods return an
+-- explicit "not yet implemented" error and are filled in incrementally.
+--
+-- ── Conventions ──────────────────────────────────────────────────────────────
+--   • Timestamps are stored as BIGINT epoch-SECONDS (DateTime.to_timestamp).
+--     Read and write go through the same conversion, so ordering is consistent.
+--   • List columns (errors, tags) are stored as a JSON array of strings in a
+--     TEXT column, encoded/decoded by pencode_str_list / pdecode_str_list.
+--   • Every operation opens its own connection (pwith_conn).  Connection
+--     pooling is a follow-up — swapping pwith_conn for depot's Pool is the only
+--     change required.
+--
+-- Schema: priv/migrations/001_conduit_schema.sql
 mod Conduit.Storage.Postgres do
+  use Conduit
+  import Connection
+  import Message
+
+  -- Connection parameters for the backing database.
+  type Store = {
+    host     : String,
+    port     : Int,
+    user     : String,
+    database : String,
+    password : Option(String)
+  }
+
+  doc "Build a Store from explicit connection parameters."
+  fn new(host : String, port : Int, user : String, database : String, password : Option(String)) : Store do
+    { host = host, port = port, user = user, database = database, password = password }
+  end
+
+  doc "Build a Store for a database on localhost:5432 with no password (trust auth)."
+  fn local(user : String, database : String) : Store do
+    { host = "127.0.0.1", port = 5432, user = user, database = database, password = None }
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Connection helper
+  -- ─────────────────────────────────────────────────────────────
+
+  pfn pconn_config(self : Store) do
+    { host = self.host, port = self.port, user = self.user,
+      database = self.database, password = self.password }
+  end
+
+  -- Open a connection, run `f(conn)`, close, and return f's Result.
+  pfn pwith_conn(self : Store, f) do
+    match Connection.connect(pconn_config(self)) do
+      Err(e)   -> Err("connect: " ++ e)
+      Ok(conn) ->
+        let result = f(conn)
+        let _ = Connection.close(conn)
+        result
+    end
+  end
+
+  -- Run a parameterized statement, discarding result rows.
+  pfn pexec(self : Store, sql : String, params) : Result((), String) do
+    pwith_conn(self, fn conn ->
+      match Connection.exec_prepared(conn, sql, params) do
+        Err(e) -> Err(e)
+        Ok(_)  -> Ok(())
+      end)
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Parameter helpers
+  -- ─────────────────────────────────────────────────────────────
+
+  pfn ptxt_int(n : Int) do ParamText(int_to_string(n)) end
+  pfn ptxt_ts(dt : DateTime) do ParamText(int_to_string(DateTime.to_timestamp(dt))) end
+  pfn pbool(b : Bool) do ParamText(if b do "true" else "false" end) end
+
+  pfn popt_txt(o : Option(String)) do
+    match o do
+      None    -> ParamNull
+      Some(s) -> ParamText(s)
+    end
+  end
+
+  pfn popt_ts(o : Option(DateTime)) do
+    match o do
+      None     -> ParamNull
+      Some(dt) -> ParamText(int_to_string(DateTime.to_timestamp(dt)))
+    end
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- JSON string-list encode / decode (errors, tags)
+  -- ─────────────────────────────────────────────────────────────
+
+  pfn pjson_escape(s : String) : String do
+    String.replace_all(String.replace_all(s, "\\", "\\\\"), "\"", "\\\"")
+  end
+
+  pfn pencode_str_list(xs : List(String)) : String do
+    "[" ++ String.join(List.map(xs, fn s -> "\"" ++ pjson_escape(s) ++ "\""), ",") ++ "]"
+  end
+
+  pfn pdecode_str_list(s : String) : List(String) do
+    let n = String.byte_size(s)
+    if n < 2 do
+      Nil
+    else
+      pscan_strs(string_chars(String.slice_bytes(s, 1, n - 2)), Nil)
+    end
+  end
+
+  -- Walk characters, collecting each double-quoted string literal.
+  pfn pscan_strs(cs : List(String), acc : List(String)) : List(String) do
+    match cs do
+      Nil -> List.reverse(acc)
+      Cons(c, rest) ->
+        if c == "\"" do
+          let (str, after) = pread_str(rest, "")
+          pscan_strs(after, Cons(str, acc))
+        else
+          pscan_strs(rest, acc)
+        end
+    end
+  end
+
+  -- Read one string literal up to the next unescaped quote.
+  pfn pread_str(cs : List(String), acc : String) : (String, List(String)) do
+    match cs do
+      Nil -> (acc, Nil)
+      Cons(c, rest) ->
+        if c == "\\" do
+          match rest do
+            Nil          -> (acc, Nil)
+            Cons(c2, r2) -> pread_str(r2, acc ++ c2)
+          end
+        else
+          if c == "\"" do
+            (acc, rest)
+          else
+            pread_str(rest, acc ++ c)
+          end
+        end
+    end
+  end
+
+  -- ─────────────────────────────────────────────────────────────
+  -- Row decoding
+  -- ─────────────────────────────────────────────────────────────
+
+  pfn pcell(cells : List(Option(String)), i : Int) : Option(String) do
+    match List.nth_opt(cells, i) do
+      Some(c) -> c
+      None    -> None
+    end
+  end
+
+  pfn preq_str(o : Option(String)) : String do unwrap_or(o, "") end
+
+  pfn preq_int(o : Option(String)) : Int do
+    match o do
+      None    -> 0
+      Some(s) -> unwrap_or(string_to_int(s), 0)
+    end
+  end
+
+  pfn preq_ts(o : Option(String)) : DateTime do DateTime.from_timestamp(preq_int(o)) end
+
+  pfn popt_ts_dec(o : Option(String)) : Option(DateTime) do
+    match o do
+      None    -> None
+      Some(s) ->
+        match string_to_int(s) do
+          None    -> None
+          Some(n) -> Some(DateTime.from_timestamp(n))
+        end
+    end
+  end
+
+  -- Column list shared by enqueue (INSERT) and fetch_next (RETURNING).
+  -- The order MUST match pdecode_job's positional indices.
+  pfn pjob_cols() : String do
+    "id, queue, job_type, payload, status, attempt, max_attempts, priority, backoff, dead_letter_queue, inserted_at, scheduled_at, run_at, started_at, completed_at, heartbeat_at, worker_id, unique_key, errors, tags"
+  end
+
+  pfn pdecode_job(cells : List(Option(String))) : Conduit.JobRow do
+    {
+      id                = preq_str(pcell(cells, 0)),
+      queue             = preq_str(pcell(cells, 1)),
+      job_type          = preq_str(pcell(cells, 2)),
+      payload           = preq_str(pcell(cells, 3)),
+      status            = preq_str(pcell(cells, 4)),
+      attempt           = preq_int(pcell(cells, 5)),
+      max_attempts      = preq_int(pcell(cells, 6)),
+      priority          = preq_int(pcell(cells, 7)),
+      backoff           = preq_str(pcell(cells, 8)),
+      dead_letter_queue = pcell(cells, 9),
+      inserted_at       = preq_ts(pcell(cells, 10)),
+      scheduled_at      = preq_ts(pcell(cells, 11)),
+      run_at            = preq_ts(pcell(cells, 12)),
+      started_at        = popt_ts_dec(pcell(cells, 13)),
+      completed_at      = popt_ts_dec(pcell(cells, 14)),
+      heartbeat_at      = popt_ts_dec(pcell(cells, 15)),
+      worker_id         = pcell(cells, 16),
+      unique_key        = pcell(cells, 17),
+      errors            = pdecode_str_list(preq_str(pcell(cells, 18))),
+      tags              = pdecode_str_list(preq_str(pcell(cells, 19)))
+    }
+  end
+
+  pfn pids_from_rows(rows) do
+    List.filter_map(rows, fn row -> pcell(row, 0))
+  end
+
+  -- Dead-letter INSERT helpers.
+  pfn pdl_insert_sql() : String do
+    "INSERT INTO conduit_dead_letters (id, job_id, queue, job_type, payload, errors, attempts, first_attempted_at, last_attempted_at, discarded_at, reviewed, reviewed_by, reviewed_at, retry_count) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)"
+  end
+
+  pfn pdl_params(dl) do
+    [ ParamText(dl.id),
+      ParamText(dl.job_id),
+      ParamText(dl.queue),
+      ParamText(dl.job_type),
+      ParamText(dl.payload),
+      ParamText(pencode_str_list(dl.errors)),
+      ptxt_int(dl.attempts),
+      popt_ts(dl.first_attempted_at),
+      popt_ts(dl.last_attempted_at),
+      ptxt_ts(dl.discarded_at),
+      pbool(dl.reviewed),
+      popt_txt(dl.reviewed_by),
+      popt_ts(dl.reviewed_at),
+      ptxt_int(dl.retry_count) ]
+  end
+
+  -- Uniform stub for methods not yet implemented in this slice.
+  pfn pnot_impl(method : String) do
+    Err("Conduit.Storage.Postgres." ++ method ++ ": not yet implemented (vertical slice covers the job lifecycle only)")
+  end
+
+  -- ═══════════════════════════════════════════════════════════════
+  -- Storage implementation
+  -- ═══════════════════════════════════════════════════════════════
+
+  impl Storage(Store) do
+
+    -- ── Job lifecycle (implemented) ──────────────────────────────
+
+    fn enqueue(self : Store, job) : Result(String, String) do
+      let sql = "INSERT INTO conduit_jobs (" ++ pjob_cols() ++ ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)"
+      let params = [
+        ParamText(job.id),
+        ParamText(job.queue),
+        ParamText(job.job_type),
+        ParamText(job.payload),
+        ParamText(job.status),
+        ptxt_int(job.attempt),
+        ptxt_int(job.max_attempts),
+        ptxt_int(job.priority),
+        ParamText(job.backoff),
+        popt_txt(job.dead_letter_queue),
+        ptxt_ts(job.inserted_at),
+        ptxt_ts(job.scheduled_at),
+        ptxt_ts(job.run_at),
+        popt_ts(job.started_at),
+        popt_ts(job.completed_at),
+        popt_ts(job.heartbeat_at),
+        popt_txt(job.worker_id),
+        popt_txt(job.unique_key),
+        ParamText(pencode_str_list(job.errors)),
+        ParamText(pencode_str_list(job.tags))
+      ]
+      pwith_conn(self, fn conn ->
+        match Connection.exec_prepared(conn, sql, params) do
+          Err(e) -> Err("enqueue: " ++ e)
+          Ok(_)  -> Ok(job.id)
+        end)
+    end
+
+    fn fetch_next(self : Store, queue : String) : Result(Option(Conduit.JobRow), String) do
+      let sql = "UPDATE conduit_jobs SET status = 'running', started_at = $2 WHERE id = (SELECT id FROM conduit_jobs WHERE queue = $1 AND status IN ('pending','snoozed') AND run_at <= $2 ORDER BY priority DESC, run_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING " ++ pjob_cols()
+      pwith_conn(self, fn conn ->
+        match Connection.exec_prepared(conn, sql, [ParamText(queue), ParamText(int_to_string(DateTime.now()))]) do
+          Err(e)  -> Err("fetch_next: " ++ e)
+          Ok(res) ->
+            match res.rows do
+              Nil          -> Ok(None)
+              Cons(row, _) -> Ok(Some(pdecode_job(row)))
+            end
+        end)
+    end
+
+    fn mark_running(self : Store, id : String, worker_id : String) : Result((), String) do
+      pexec(self, "UPDATE conduit_jobs SET worker_id = $2, attempt = attempt + 1, heartbeat_at = $3 WHERE id = $1",
+        [ParamText(id), ParamText(worker_id), ParamText(int_to_string(DateTime.now()))])
+    end
+
+    fn mark_completed(self : Store, id : String) : Result((), String) do
+      pexec(self, "UPDATE conduit_jobs SET status = 'completed', completed_at = $2 WHERE id = $1",
+        [ParamText(id), ParamText(int_to_string(DateTime.now()))])
+    end
+
+    fn mark_snoozed(self : Store, id : String, wake_at : DateTime) : Result((), String) do
+      pexec(self, "UPDATE conduit_jobs SET status = 'snoozed', run_at = $2 WHERE id = $1",
+        [ParamText(id), ptxt_ts(wake_at)])
+    end
+
+    fn heartbeat(self : Store, id : String) : Result((), String) do
+      pexec(self, "UPDATE conduit_jobs SET heartbeat_at = $2 WHERE id = $1",
+        [ParamText(id), ParamText(int_to_string(DateTime.now()))])
+    end
+
+    fn schedule_retry(self : Store, id : String, error_msg : String, run_at : DateTime) : Result((), String) do
+      pexec(self, "UPDATE conduit_jobs SET status = 'pending', run_at = $2, worker_id = NULL, errors = (COALESCE(errors,'[]')::jsonb || jsonb_build_array($3::text))::text WHERE id = $1",
+        [ParamText(id), ptxt_ts(run_at), ParamText(error_msg)])
+    end
+
+    fn discard(self : Store, id : String, error_msg : String) : Result((), String) do
+      pexec(self, "UPDATE conduit_jobs SET status = 'dead', completed_at = $2, errors = (COALESCE(errors,'[]')::jsonb || jsonb_build_array($3::text))::text WHERE id = $1",
+        [ParamText(id), ParamText(int_to_string(DateTime.now())), ParamText(error_msg)])
+    end
+
+    fn move_to_dead_letter(self : Store, dl) : Result((), String) do
+      pwith_conn(self, fn conn ->
+        match Connection.simple_query(conn, "BEGIN") do
+          Err(e) -> Err("move_to_dead_letter begin: " ++ e)
+          Ok(_)  ->
+            match Connection.exec_prepared(conn, pdl_insert_sql(), pdl_params(dl)) do
+              Err(e) ->
+                let _ = Connection.simple_query(conn, "ROLLBACK")
+                Err("move_to_dead_letter insert: " ++ e)
+              Ok(_) ->
+                match Connection.exec_prepared(conn, "UPDATE conduit_jobs SET status = 'dead' WHERE id = $1", [ParamText(dl.job_id)]) do
+                  Err(e) ->
+                    let _ = Connection.simple_query(conn, "ROLLBACK")
+                    Err("move_to_dead_letter update: " ++ e)
+                  Ok(_) ->
+                    match Connection.simple_query(conn, "COMMIT") do
+                      Err(e) -> Err("move_to_dead_letter commit: " ++ e)
+                      Ok(_)  -> Ok(())
+                    end
+                end
+            end
+        end)
+    end
+
+    fn rescue_stale(self : Store, threshold_secs : Int) : Result(List(String), String) do
+      let cutoff = DateTime.now() - threshold_secs
+      pwith_conn(self, fn conn ->
+        match Connection.exec_prepared(conn, "UPDATE conduit_jobs SET status = 'pending', worker_id = NULL WHERE status = 'running' AND COALESCE(heartbeat_at, started_at, 0) < $1 RETURNING id", [ParamText(int_to_string(cutoff))]) do
+          Err(e)  -> Err("rescue_stale: " ++ e)
+          Ok(res) -> Ok(pids_from_rows(res.rows))
+        end)
+    end
+
+    -- ── Cron (not yet implemented) ───────────────────────────────
+    fn cron_upsert(_self, _a) do pnot_impl("cron_upsert") end
+    fn cron_load_due(_self) do pnot_impl("cron_load_due") end
+    fn cron_load_by_id(_self, _a) do pnot_impl("cron_load_by_id") end
+    fn cron_mark_fired(_self, _a, _b, _c) do pnot_impl("cron_mark_fired") end
+    fn cron_job_active(_self, _a) do pnot_impl("cron_job_active") end
+    fn cron_cancel_job(_self, _a) do pnot_impl("cron_cancel_job") end
+    fn cron_delete(_self, _a) do pnot_impl("cron_delete") end
+    fn cron_advisory_lock(_self, _a) do pnot_impl("cron_advisory_lock") end
+    fn cron_advisory_unlock(_self, _a) do pnot_impl("cron_advisory_unlock") end
+
+    -- ── Node coordination (not yet implemented) ──────────────────
+    fn node_register(_self, _a) do pnot_impl("node_register") end
+    fn node_heartbeat(_self, _a) do pnot_impl("node_heartbeat") end
+    fn node_deregister(_self, _a) do pnot_impl("node_deregister") end
+    fn node_list_active(_self) do pnot_impl("node_list_active") end
+    fn node_reclaim_jobs(_self, _a) do pnot_impl("node_reclaim_jobs") end
+    fn node_cleanup_stale(_self, _a) do pnot_impl("node_cleanup_stale") end
+    fn node_try_leader_lock(_self, _a) do pnot_impl("node_try_leader_lock") end
+    fn node_release_leader_lock(_self, _a) do pnot_impl("node_release_leader_lock") end
+
+    -- ── Workflows & checkpoints (not yet implemented) ────────────
+    fn workflow_insert(_self, _a) do pnot_impl("workflow_insert") end
+    fn workflow_load(_self, _a) do pnot_impl("workflow_load") end
+    fn workflow_list_all(_self) do pnot_impl("workflow_list_all") end
+    fn workflow_status_get(_self, _a) do pnot_impl("workflow_status_get") end
+    fn workflow_update_status(_self, _a, _b, _c, _d) do pnot_impl("workflow_update_status") end
+    fn workflow_cancel(_self, _a, _b) do pnot_impl("workflow_cancel") end
+    fn checkpoint_get(_self, _a, _b) do pnot_impl("checkpoint_get") end
+    fn checkpoint_set(_self, _a, _b, _c, _d) do pnot_impl("checkpoint_set") end
+    fn checkpoint_load_all(_self, _a) do pnot_impl("checkpoint_load_all") end
+    fn signal_insert(_self, _a) do pnot_impl("signal_insert") end
+    fn signal_peek(_self, _a, _b) do pnot_impl("signal_peek") end
+    fn signal_mark_delivered(_self, _a) do pnot_impl("signal_mark_delivered") end
+
+    -- ── Dashboard queries (not yet implemented) ──────────────────
+    fn dashboard_queue_summary(_self) do pnot_impl("dashboard_queue_summary") end
+    fn dashboard_jobs_list(_self, _a, _b, _c) do pnot_impl("dashboard_jobs_list") end
+    fn dashboard_job_by_id(_self, _a) do pnot_impl("dashboard_job_by_id") end
+    fn dashboard_crons_list(_self) do pnot_impl("dashboard_crons_list") end
+    fn dashboard_workflows_list(_self, _a, _b) do pnot_impl("dashboard_workflows_list") end
+
+    -- ── Dead letters & admin (not yet implemented) ───────────────
+    fn dead_letter_list(_self, _a) do pnot_impl("dead_letter_list") end
+    fn dead_letter_list_all(_self) do pnot_impl("dead_letter_list_all") end
+    fn dead_letter_delete_all(_self) do pnot_impl("dead_letter_delete_all") end
+    fn dead_letter_load(_self, _a) do pnot_impl("dead_letter_load") end
+    fn job_retry(_self, _a) do pnot_impl("job_retry") end
+    fn job_cancel(_self, _a, _b) do pnot_impl("job_cancel") end
+    fn job_delete(_self, _a) do pnot_impl("job_delete") end
+    fn dead_letter_delete(_self, _a) do pnot_impl("dead_letter_delete") end
+    fn notify_subscribe(_self, _a) do pnot_impl("notify_subscribe") end
+
+    -- ── Rate limiting & unique jobs (not yet implemented) ────────
+    fn rate_limit_acquire(_self, _a, _b) do pnot_impl("rate_limit_acquire") end
+    fn unique_check(_self, _a) do pnot_impl("unique_check") end
+    fn unique_release(_self, _a) do pnot_impl("unique_release") end
+
+    -- ── Event store (not yet implemented) ────────────────────────
+    fn event_append(_self, _a, _b, _c, _d) do pnot_impl("event_append") end
+    fn event_load_all(_self, _a) do pnot_impl("event_load_all") end
+    fn event_load_up_to(_self, _a, _b) do pnot_impl("event_load_up_to") end
+    fn event_count(_self, _a) do pnot_impl("event_count") end
+  end
 end

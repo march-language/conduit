@@ -1,0 +1,198 @@
+-- Live integration tests for Conduit.Storage.Postgres (job-lifecycle slice).
+--
+-- Requires a Postgres database `conduit_test` on 127.0.0.1:5432 loaded with
+-- priv/migrations/001_conduit_schema.sql.  If the database is unreachable the
+-- tests skip (pass) rather than fail, so `forge test` is green without a DB.
+--
+--   createdb conduit_test
+--   psql -d conduit_test -f priv/migrations/001_conduit_schema.sql
+mod ConduitPostgresLiveTest do
+  use Test
+  use Conduit
+  import Connection
+
+  pfn puser() : String do Env.get("USER", "postgres") end
+
+  pfn pstore() do
+    Conduit.Storage.Postgres.local(puser(), "conduit_test")
+  end
+
+  -- Connect and TRUNCATE the job tables for a clean slate.
+  -- Returns Err if the DB is unreachable (tests treat that as "skip").
+  pfn psetup() : Result((), String) do
+    match Connection.connect({ host = "127.0.0.1", port = 5432, user = puser(),
+                               database = "conduit_test", password = None }) do
+      Err(e)   -> Err(e)
+      Ok(conn) ->
+        let _ = Connection.simple_query(conn, "TRUNCATE conduit_jobs, conduit_dead_letters")
+        let _ = Connection.close(conn)
+        Ok(())
+    end
+  end
+
+  -- Build a pending JobRow with sensible defaults.  `run_offset` shifts run_at
+  -- relative to now (seconds); negative = already runnable.
+  pfn pmk_job(id : String, queue : String, priority : Int, run_offset : Int) : Conduit.JobRow do
+    let now = DateTime.now()
+    {
+      id = id, queue = queue, job_type = "TestJob", payload = "{}",
+      status = "pending", attempt = 0, max_attempts = 3, priority = priority,
+      backoff = "exponential", dead_letter_queue = None,
+      inserted_at = DateTime.from_timestamp(now),
+      scheduled_at = DateTime.from_timestamp(now),
+      run_at = DateTime.from_timestamp(now + run_offset),
+      started_at = None, completed_at = None, heartbeat_at = None,
+      worker_id = None, unique_key = None, errors = Nil, tags = Nil
+    }
+  end
+
+  test "postgres: enqueue then fetch_next claims the job as running" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.enqueue(store, pmk_job("j1", "default", 0, 0))
+        match Conduit.Storage.fetch_next(store, "default") do
+          Err(e)        -> Test.assert_true(false, "fetch_next errored: " ++ e)
+          Ok(None)      -> Test.assert_true(false, "expected a job, got None")
+          Ok(Some(job)) ->
+            Test.assert_eq_str(job.id, "j1", "id round-trips")
+            Test.assert_eq_str(job.status, "running", "claimed as running")
+            Test.assert_eq_str(job.job_type, "TestJob", "job_type round-trips")
+        end
+    end
+  end
+
+  test "postgres: fetch_next on an empty queue returns None" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        match Conduit.Storage.fetch_next(pstore(), "default") do
+          Ok(None) -> Test.assert_true(true, "")
+          _        -> Test.assert_true(false, "expected None on empty queue")
+        end
+    end
+  end
+
+  test "postgres: a future-scheduled job is not fetched yet" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.enqueue(store, pmk_job("future", "default", 0, 3600))
+        match Conduit.Storage.fetch_next(store, "default") do
+          Ok(None) -> Test.assert_true(true, "")
+          _        -> Test.assert_true(false, "future job should not be runnable")
+        end
+    end
+  end
+
+  test "postgres: mark_completed makes the job non-fetchable" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.enqueue(store, pmk_job("j2", "default", 0, 0))
+        let _ = Conduit.Storage.mark_completed(store, "j2")
+        match Conduit.Storage.fetch_next(store, "default") do
+          Ok(None) -> Test.assert_true(true, "")
+          _        -> Test.assert_true(false, "completed job should not be fetchable")
+        end
+    end
+  end
+
+  test "postgres: fetch_next honours priority ordering" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.enqueue(store, pmk_job("low", "default", 1, 0))
+        let _ = Conduit.Storage.enqueue(store, pmk_job("high", "default", 10, 0))
+        match Conduit.Storage.fetch_next(store, "default") do
+          Ok(Some(job)) -> Test.assert_eq_str(job.id, "high", "higher priority fetched first")
+          _             -> Test.assert_true(false, "expected a job")
+        end
+    end
+  end
+
+  test "postgres: schedule_retry reschedules to pending and appends the error" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.enqueue(store, pmk_job("j3", "default", 0, 0))
+        let _ = Conduit.Storage.fetch_next(store, "default")
+        let past = DateTime.from_timestamp(DateTime.now() - 10)
+        let _ = Conduit.Storage.schedule_retry(store, "j3", "boom", past)
+        match Conduit.Storage.fetch_next(store, "default") do
+          Ok(Some(job)) ->
+            Test.assert_eq_str(job.id, "j3", "rescheduled job is fetchable")
+            Test.assert_true(List.length(job.errors) >= 1, "error was appended and decoded")
+          _ -> Test.assert_true(false, "expected the rescheduled job")
+        end
+    end
+  end
+
+  test "postgres: discard marks the job dead and non-fetchable" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.enqueue(store, pmk_job("j4", "default", 0, 0))
+        let _ = Conduit.Storage.discard(store, "j4", "permanent failure")
+        match Conduit.Storage.fetch_next(store, "default") do
+          Ok(None) -> Test.assert_true(true, "")
+          _        -> Test.assert_true(false, "discarded job should not be fetchable")
+        end
+    end
+  end
+
+  test "postgres: move_to_dead_letter inserts the DL row and marks the job dead" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.enqueue(store, pmk_job("j5", "default", 0, 0))
+        let now = DateTime.from_timestamp(DateTime.now())
+        let dl = {
+          id = "dl5", job_id = "j5", queue = "default", job_type = "TestJob",
+          payload = "{}", errors = Cons("boom", Nil), attempts = 3,
+          first_attempted_at = None, last_attempted_at = None,
+          discarded_at = now, reviewed = false, reviewed_by = None,
+          reviewed_at = None, retry_count = 0
+        }
+        match Conduit.Storage.move_to_dead_letter(store, dl) do
+          Err(e) -> Test.assert_true(false, "move_to_dead_letter errored: " ++ e)
+          Ok(_)  ->
+            match Conduit.Storage.fetch_next(store, "default") do
+              Ok(None) -> Test.assert_true(true, "")
+              _        -> Test.assert_true(false, "dead-lettered job should not be fetchable")
+            end
+        end
+    end
+  end
+
+  test "postgres: rescue_stale returns timed-out running jobs to pending" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        -- A job stuck 'running' with a heartbeat from an hour ago.
+        let old  = DateTime.from_timestamp(DateTime.now() - 3600)
+        let base = pmk_job("j6", "default", 0, 0)
+        let stuck = { base with status = "running", started_at = Some(old), heartbeat_at = Some(old) }
+        let _ = Conduit.Storage.enqueue(store, stuck)
+        -- threshold 60s: cutoff = now-60; heartbeat (now-3600) is older → stale.
+        match Conduit.Storage.rescue_stale(store, 60) do
+          Err(e)   -> Test.assert_true(false, "rescue_stale errored: " ++ e)
+          Ok(ids)  ->
+            Test.assert_true(List.length(ids) >= 1, "at least one job rescued")
+            match Conduit.Storage.fetch_next(store, "default") do
+              Ok(Some(job)) -> Test.assert_eq_str(job.id, "j6", "rescued job is runnable again")
+              _             -> Test.assert_true(false, "rescued job should be fetchable")
+            end
+        end
+    end
+  end
+
+end
