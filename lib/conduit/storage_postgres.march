@@ -1,3 +1,0 @@
-mod Conduit.Storage.Postgres do
-  type Config = { host : String }
-end
