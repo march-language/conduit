@@ -24,7 +24,7 @@ mod ConduitPostgresLiveTest do
                                database = "conduit_test", password = None }) do
       Err(e)   -> Err(e)
       Ok(conn) ->
-        let _ = Connection.simple_query(conn, "TRUNCATE conduit_jobs, conduit_dead_letters, conduit_cron_schedules, conduit_workflows, conduit_checkpoints, conduit_workflow_signals CASCADE")
+        let _ = Connection.simple_query(conn, "TRUNCATE conduit_jobs, conduit_dead_letters, conduit_cron_schedules, conduit_workflows, conduit_checkpoints, conduit_workflow_signals, conduit_workers CASCADE")
         let _ = Connection.close(conn)
         Ok(())
     end
@@ -74,6 +74,17 @@ mod ConduitPostgresLiveTest do
       id = 0, workflow_id = wf_id, signal_type = stype, payload = "{}",
       status = "pending", sent_at = DateTime.from_timestamp(DateTime.now()),
       delivered_at = None, expires_at = None, sent_by = None
+    }
+  end
+
+  -- Build a running NodeInfo; last_seen_at = now + offset seconds.
+  pfn pmk_node(id : String, last_seen_offset : Int) : Conduit.NodeInfo do
+    {
+      id = id, hostname = "host1", pid = 4321,
+      queues = Cons("default", Nil), pool_size = 4,
+      started_at = DateTime.from_timestamp(DateTime.now()),
+      last_seen_at = DateTime.from_timestamp(DateTime.now() + last_seen_offset),
+      status = "running"
     }
   end
 
@@ -503,6 +514,98 @@ mod ConduitPostgresLiveTest do
                 end
               _ -> Test.assert_true(false, "expected a pending signal")
             end
+        end
+    end
+  end
+
+  -- ── Node coordination ──────────────────────────────────────────
+
+  test "postgres: node_register then node_list_active finds the node" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.node_register(store, pmk_node("node-a", 0))
+        match Conduit.Storage.node_list_active(store) do
+          Err(e)    -> Test.assert_true(false, "node_list_active errored: " ++ e)
+          Ok(nodes) ->
+            Test.assert_eq_int(List.length(nodes), 1, "one active node")
+            match nodes do
+              Cons(n, _) ->
+                Test.assert_eq_str(n.id, "node-a", "id round-trips")
+                Test.assert_eq_int(n.pool_size, 4, "pool_size round-trips")
+              Nil -> Test.assert_true(false, "expected a node")
+            end
+        end
+    end
+  end
+
+  test "postgres: node_deregister removes it from the active list" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.node_register(store, pmk_node("node-b", 0))
+        let _ = Conduit.Storage.node_deregister(store, "node-b")
+        match Conduit.Storage.node_list_active(store) do
+          Ok(Nil) -> Test.assert_true(true, "")
+          Ok(_)   -> Test.assert_true(false, "deregistered node should not be active")
+          Err(e)  -> Test.assert_true(false, "node_list_active errored: " ++ e)
+        end
+    end
+  end
+
+  test "postgres: node_cleanup_stale stops nodes with old heartbeats" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.node_register(store, pmk_node("fresh", 0))
+        let _ = Conduit.Storage.node_register(store, pmk_node("stale", -3600))
+        match Conduit.Storage.node_cleanup_stale(store, 60) do
+          Err(e) -> Test.assert_true(false, "node_cleanup_stale errored: " ++ e)
+          Ok(n)  ->
+            Test.assert_eq_int(n, 1, "exactly one stale node stopped")
+            match Conduit.Storage.node_list_active(store) do
+              Ok(Cons(node, Nil)) -> Test.assert_eq_str(node.id, "fresh", "only the fresh node remains active")
+              _                   -> Test.assert_true(false, "expected one active node")
+            end
+        end
+    end
+  end
+
+  test "postgres: node_reclaim_jobs resets orphaned running jobs" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let old  = DateTime.from_timestamp(DateTime.now() - 3600)
+        let base = pmk_job("orphan", "default", 0, 0)
+        let stuck = { base with status = "running", started_at = Some(old), heartbeat_at = Some(old) }
+        let _ = Conduit.Storage.enqueue(store, stuck)
+        match Conduit.Storage.node_reclaim_jobs(store, 60) do
+          Err(e)  -> Test.assert_true(false, "node_reclaim_jobs errored: " ++ e)
+          Ok(ids) ->
+            Test.assert_true(List.length(ids) >= 1, "reclaimed the orphaned job")
+            match Conduit.Storage.fetch_next(store, "default") do
+              Ok(Some(job)) -> Test.assert_eq_str(job.id, "orphan", "orphan is runnable again")
+              _             -> Test.assert_true(false, "reclaimed job should be fetchable")
+            end
+        end
+    end
+  end
+
+  test "postgres: node leader lock acquires/releases single-node" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        match Conduit.Storage.node_try_leader_lock(pstore(), 8473625) do
+          Ok(true) ->
+            match Conduit.Storage.node_release_leader_lock(pstore(), 8473625) do
+              Ok(_)  -> Test.assert_true(true, "")
+              Err(e) -> Test.assert_true(false, "release errored: " ++ e)
+            end
+          _ -> Test.assert_true(false, "expected to acquire the leader lock")
         end
     end
   end

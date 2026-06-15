@@ -323,6 +323,25 @@ mod Conduit.Storage.Postgres do
     }
   end
 
+  -- conduit_workers (NodeInfo has no stopped_at field; the column exists in the
+  -- table but is not part of the type).
+  pfn pnode_cols() : String do
+    "id, hostname, pid, queues, pool_size, started_at, last_seen_at, status"
+  end
+
+  pfn pdecode_node(cells : List(Option(String))) : Conduit.NodeInfo do
+    {
+      id           = preq_str(pcell(cells, 0)),
+      hostname     = preq_str(pcell(cells, 1)),
+      pid          = preq_int(pcell(cells, 2)),
+      queues       = pdecode_str_list(preq_str(pcell(cells, 3))),
+      pool_size    = preq_int(pcell(cells, 4)),
+      started_at   = preq_ts(pcell(cells, 5)),
+      last_seen_at = preq_ts(pcell(cells, 6)),
+      status       = preq_str(pcell(cells, 7))
+    }
+  end
+
   -- Dead-letter INSERT helpers.
   pfn pdl_insert_sql() : String do
     "INSERT INTO conduit_dead_letters (id, job_id, queue, job_type, payload, errors, attempts, first_attempted_at, last_attempted_at, discarded_at, reviewed, reviewed_by, reviewed_at, retry_count) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)"
@@ -558,15 +577,87 @@ mod Conduit.Storage.Postgres do
         end)
     end
 
-    -- ── Node coordination (not yet implemented) ──────────────────
-    fn node_register(_self, _a) do pnot_impl("node_register") end
-    fn node_heartbeat(_self, _a) do pnot_impl("node_heartbeat") end
-    fn node_deregister(_self, _a) do pnot_impl("node_deregister") end
-    fn node_list_active(_self) do pnot_impl("node_list_active") end
-    fn node_reclaim_jobs(_self, _a) do pnot_impl("node_reclaim_jobs") end
-    fn node_cleanup_stale(_self, _a) do pnot_impl("node_cleanup_stale") end
-    fn node_try_leader_lock(_self, _a) do pnot_impl("node_try_leader_lock") end
-    fn node_release_leader_lock(_self, _a) do pnot_impl("node_release_leader_lock") end
+    -- ── Node coordination ────────────────────────────────────────
+
+    fn node_register(self : Store, node) : Result((), String) do
+      let sql = "INSERT INTO conduit_workers (id, hostname, pid, queues, pool_size, started_at, last_seen_at, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO UPDATE SET hostname = EXCLUDED.hostname, pid = EXCLUDED.pid, queues = EXCLUDED.queues, pool_size = EXCLUDED.pool_size, started_at = EXCLUDED.started_at, last_seen_at = EXCLUDED.last_seen_at, status = 'running', stopped_at = NULL"
+      pexec(self, sql, [
+        ParamText(node.id),
+        ParamText(node.hostname),
+        ptxt_int(node.pid),
+        ParamText(pencode_str_list(node.queues)),
+        ptxt_int(node.pool_size),
+        ptxt_ts(node.started_at),
+        ptxt_ts(node.last_seen_at),
+        ParamText(node.status)
+      ])
+    end
+
+    fn node_heartbeat(self : Store, node_id : String) : Result((), String) do
+      pexec(self, "UPDATE conduit_workers SET last_seen_at = $2 WHERE id = $1",
+        [ParamText(node_id), ParamText(int_to_string(DateTime.now()))])
+    end
+
+    fn node_deregister(self : Store, node_id : String) : Result((), String) do
+      pexec(self, "UPDATE conduit_workers SET status = 'stopped', stopped_at = $2 WHERE id = $1",
+        [ParamText(node_id), ParamText(int_to_string(DateTime.now()))])
+    end
+
+    fn node_list_active(self : Store) : Result(List(Conduit.NodeInfo), String) do
+      pwith_conn(self, fn conn ->
+        match Connection.exec_prepared(conn, "SELECT " ++ pnode_cols() ++ " FROM conduit_workers WHERE status = 'running' ORDER BY started_at ASC", Nil) do
+          Err(e)  -> Err("node_list_active: " ++ e)
+          Ok(res) -> Ok(List.map(res.rows, fn row -> pdecode_node(row)))
+        end)
+    end
+
+    -- Reclaim orphaned in-flight jobs: a job's worker_id is a per-execution
+    -- UUID (not the node id), so the reliable signal that the owning node died
+    -- is a stale heartbeat. Reset such running jobs to pending. threshold_s is
+    -- the node staleness window in seconds.
+    fn node_reclaim_jobs(self : Store, threshold_s : Int) : Result(List(String), String) do
+      let cutoff = DateTime.now() - threshold_s
+      pwith_conn(self, fn conn ->
+        match Connection.exec_prepared(conn, "UPDATE conduit_jobs SET status = 'pending', worker_id = NULL WHERE status = 'running' AND COALESCE(heartbeat_at, started_at, 0) < $1 RETURNING id", [ParamText(int_to_string(cutoff))]) do
+          Err(e)  -> Err("node_reclaim_jobs: " ++ e)
+          Ok(res) -> Ok(pids_from_rows(res.rows))
+        end)
+    end
+
+    -- Mark nodes whose heartbeat is older than threshold_s as stopped; return
+    -- the count via RETURNING.
+    fn node_cleanup_stale(self : Store, threshold_s : Int) : Result(Int, String) do
+      let cutoff = DateTime.now() - threshold_s
+      pwith_conn(self, fn conn ->
+        match Connection.exec_prepared(conn, "UPDATE conduit_workers SET status = 'stopped', stopped_at = $2 WHERE status = 'running' AND last_seen_at < $1 RETURNING id", [ParamText(int_to_string(cutoff)), ParamText(int_to_string(DateTime.now()))]) do
+          Err(e)  -> Err("node_cleanup_stale: " ++ e)
+          Ok(res) -> Ok(List.length(res.rows))
+        end)
+    end
+
+    -- NOTE: like cron's advisory lock, leader election via pg advisory locks
+    -- needs a persistent/pooled connection to hold the lock across the node's
+    -- lifetime. With connection-per-operation the lock is released on close, so
+    -- this is single-node-correct only until T0.3.
+    fn node_try_leader_lock(self : Store, lock_id : Int) : Result(Bool, String) do
+      pwith_conn(self, fn conn ->
+        match Connection.exec_prepared(conn, "SELECT pg_try_advisory_lock($1)", [ParamText(int_to_string(lock_id))]) do
+          Err(e)  -> Err("node_try_leader_lock: " ++ e)
+          Ok(res) ->
+            match res.rows do
+              Cons(row, _) -> Ok(pdecode_bool(pcell(row, 0)))
+              Nil          -> Ok(false)
+            end
+        end)
+    end
+
+    fn node_release_leader_lock(self : Store, lock_id : Int) : Result((), String) do
+      pwith_conn(self, fn conn ->
+        match Connection.exec_prepared(conn, "SELECT pg_advisory_unlock($1)", [ParamText(int_to_string(lock_id))]) do
+          Err(e) -> Err("node_release_leader_lock: " ++ e)
+          Ok(_)  -> Ok(())
+        end)
+    end
 
     -- ── Workflows ────────────────────────────────────────────────
 
