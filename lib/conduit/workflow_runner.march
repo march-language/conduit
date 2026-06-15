@@ -44,7 +44,7 @@ mod Conduit.WorkflowRunner do
     let job_config = { base_config with
       max_attempts  = 3,
       timeout       = 30000,
-      backoff       = Conduit.Backoff.exponential,
+      backoff       = Conduit.Backoff.exponential(),
       tags          = config.tags,
       discard_after = None
     }

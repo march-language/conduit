@@ -2352,12 +2352,15 @@ mod ConduitTest do
   --  and avoid a second impl Conduit.Storage block)
   -- ─────────────────────────────────────────────────────────────
 
-  pfn run_payment_workflow(storage : FakeWorkflowStorage, wf_id : String, call_tracker_key : String) : Result(String, Conduit.WorkflowError) do
+  pfn run_payment_workflow(storage : FakeWorkflowStorage, wf_id : String, call_tracker_key : String) : Result(String, WorkflowError) do
     let ctx = Conduit.WorkflowContext.new(wf_id)
+    -- Resolve the call-tracker name to a Vault table handle (Vault.set/get
+    -- require a handle, not a name; Vault.new is idempotent per name).
+    let tracker = Vault.new(call_tracker_key)
     -- Step 1: Validate order
     let validate_fn = fn () ->
-      let c = Vault.get(call_tracker_key, "validate_calls") |> unwrap_or(0)
-      let _ = Vault.set(call_tracker_key, "validate_calls", c + 1)
+      let c = Vault.get(tracker, "validate_calls") |> unwrap_or(0)
+      let _ = Vault.set(tracker, "validate_calls", c + 1)
       "\"order_valid\""
     let r1 = Conduit.WorkflowContext.checkpoint(storage, ctx, "validate_order", validate_fn)
     match r1 do
@@ -2365,8 +2368,8 @@ mod ConduitTest do
       Ok(v1) ->
         -- Step 2: Charge card
         let charge_fn = fn () ->
-          let c = Vault.get(call_tracker_key, "charge_calls") |> unwrap_or(0)
-          let _ = Vault.set(call_tracker_key, "charge_calls", c + 1)
+          let c = Vault.get(tracker, "charge_calls") |> unwrap_or(0)
+          let _ = Vault.set(tracker, "charge_calls", c + 1)
           "\"charge_ch_abc123\""
         let r2 = Conduit.WorkflowContext.checkpoint(storage, ctx, "charge_card", charge_fn)
         match r2 do
@@ -2374,8 +2377,8 @@ mod ConduitTest do
           Ok(v2) ->
             -- Step 3: Send confirmation
             let confirm_fn = fn () ->
-              let c = Vault.get(call_tracker_key, "confirm_calls") |> unwrap_or(0)
-              let _ = Vault.set(call_tracker_key, "confirm_calls", c + 1)
+              let c = Vault.get(tracker, "confirm_calls") |> unwrap_or(0)
+              let _ = Vault.set(tracker, "confirm_calls", c + 1)
               "\"email_sent\""
             let r3 = Conduit.WorkflowContext.checkpoint(storage, ctx, "send_confirmation", confirm_fn)
             match r3 do
@@ -2392,9 +2395,10 @@ mod ConduitTest do
     let storage  = fake_workflow_storage_new(vault_k)
     let wf_id    = base64_encode(random_bytes(16))
     let call_key = "calls_first_" ++ base64_encode(random_bytes(16))
-    Vault.set(call_key, "validate_calls", 0)
-    Vault.set(call_key, "charge_calls", 0)
-    Vault.set(call_key, "confirm_calls", 0)
+    let call_tbl = Vault.new(call_key)
+    Vault.set(call_tbl, "validate_calls", 0)
+    Vault.set(call_tbl, "charge_calls", 0)
+    Vault.set(call_tbl, "confirm_calls", 0)
     -- Set up replay mode with 0 events (first execution)
     let rk = Conduit.EventStore.replay_key(wf_id)
     Vault.set(rk, "mode", "deterministic_replay")
@@ -2404,9 +2408,9 @@ mod ConduitTest do
     let result = run_payment_workflow(storage, wf_id, call_key)
     assert_ok(result)
     -- All 3 fns were called
-    assert_eq_int(Vault.get(call_key, "validate_calls") |> unwrap_or(0), 1)
-    assert_eq_int(Vault.get(call_key, "charge_calls") |> unwrap_or(0), 1)
-    assert_eq_int(Vault.get(call_key, "confirm_calls") |> unwrap_or(0), 1)
+    assert_eq_int(Vault.get(call_tbl, "validate_calls") |> unwrap_or(0), 1)
+    assert_eq_int(Vault.get(call_tbl, "charge_calls") |> unwrap_or(0), 1)
+    assert_eq_int(Vault.get(call_tbl, "confirm_calls") |> unwrap_or(0), 1)
     -- 3 events were logged
     let cnt = Conduit.EventStore.count(storage, wf_id)
     match cnt do
@@ -2446,15 +2450,16 @@ mod ConduitTest do
     let _ = Conduit.EventStore.warm_replay(storage, wf_id)
     -- Track calls
     let call_key = "calls_replay_" ++ base64_encode(random_bytes(16))
-    Vault.set(call_key, "validate_calls", 0)
-    Vault.set(call_key, "charge_calls", 0)
-    Vault.set(call_key, "confirm_calls", 0)
+    let call_tbl = Vault.new(call_key)
+    Vault.set(call_tbl, "validate_calls", 0)
+    Vault.set(call_tbl, "charge_calls", 0)
+    Vault.set(call_tbl, "confirm_calls", 0)
     let result = run_payment_workflow(storage, wf_id, call_key)
     assert_ok(result)
     -- NO fns were called (all replayed from events)
-    assert_eq_int(Vault.get(call_key, "validate_calls") |> unwrap_or(-1), 0)
-    assert_eq_int(Vault.get(call_key, "charge_calls") |> unwrap_or(-1), 0)
-    assert_eq_int(Vault.get(call_key, "confirm_calls") |> unwrap_or(-1), 0)
+    assert_eq_int(Vault.get(call_tbl, "validate_calls") |> unwrap_or(-1), 0)
+    assert_eq_int(Vault.get(call_tbl, "charge_calls") |> unwrap_or(-1), 0)
+    assert_eq_int(Vault.get(call_tbl, "confirm_calls") |> unwrap_or(-1), 0)
     -- Values are correct (from recorded events)
     match result do
       Ok(output) ->
@@ -2479,15 +2484,16 @@ mod ConduitTest do
     -- Warm replay to sequence 1 only (first 2 events: 0 and 1)
     let _ = Conduit.EventStore.warm_replay_to(storage, wf_id, 1)
     let call_key = "calls_pit_" ++ base64_encode(random_bytes(16))
-    Vault.set(call_key, "validate_calls", 0)
-    Vault.set(call_key, "charge_calls", 0)
-    Vault.set(call_key, "confirm_calls", 0)
+    let call_tbl = Vault.new(call_key)
+    Vault.set(call_tbl, "validate_calls", 0)
+    Vault.set(call_tbl, "charge_calls", 0)
+    Vault.set(call_tbl, "confirm_calls", 0)
     let result = run_payment_workflow(storage, wf_id, call_key)
     assert_ok(result)
     -- First 2 fns NOT called (replayed), 3rd fn IS called (no event)
-    assert_eq_int(Vault.get(call_key, "validate_calls") |> unwrap_or(-1), 0)
-    assert_eq_int(Vault.get(call_key, "charge_calls") |> unwrap_or(-1), 0)
-    assert_eq_int(Vault.get(call_key, "confirm_calls") |> unwrap_or(-1), 1)
+    assert_eq_int(Vault.get(call_tbl, "validate_calls") |> unwrap_or(-1), 0)
+    assert_eq_int(Vault.get(call_tbl, "charge_calls") |> unwrap_or(-1), 0)
+    assert_eq_int(Vault.get(call_tbl, "confirm_calls") |> unwrap_or(-1), 1)
   end
 
   test "event_history_queryable" do
@@ -2501,9 +2507,10 @@ mod ConduitTest do
     Vault.set(rk, "event_count", 0)
     Vault.set(rk, "next_seq", 0)
     let call_key = "calls_hist_" ++ base64_encode(random_bytes(16))
-    Vault.set(call_key, "validate_calls", 0)
-    Vault.set(call_key, "charge_calls", 0)
-    Vault.set(call_key, "confirm_calls", 0)
+    let call_tbl = Vault.new(call_key)
+    Vault.set(call_tbl, "validate_calls", 0)
+    Vault.set(call_tbl, "charge_calls", 0)
+    Vault.set(call_tbl, "confirm_calls", 0)
     let _ = run_payment_workflow(storage, wf_id, call_key)
     -- Query event history
     let history = Conduit.EventStore.load_all(storage, wf_id)

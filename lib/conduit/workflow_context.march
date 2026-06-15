@@ -31,7 +31,7 @@ mod Conduit.WorkflowContext do
   `f` must return a String (typically JSON-serialized). The return value
   is the stored string on success or a WorkflowError on failure.
   """
-  fn checkpoint(storage : s, ctx : Conduit.WorkflowContext, name : String, f) : Result(String, Conduit.WorkflowError) do
+  fn checkpoint(storage : s, ctx : Conduit.WorkflowContext, name : String, f) : Result(String, WorkflowError) do
     let full_name = ctx.namespace ++ name
     -- Check if deterministic replay mode is active for this workflow.
     let replay_key = Conduit.EventStore.replay_key(ctx.workflow_id)
@@ -52,21 +52,36 @@ mod Conduit.WorkflowContext do
       None    ->
         -- 2. DB lookup
         match Conduit.Storage.checkpoint_get(storage, ctx.workflow_id, full_name) do
-          Err(e)      -> Err(Conduit.WorkflowError.StorageError(e))
+          Err(e)      -> Err(StorageError(e))
           Ok(Some(v)) ->
             pvault_set(ctx.checkpoint_key, full_name, v)
             Ok(v)
           Ok(None) ->
-            -- 3. Execute
-            let started = DateTime.now()
-            let value   = f()
-            let dur_ms  = (DateTime.now() - started) * 1000
-            -- 4. Persist
-            match Conduit.Storage.checkpoint_set(storage, ctx.workflow_id, full_name, value, dur_ms) do
-              Err(e) -> Err(Conduit.WorkflowError.StorageError(e))
-              Ok(_) ->
-                pvault_set(ctx.checkpoint_key, full_name, value)
-                Ok(value)
+            -- Atomically claim the key before executing. The "__in_progress__"
+            -- sentinel prevents two concurrent resumes from both executing f().
+            if Vault.put_new(ctx.checkpoint_key, full_name, "__in_progress__") do
+              let started = DateTime.now()
+              let value   = f()
+              let dur_ms  = (DateTime.now() - started) * 1000
+              match Conduit.Storage.checkpoint_set(storage, ctx.workflow_id, full_name, value, dur_ms) do
+                Err(e) ->
+                  Vault.drop(ctx.checkpoint_key, full_name)
+                  Err(StorageError(e))
+                Ok(_) ->
+                  pvault_set(ctx.checkpoint_key, full_name, value)
+                  Ok(value)
+              end
+            else
+              -- Another task holds the claim; re-read the sentinel.
+              match pvault_get(ctx.checkpoint_key, full_name) do
+                Some(v) ->
+                  if v == "__in_progress__" do
+                    Err(StorageError("checkpoint '" ++ full_name ++ "' is already executing"))
+                  else
+                    Ok(v)
+                  end
+                None -> Err(StorageError("checkpoint '" ++ full_name ++ "' claim lost"))
+              end
             end
         end
     end
@@ -80,7 +95,7 @@ mod Conduit.WorkflowContext do
       -- Replay: read recorded event, advance cursor, return value.
       let event_payload = Vault.get(replay_key, "event:" ++ int_to_string(cursor)) |> unwrap_or("{}")
       let value = Conduit.EventStore.extract_value(event_payload)
-      Vault.set(replay_key, "cursor", cursor + 1)
+      let _ = Vault.incr(replay_key, "cursor", 1)
       -- Also populate the normal checkpoint cache so subsequent non-replay reads work.
       pvault_set(ctx.checkpoint_key, full_name, value)
       Ok(value)
@@ -92,16 +107,16 @@ mod Conduit.WorkflowContext do
       let next_seq = Vault.get(replay_key, "next_seq") |> unwrap_or(cursor)
       let event_payload = Conduit.EventStore.checkpoint_payload(full_name, value, dur_ms)
       match Conduit.EventStore.append(storage, ctx.workflow_id, next_seq, "checkpoint", event_payload) do
-        Err(e) -> Err(Conduit.WorkflowError.StorageError(e))
+        Err(e) -> Err(StorageError(e))
         Ok(_)  ->
           -- Cache the event in Vault for potential later replay access.
           Vault.set(replay_key, "event:" ++ int_to_string(next_seq), event_payload)
-          Vault.set(replay_key, "cursor", cursor + 1)
-          Vault.set(replay_key, "next_seq", next_seq + 1)
-          Vault.set(replay_key, "event_count", event_count + 1)
+          let _ = Vault.incr(replay_key, "cursor",      1)
+          let _ = Vault.incr(replay_key, "next_seq",    1)
+          let _ = Vault.incr(replay_key, "event_count", 1)
           -- Also populate normal checkpoint cache + DB.
           match Conduit.Storage.checkpoint_set(storage, ctx.workflow_id, full_name, value, dur_ms) do
-            Err(e) -> Err(Conduit.WorkflowError.StorageError(e))
+            Err(e) -> Err(StorageError(e))
             Ok(_) ->
               pvault_set(ctx.checkpoint_key, full_name, value)
               Ok(value)

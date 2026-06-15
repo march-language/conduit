@@ -9,8 +9,8 @@
 -- with march stdlib types (Backoff, QuantileMethod) that share the plain names.
 --
 -- Public API:
---   Conduit.Backoff.exponential   — value alias for ConduitExponential
---   Conduit.Backoff.fibonacci     — value alias for ConduitFibonacci
+--   Conduit.Backoff.exponential()   — value alias for ConduitExponential
+--   Conduit.Backoff.fibonacci()     — value alias for ConduitFibonacci
 --   Conduit.Backoff.linear_strat() — function returning ConduitLinear
 --                                    (named `linear_strat` because `linear` is
 --                                     a reserved March keyword)
@@ -31,10 +31,10 @@ mod Conduit.Backoff do
   let max_delay_ms = 86400000
 
   -- ── Public strategy constants ──────────────────────────────────────────────
-  -- Use these in job config: `backoff = Conduit.Backoff.exponential`
+  -- Use these in job config: `backoff = Conduit.Backoff.exponential()`
 
-  let exponential = ConduitExponential
-  let fibonacci   = ConduitFibonacci
+  fn exponential() do ConduitExponential end
+  fn fibonacci() do ConduitFibonacci end
 
   -- `linear` is a reserved March keyword, so we cannot expose a `let linear`
   -- or `fn linear` binding.  Use `linear_strat()` instead.

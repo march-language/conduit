@@ -90,6 +90,7 @@ mod Conduit.CronParser do
           (_, _, Err(e), _, _) -> Err("dom: "    ++ e)
           (_, _, _, Err(e), _) -> Err("month: "  ++ e)
           (_, _, _, _, Err(e)) -> Err("dow: "    ++ e)
+          _ -> Err("invalid cron field")
         end
       _ ->
         Err("cron expression must have exactly 5 fields, got: " ++ s)
