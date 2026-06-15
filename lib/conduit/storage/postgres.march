@@ -17,9 +17,13 @@
 --     Read and write go through the same conversion, so ordering is consistent.
 --   • List columns (errors, tags) are stored as a JSON array of strings in a
 --     TEXT column, encoded/decoded by pencode_str_list / pdecode_str_list.
---   • Every operation opens its own connection (pwith_conn).  Connection
---     pooling is a follow-up — swapping pwith_conn for depot's Pool is the only
---     change required.
+--   • Data-path operations connect per operation (pwith_conn). Pooling via
+--     depot's Pool is blocked in compiled builds (imported module-actor spawn
+--     glue is not emitted); the seam is kept so a pool drops in later.
+--   • Advisory locks (cron scheduler, leader election) run on a dedicated
+--     persistent connection per lock id (pwith_lock_conn) — session-scoped
+--     locks must outlive a single operation — giving real cross-node mutual
+--     exclusion, not just single-node.
 --
 -- Schema: priv/migrations/001_conduit_schema.sql
 mod Conduit.Storage.Postgres do
@@ -55,7 +59,22 @@ mod Conduit.Storage.Postgres do
       database = self.database, password = self.password }
   end
 
-  -- Open a connection, run `f(conn)`, close, and return f's Result.
+  -- Identifies a unique backing database (one pool per host/port/db/user).
+  pfn psig(self : Store) : String do
+    self.host ++ ":" ++ int_to_string(self.port) ++ "/" ++ self.database ++ "@" ++ self.user
+  end
+
+  -- ── Data-path connections ────────────────────────────────────
+  -- Open a connection, run f, close, return f's Result.
+  --
+  -- NOTE: this is connect-per-operation. Pooling via depot's Pool is blocked in
+  -- compiled builds: Pool is a module-actor spawned with `spawn(Pool)`, and the
+  -- actor-spawn glue (`_Pool_spawn`) is not emitted for an actor imported from a
+  -- dependency (depot's own tests run under the interpreter, so this path is
+  -- never compiled by a consumer). Routed through pwith_conn so a pool — or a
+  -- fix to cross-package actor-spawn codegen — drops in here with no other
+  -- changes. Advisory locks below already use persistent connections, which is
+  -- the correctness half of pooling.
   pfn pwith_conn(self : Store, f) do
     match Connection.connect(pconn_config(self)) do
       Err(e)   -> Err("connect: " ++ e)
@@ -63,6 +82,55 @@ mod Conduit.Storage.Postgres do
         let result = f(conn)
         let _ = Connection.close(conn)
         result
+    end
+  end
+
+  -- ── Dedicated lock connections (advisory locks) ──────────────
+  -- Postgres advisory locks are SESSION-scoped, so they must be held on a
+  -- connection that is never returned to the pool or closed.  We keep one
+  -- persistent connection per (signature, lock_id) in a process-wide Vault.
+  -- Distinct lock ids get distinct connections, so the cron-scheduler task and
+  -- the leader-election task never share an fd (no protocol interleaving).
+  -- This is what makes cross-node mutual exclusion (cron) and leader election
+  -- actually correct, not just single-node.
+
+  pfn plock_table() do
+    match Vault.whereis("conduit_pg_lockconns") do
+      Some(t) -> t
+      None    -> Vault.new("conduit_pg_lockconns")
+    end
+  end
+
+  pfn plock_key(self : Store, lock_id : Int) : String do
+    psig(self) ++ ":" ++ int_to_string(lock_id)
+  end
+
+  -- Run f on the persistent lock connection for lock_id. On error the
+  -- connection is assumed broken: close + drop it so the next call reconnects.
+  pfn pwith_lock_conn(self : Store, lock_id : Int, f) do
+    let tbl = plock_table()
+    let key = plock_key(self, lock_id)
+    let conn_res = match Vault.get(tbl, key) do
+      Some(c) -> Ok(c)
+      None    ->
+        match Connection.connect(pconn_config(self)) do
+          Err(e)   -> Err("lock connect: " ++ e)
+          Ok(conn) ->
+            Vault.set(tbl, key, conn)
+            Ok(conn)
+        end
+    end
+    match conn_res do
+      Err(e)   -> Err(e)
+      Ok(conn) ->
+        let result = f(conn)
+        match result do
+          Err(_) ->
+            let _ = Connection.close(conn)
+            let _ = Vault.drop(tbl, key)
+            result
+          Ok(_) -> result
+        end
     end
   end
 
@@ -603,13 +671,11 @@ mod Conduit.Storage.Postgres do
       pexec(self, "DELETE FROM conduit_cron_schedules WHERE id = $1", [ParamText(id)])
     end
 
-    -- NOTE: Postgres advisory locks are session-scoped. With connection-per-
-    -- operation the lock is released as soon as this connection closes, so this
-    -- does NOT provide cross-node mutual exclusion yet — that needs a pinned/
-    -- pooled connection held across the scheduler tick (roadmap T0.3). Single-
-    -- node scheduling is unaffected (the leader check still serialises locally).
+    -- Held on a dedicated persistent connection (pwith_lock_conn) so the lock
+    -- survives across calls and is visible to other nodes — real cross-node
+    -- mutual exclusion for the cron scheduler tick.
     fn cron_advisory_lock(self : Store, lock_id : Int) : Result(Bool, String) do
-      pwith_conn(self, fn conn ->
+      pwith_lock_conn(self, lock_id, fn conn ->
         match Connection.exec_prepared(conn, "SELECT pg_try_advisory_lock($1)", [ParamText(int_to_string(lock_id))]) do
           Err(e)  -> Err("cron_advisory_lock: " ++ e)
           Ok(res) ->
@@ -621,7 +687,7 @@ mod Conduit.Storage.Postgres do
     end
 
     fn cron_advisory_unlock(self : Store, lock_id : Int) : Result((), String) do
-      pwith_conn(self, fn conn ->
+      pwith_lock_conn(self, lock_id, fn conn ->
         match Connection.exec_prepared(conn, "SELECT pg_advisory_unlock($1)", [ParamText(int_to_string(lock_id))]) do
           Err(e) -> Err("cron_advisory_unlock: " ++ e)
           Ok(_)  -> Ok(())
@@ -686,12 +752,11 @@ mod Conduit.Storage.Postgres do
         end)
     end
 
-    -- NOTE: like cron's advisory lock, leader election via pg advisory locks
-    -- needs a persistent/pooled connection to hold the lock across the node's
-    -- lifetime. With connection-per-operation the lock is released on close, so
-    -- this is single-node-correct only until T0.3.
+    -- The leader holds this lock for its whole lifetime on a dedicated
+    -- persistent connection: the first node to acquire stays leader; others get
+    -- false until it releases (or its connection dies). Real leader election.
     fn node_try_leader_lock(self : Store, lock_id : Int) : Result(Bool, String) do
-      pwith_conn(self, fn conn ->
+      pwith_lock_conn(self, lock_id, fn conn ->
         match Connection.exec_prepared(conn, "SELECT pg_try_advisory_lock($1)", [ParamText(int_to_string(lock_id))]) do
           Err(e)  -> Err("node_try_leader_lock: " ++ e)
           Ok(res) ->
@@ -703,7 +768,7 @@ mod Conduit.Storage.Postgres do
     end
 
     fn node_release_leader_lock(self : Store, lock_id : Int) : Result((), String) do
-      pwith_conn(self, fn conn ->
+      pwith_lock_conn(self, lock_id, fn conn ->
         match Connection.exec_prepared(conn, "SELECT pg_advisory_unlock($1)", [ParamText(int_to_string(lock_id))]) do
           Err(e) -> Err("node_release_leader_lock: " ++ e)
           Ok(_)  -> Ok(())
