@@ -24,7 +24,7 @@ mod ConduitPostgresLiveTest do
                                database = "conduit_test", password = None }) do
       Err(e)   -> Err(e)
       Ok(conn) ->
-        let _ = Connection.simple_query(conn, "TRUNCATE conduit_jobs, conduit_dead_letters, conduit_cron_schedules, conduit_workflows, conduit_checkpoints, conduit_workflow_signals, conduit_workers CASCADE")
+        let _ = Connection.simple_query(conn, "TRUNCATE conduit_jobs, conduit_dead_letters, conduit_cron_schedules, conduit_workflows, conduit_checkpoints, conduit_workflow_signals, conduit_workers, conduit_rate_limit_buckets CASCADE")
         let _ = Connection.close(conn)
         Ok(())
     end
@@ -85,6 +85,17 @@ mod ConduitPostgresLiveTest do
       started_at = DateTime.from_timestamp(DateTime.now()),
       last_seen_at = DateTime.from_timestamp(DateTime.now() + last_seen_offset),
       status = "running"
+    }
+  end
+
+  -- Build a DeadLetter for an existing job.
+  pfn pmk_dl(id : String, job_id : String) : Conduit.DeadLetter do
+    {
+      id = id, job_id = job_id, queue = "default", job_type = "TestJob",
+      payload = "{}", errors = Cons("boom", Nil), attempts = 3,
+      first_attempted_at = None, last_attempted_at = None,
+      discarded_at = DateTime.from_timestamp(DateTime.now()),
+      reviewed = false, reviewed_by = None, reviewed_at = None, retry_count = 0
     }
   end
 
@@ -606,6 +617,217 @@ mod ConduitPostgresLiveTest do
               Err(e) -> Test.assert_true(false, "release errored: " ++ e)
             end
           _ -> Test.assert_true(false, "expected to acquire the leader lock")
+        end
+    end
+  end
+
+  -- ── Dashboard queries ──────────────────────────────────────────
+
+  test "postgres: dashboard_queue_summary aggregates per queue" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.enqueue(store, pmk_job("s1", "email", 0, 0))
+        let _ = Conduit.Storage.enqueue(store, pmk_job("s2", "email", 0, 0))
+        match Conduit.Storage.dashboard_queue_summary(store) do
+          Err(e)  -> Test.assert_true(false, "dashboard_queue_summary errored: " ++ e)
+          Ok(sum) ->
+            match sum do
+              Cons(q, _) ->
+                Test.assert_eq_str(q.queue, "email", "queue name")
+                Test.assert_eq_int(q.pending, 2, "two pending")
+              Nil -> Test.assert_true(false, "expected one queue summary")
+            end
+        end
+    end
+  end
+
+  test "postgres: dashboard_jobs_list filters by queue and paginates" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.enqueue(store, pmk_job("a1", "q1", 0, 0))
+        let _ = Conduit.Storage.enqueue(store, pmk_job("a2", "q1", 0, 0))
+        let _ = Conduit.Storage.enqueue(store, pmk_job("b1", "q2", 0, 0))
+        match Conduit.Storage.dashboard_jobs_list(store, "q1", "", 0) do
+          Ok(jobs) -> Test.assert_eq_int(List.length(jobs), 2, "two jobs in q1")
+          Err(e)   -> Test.assert_true(false, "dashboard_jobs_list errored: " ++ e)
+        end
+    end
+  end
+
+  test "postgres: dashboard_job_by_id returns the job without claiming it" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.enqueue(store, pmk_job("byid", "default", 0, 0))
+        match Conduit.Storage.dashboard_job_by_id(store, "byid") do
+          Ok(Some(j)) -> Test.assert_eq_str(j.status, "pending", "still pending (not claimed)")
+          _           -> Test.assert_true(false, "expected the job by id")
+        end
+    end
+  end
+
+  test "postgres: dashboard_crons_list returns all schedules" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.cron_upsert(store, pmk_cron("c1", 0))
+        let _ = Conduit.Storage.cron_upsert(store, pmk_cron("c2", 3600))
+        match Conduit.Storage.dashboard_crons_list(store) do
+          Ok(cs) -> Test.assert_eq_int(List.length(cs), 2, "two crons (incl. future)")
+          Err(e) -> Test.assert_true(false, "dashboard_crons_list errored: " ++ e)
+        end
+    end
+  end
+
+  test "postgres: dashboard_workflows_list filters by status" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.workflow_insert(store, pmk_workflow("w1"))
+        let _ = Conduit.Storage.workflow_insert(store, pmk_workflow("w2"))
+        let _ = Conduit.Storage.workflow_update_status(store, "w2", "completed", None, None)
+        match Conduit.Storage.dashboard_workflows_list(store, "running", 0) do
+          Ok(ws) -> Test.assert_eq_int(List.length(ws), 1, "one running workflow")
+          Err(e) -> Test.assert_true(false, "dashboard_workflows_list errored: " ++ e)
+        end
+    end
+  end
+
+  -- ── Dead letters & job admin ───────────────────────────────────
+
+  test "postgres: dead_letter list/load/delete round-trip" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.enqueue(store, pmk_job("dj", "default", 0, 0))
+        let _ = Conduit.Storage.move_to_dead_letter(store, pmk_dl("dl1", "dj"))
+        match Conduit.Storage.dead_letter_list(store, 0) do
+          Ok(Cons(d, Nil)) -> Test.assert_eq_str(d.id, "dl1", "listed")
+          _                -> Test.assert_true(false, "expected one dead letter")
+        end
+        match Conduit.Storage.dead_letter_load(store, "dl1") do
+          Ok(Some(d)) -> Test.assert_eq_str(d.job_id, "dj", "loaded by id")
+          _           -> Test.assert_true(false, "expected to load the dead letter")
+        end
+        let _ = Conduit.Storage.dead_letter_delete(store, "dl1")
+        match Conduit.Storage.dead_letter_load(store, "dl1") do
+          Ok(None) -> Test.assert_true(true, "")
+          _        -> Test.assert_true(false, "deleted dead letter should be gone")
+        end
+    end
+  end
+
+  test "postgres: dead_letter_delete_all clears the table" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.enqueue(store, pmk_job("d1", "default", 0, 0))
+        let _ = Conduit.Storage.enqueue(store, pmk_job("d2", "default", 0, 0))
+        let _ = Conduit.Storage.move_to_dead_letter(store, pmk_dl("x1", "d1"))
+        let _ = Conduit.Storage.move_to_dead_letter(store, pmk_dl("x2", "d2"))
+        match Conduit.Storage.dead_letter_delete_all(store) do
+          Ok(n)  -> Test.assert_eq_int(n, 2, "deleted both")
+          Err(e) -> Test.assert_true(false, "dead_letter_delete_all errored: " ++ e)
+        end
+    end
+  end
+
+  test "postgres: job_retry resets a dead job to runnable" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.enqueue(store, pmk_job("r1", "default", 0, 0))
+        let _ = Conduit.Storage.discard(store, "r1", "nope")
+        let _ = Conduit.Storage.job_retry(store, "r1")
+        match Conduit.Storage.fetch_next(store, "default") do
+          Ok(Some(j)) -> Test.assert_eq_str(j.id, "r1", "retried job is runnable")
+          _           -> Test.assert_true(false, "expected the retried job")
+        end
+    end
+  end
+
+  test "postgres: job_delete removes the row" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.enqueue(store, pmk_job("del", "default", 0, 0))
+        let _ = Conduit.Storage.job_delete(store, "del")
+        match Conduit.Storage.dashboard_job_by_id(store, "del") do
+          Ok(None) -> Test.assert_true(true, "")
+          _        -> Test.assert_true(false, "deleted job should be gone")
+        end
+    end
+  end
+
+  -- ── Rate limiting & unique jobs ─────────────────────────────────
+
+  test "postgres: rate_limit_acquire allows up to the rate then denies" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let a1 = Conduit.Storage.rate_limit_acquire(store, "k", 2)
+        let a2 = Conduit.Storage.rate_limit_acquire(store, "k", 2)
+        let a3 = Conduit.Storage.rate_limit_acquire(store, "k", 2)
+        match (a1, a2, a3) do
+          (Ok(true), Ok(true), Ok(false)) -> Test.assert_true(true, "")
+          _ -> Test.assert_true(false, "expected allow, allow, deny within the same second")
+        end
+    end
+  end
+
+  test "postgres: unique_check / unique_release" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let base = pmk_job("u1", "default", 0, 0)
+        let _ = Conduit.Storage.enqueue(store, { base with unique_key = Some("fp-1") })
+        match Conduit.Storage.unique_check(store, "fp-1") do
+          Ok(true) ->
+            let _ = Conduit.Storage.unique_release(store, "u1")
+            match Conduit.Storage.unique_check(store, "fp-1") do
+              Ok(false) -> Test.assert_true(true, "")
+              _         -> Test.assert_true(false, "released key should be free")
+            end
+          _ -> Test.assert_true(false, "active unique key should be taken")
+        end
+    end
+  end
+
+  -- ── Event store ─────────────────────────────────────────────────
+
+  test "postgres: event_append + load + count + load_up_to" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.workflow_insert(store, pmk_workflow("wfe"))
+        let _ = Conduit.Storage.event_append(store, "wfe", 0, "checkpoint", "{\"v\":1}")
+        let _ = Conduit.Storage.event_append(store, "wfe", 1, "checkpoint", "{\"v\":2}")
+        let _ = Conduit.Storage.event_append(store, "wfe", 2, "checkpoint", "{\"v\":3}")
+        match Conduit.Storage.event_count(store, "wfe") do
+          Ok(n)  -> Test.assert_eq_int(n, 3, "three events")
+          Err(e) -> Test.assert_true(false, "event_count errored: " ++ e)
+        end
+        match Conduit.Storage.event_load_all(store, "wfe") do
+          Ok(evs) -> Test.assert_eq_int(List.length(evs), 3, "loaded all three")
+          Err(e)  -> Test.assert_true(false, "event_load_all errored: " ++ e)
+        end
+        match Conduit.Storage.event_load_up_to(store, "wfe", 1) do
+          Ok(evs) -> Test.assert_eq_int(List.length(evs), 2, "loaded up to sequence 1")
+          Err(e)  -> Test.assert_true(false, "event_load_up_to errored: " ++ e)
         end
     end
   end
