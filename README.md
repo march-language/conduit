@@ -201,13 +201,12 @@ Then visit `http://localhost:3000` to see:
 ## Project Structure
 
 ```
+lib/conduit.march            # Public API + Job and Storage interfaces (Conduit.enqueue, register, start_workflow, …)
 lib/conduit/
-  ├── api.march              # Conduit.API.start, register, enqueue, start_workflow, etc
+  ├── api.march              # Conduit.API.start — boots workers + node + cron scheduler
   ├── backoff.march          # Retry strategies (Linear, Exponential, Fibonacci, Custom)
   ├── config.march           # JobConfig and Config defaults
-  ├── job.march              # Job interface
-  ├── storage.march          # Storage interface (implement for your backend)
-  ├── storage/postgres.march # Postgres implementation (recommended)
+  ├── storage/postgres.march # Postgres Storage implementation (recommended)
   ├── queue.march            # Queue operations and performer registry
   ├── worker.march           # Task-based worker pool with heartbeat
   ├── cron.march             # Cron job definition

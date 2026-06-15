@@ -50,13 +50,11 @@ All source files use the `.march` extension. **Always read `.claude/skills/march
 
 | File | Purpose |
 |------|---------|
-| `lib/conduit.march` | Public API: `start`, `enqueue`, `enqueue_in`, `register`, `start_workflow`, `cancel_workflow`, `cluster_leader` |
-| `lib/conduit/error.march` | `ConduitError` type |
+| `lib/conduit.march` | Public API (`start`, `enqueue`, `enqueue_in`, `register`, `start_workflow`, `cancel_workflow`, `cluster_leader`) + `ConduitError` type + `Job` / `Storage` interface definitions |
 | `lib/conduit/backoff.march` | `Conduit.Backoff` type + `delay/2` |
 | `lib/conduit/config.march` | `Conduit.JobConfig`, `Conduit.Config`, defaults |
 | `lib/conduit/schema.march` | `Conduit.Schema` — optional arg validation |
-| `lib/conduit/job.march` | `Conduit.Job` interface |
-| `lib/conduit/storage.march` | `Conduit.Storage` interface (Postgres + VaultStore impls) |
+| `lib/conduit/storage/postgres.march` | `Conduit.Storage` Postgres implementation |
 | `lib/conduit/queue.march` | Queue ops + performer registry |
 | `lib/conduit/worker.march` | Task-based worker pool with heartbeat + rescue |
 | `lib/conduit/node.march` | Multi-node cluster registration + leader election |
