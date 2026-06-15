@@ -24,7 +24,7 @@ mod ConduitPostgresLiveTest do
                                database = "conduit_test", password = None }) do
       Err(e)   -> Err(e)
       Ok(conn) ->
-        let _ = Connection.simple_query(conn, "TRUNCATE conduit_jobs, conduit_dead_letters, conduit_cron_schedules")
+        let _ = Connection.simple_query(conn, "TRUNCATE conduit_jobs, conduit_dead_letters, conduit_cron_schedules, conduit_workflows, conduit_checkpoints, conduit_workflow_signals CASCADE")
         let _ = Connection.close(conn)
         Ok(())
     end
@@ -54,6 +54,26 @@ mod ConduitPostgresLiveTest do
       last_run_at = None, last_job_id = None,
       next_run_at = Some(DateTime.from_timestamp(DateTime.now() + next_offset)),
       tags = Nil, jitter_ms = None
+    }
+  end
+
+  -- Build a running WorkflowRow.
+  pfn pmk_workflow(id : String) : Conduit.WorkflowRow do
+    {
+      id = id, workflow_type = "TestWf", parent_id = None, input = "{}",
+      output = None, status = "running",
+      started_at = DateTime.from_timestamp(DateTime.now()),
+      completed_at = None, timeout_at = None, error = None, error_at = None,
+      tags = Nil, meta = "{}"
+    }
+  end
+
+  -- Build a pending WorkflowSignal for an existing workflow.
+  pfn pmk_signal(wf_id : String, stype : String) : Conduit.WorkflowSignal do
+    {
+      id = 0, workflow_id = wf_id, signal_type = stype, payload = "{}",
+      status = "pending", sent_at = DateTime.from_timestamp(DateTime.now()),
+      delivered_at = None, expires_at = None, sent_by = None
     }
   end
 
@@ -341,6 +361,148 @@ mod ConduitPostgresLiveTest do
               Err(e) -> Test.assert_true(false, "unlock errored: " ++ e)
             end
           _ -> Test.assert_true(false, "expected to acquire the advisory lock")
+        end
+    end
+  end
+
+  -- ── Workflows / checkpoints / signals ──────────────────────────
+
+  test "postgres: workflow_insert then workflow_load round-trips" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.workflow_insert(store, pmk_workflow("wf1"))
+        match Conduit.Storage.workflow_load(store, "wf1") do
+          Err(e)      -> Test.assert_true(false, "workflow_load errored: " ++ e)
+          Ok(None)    -> Test.assert_true(false, "expected the workflow, got None")
+          Ok(Some(w)) ->
+            Test.assert_eq_str(w.id, "wf1", "id round-trips")
+            Test.assert_eq_str(w.workflow_type, "TestWf", "type round-trips")
+            Test.assert_eq_str(w.status, "running", "status round-trips")
+        end
+    end
+  end
+
+  test "postgres: workflow_status_get returns status, None for missing" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.workflow_insert(store, pmk_workflow("wf2"))
+        match Conduit.Storage.workflow_status_get(store, "wf2") do
+          Ok(Some(s)) -> Test.assert_eq_str(s, "running", "status")
+          _           -> Test.assert_true(false, "expected a status")
+        end
+        match Conduit.Storage.workflow_status_get(store, "nope") do
+          Ok(None) -> Test.assert_true(true, "")
+          _        -> Test.assert_true(false, "missing workflow should be None")
+        end
+    end
+  end
+
+  test "postgres: workflow_update_status sets terminal status + output" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.workflow_insert(store, pmk_workflow("wf3"))
+        let _ = Conduit.Storage.workflow_update_status(store, "wf3", "completed", Some("\"result\""), None)
+        match Conduit.Storage.workflow_load(store, "wf3") do
+          Ok(Some(w)) ->
+            Test.assert_eq_str(w.status, "completed", "status updated")
+            Test.assert_true(Option.is_some(w.output), "output recorded")
+            Test.assert_true(Option.is_some(w.completed_at), "completed_at set")
+          _ -> Test.assert_true(false, "expected the workflow")
+        end
+    end
+  end
+
+  test "postgres: workflow_cancel cancels a running workflow with reason" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.workflow_insert(store, pmk_workflow("wf4"))
+        let _ = Conduit.Storage.workflow_cancel(store, "wf4", "user requested")
+        match Conduit.Storage.workflow_load(store, "wf4") do
+          Ok(Some(w)) ->
+            Test.assert_eq_str(w.status, "cancelled", "status cancelled")
+            Test.assert_true(Option.is_some(w.error), "cancel reason recorded")
+          _ -> Test.assert_true(false, "expected the workflow")
+        end
+    end
+  end
+
+  test "postgres: workflow_list_all returns inserted workflows" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.workflow_insert(store, pmk_workflow("a"))
+        let _ = Conduit.Storage.workflow_insert(store, pmk_workflow("b"))
+        match Conduit.Storage.workflow_list_all(store) do
+          Ok(ws) -> Test.assert_eq_int(List.length(ws), 2, "two workflows listed")
+          Err(e) -> Test.assert_true(false, "workflow_list_all errored: " ++ e)
+        end
+    end
+  end
+
+  test "postgres: checkpoint_set then checkpoint_get round-trips and is first-write-wins" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.workflow_insert(store, pmk_workflow("wfc"))
+        let _ = Conduit.Storage.checkpoint_set(store, "wfc", "step1", "\"v1\"", 5)
+        -- second set with a different value must NOT overwrite (immutable checkpoint)
+        let _ = Conduit.Storage.checkpoint_set(store, "wfc", "step1", "\"v2\"", 9)
+        match Conduit.Storage.checkpoint_get(store, "wfc", "step1") do
+          Ok(Some(v)) -> Test.assert_eq_str(v, "\"v1\"", "first write wins")
+          _           -> Test.assert_true(false, "expected the checkpoint value")
+        end
+        match Conduit.Storage.checkpoint_get(store, "wfc", "absent") do
+          Ok(None) -> Test.assert_true(true, "")
+          _        -> Test.assert_true(false, "missing checkpoint should be None")
+        end
+    end
+  end
+
+  test "postgres: checkpoint_load_all returns all checkpoints for a workflow" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.workflow_insert(store, pmk_workflow("wfd"))
+        let _ = Conduit.Storage.checkpoint_set(store, "wfd", "s1", "\"a\"", 1)
+        let _ = Conduit.Storage.checkpoint_set(store, "wfd", "s2", "\"b\"", 2)
+        match Conduit.Storage.checkpoint_load_all(store, "wfd") do
+          Ok(cps) -> Test.assert_eq_int(List.length(cps), 2, "two checkpoints")
+          Err(e)  -> Test.assert_true(false, "checkpoint_load_all errored: " ++ e)
+        end
+    end
+  end
+
+  test "postgres: signal_insert + signal_peek + signal_mark_delivered" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let _ = Conduit.Storage.workflow_insert(store, pmk_workflow("wfs"))
+        match Conduit.Storage.signal_insert(store, pmk_signal("wfs", "approval")) do
+          Err(e) -> Test.assert_true(false, "signal_insert errored: " ++ e)
+          Ok(id) ->
+            Test.assert_true(id > 0, "returns a generated id")
+            match Conduit.Storage.signal_peek(store, "wfs", "approval") do
+              Ok(Some(s)) ->
+                Test.assert_eq_str(s.signal_type, "approval", "peek finds pending signal")
+                let _ = Conduit.Storage.signal_mark_delivered(store, s.id)
+                match Conduit.Storage.signal_peek(store, "wfs", "approval") do
+                  Ok(None) -> Test.assert_true(true, "delivered signal no longer pending")
+                  _        -> Test.assert_true(false, "signal should be delivered now")
+                end
+              _ -> Test.assert_true(false, "expected a pending signal")
+            end
         end
     end
   end

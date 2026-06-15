@@ -265,6 +265,64 @@ mod Conduit.Storage.Postgres do
     }
   end
 
+  -- conduit_workflows
+  pfn pwf_cols() : String do
+    "id, workflow_type, parent_id, input, output, status, started_at, completed_at, timeout_at, error, error_at, tags, meta"
+  end
+
+  pfn pdecode_workflow(cells : List(Option(String))) : Conduit.WorkflowRow do
+    {
+      id            = preq_str(pcell(cells, 0)),
+      workflow_type = preq_str(pcell(cells, 1)),
+      parent_id     = pcell(cells, 2),
+      input         = preq_str(pcell(cells, 3)),
+      output        = pcell(cells, 4),
+      status        = preq_str(pcell(cells, 5)),
+      started_at    = preq_ts(pcell(cells, 6)),
+      completed_at  = popt_ts_dec(pcell(cells, 7)),
+      timeout_at    = popt_ts_dec(pcell(cells, 8)),
+      error         = pcell(cells, 9),
+      error_at      = popt_ts_dec(pcell(cells, 10)),
+      tags          = pdecode_str_list(preq_str(pcell(cells, 11))),
+      meta          = preq_str(pcell(cells, 12))
+    }
+  end
+
+  -- conduit_checkpoints
+  pfn pcp_cols() : String do
+    "id, workflow_id, name, value, created_at, duration_ms"
+  end
+
+  pfn pdecode_checkpoint(cells : List(Option(String))) : Conduit.WorkflowCheckpoint do
+    {
+      id          = preq_int(pcell(cells, 0)),
+      workflow_id = preq_str(pcell(cells, 1)),
+      name        = preq_str(pcell(cells, 2)),
+      value       = preq_str(pcell(cells, 3)),
+      created_at  = preq_ts(pcell(cells, 4)),
+      duration_ms = popt_int_dec(pcell(cells, 5))
+    }
+  end
+
+  -- conduit_workflow_signals
+  pfn psig_cols() : String do
+    "id, workflow_id, signal_type, payload, status, sent_at, delivered_at, expires_at, sent_by"
+  end
+
+  pfn pdecode_signal(cells : List(Option(String))) : Conduit.WorkflowSignal do
+    {
+      id           = preq_int(pcell(cells, 0)),
+      workflow_id  = preq_str(pcell(cells, 1)),
+      signal_type  = preq_str(pcell(cells, 2)),
+      payload      = preq_str(pcell(cells, 3)),
+      status       = preq_str(pcell(cells, 4)),
+      sent_at      = preq_ts(pcell(cells, 5)),
+      delivered_at = popt_ts_dec(pcell(cells, 6)),
+      expires_at   = popt_ts_dec(pcell(cells, 7)),
+      sent_by      = pcell(cells, 8)
+    }
+  end
+
   -- Dead-letter INSERT helpers.
   pfn pdl_insert_sql() : String do
     "INSERT INTO conduit_dead_letters (id, job_id, queue, job_type, payload, errors, attempts, first_attempted_at, last_attempted_at, discarded_at, reviewed, reviewed_by, reviewed_at, retry_count) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)"
@@ -510,19 +568,149 @@ mod Conduit.Storage.Postgres do
     fn node_try_leader_lock(_self, _a) do pnot_impl("node_try_leader_lock") end
     fn node_release_leader_lock(_self, _a) do pnot_impl("node_release_leader_lock") end
 
-    -- ── Workflows & checkpoints (not yet implemented) ────────────
-    fn workflow_insert(_self, _a) do pnot_impl("workflow_insert") end
-    fn workflow_load(_self, _a) do pnot_impl("workflow_load") end
-    fn workflow_list_all(_self) do pnot_impl("workflow_list_all") end
-    fn workflow_status_get(_self, _a) do pnot_impl("workflow_status_get") end
-    fn workflow_update_status(_self, _a, _b, _c, _d) do pnot_impl("workflow_update_status") end
-    fn workflow_cancel(_self, _a, _b) do pnot_impl("workflow_cancel") end
-    fn checkpoint_get(_self, _a, _b) do pnot_impl("checkpoint_get") end
-    fn checkpoint_set(_self, _a, _b, _c, _d) do pnot_impl("checkpoint_set") end
-    fn checkpoint_load_all(_self, _a) do pnot_impl("checkpoint_load_all") end
-    fn signal_insert(_self, _a) do pnot_impl("signal_insert") end
-    fn signal_peek(_self, _a, _b) do pnot_impl("signal_peek") end
-    fn signal_mark_delivered(_self, _a) do pnot_impl("signal_mark_delivered") end
+    -- ── Workflows ────────────────────────────────────────────────
+
+    fn workflow_insert(self : Store, row) : Result(String, String) do
+      let sql = "INSERT INTO conduit_workflows (" ++ pwf_cols() ++ ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)"
+      let params = [
+        ParamText(row.id),
+        ParamText(row.workflow_type),
+        popt_txt(row.parent_id),
+        ParamText(row.input),
+        popt_txt(row.output),
+        ParamText(row.status),
+        ptxt_ts(row.started_at),
+        popt_ts(row.completed_at),
+        popt_ts(row.timeout_at),
+        popt_txt(row.error),
+        popt_ts(row.error_at),
+        ParamText(pencode_str_list(row.tags)),
+        ParamText(row.meta)
+      ]
+      pwith_conn(self, fn conn ->
+        match Connection.exec_prepared(conn, sql, params) do
+          Err(e) -> Err("workflow_insert: " ++ e)
+          Ok(_)  -> Ok(row.id)
+        end)
+    end
+
+    fn workflow_load(self : Store, id : String) : Result(Option(Conduit.WorkflowRow), String) do
+      pwith_conn(self, fn conn ->
+        match Connection.exec_prepared(conn, "SELECT " ++ pwf_cols() ++ " FROM conduit_workflows WHERE id = $1", [ParamText(id)]) do
+          Err(e)  -> Err("workflow_load: " ++ e)
+          Ok(res) ->
+            match res.rows do
+              Nil          -> Ok(None)
+              Cons(row, _) -> Ok(Some(pdecode_workflow(row)))
+            end
+        end)
+    end
+
+    fn workflow_list_all(self : Store) : Result(List(Conduit.WorkflowRow), String) do
+      pwith_conn(self, fn conn ->
+        match Connection.exec_prepared(conn, "SELECT " ++ pwf_cols() ++ " FROM conduit_workflows ORDER BY started_at DESC", Nil) do
+          Err(e)  -> Err("workflow_list_all: " ++ e)
+          Ok(res) -> Ok(List.map(res.rows, fn row -> pdecode_workflow(row)))
+        end)
+    end
+
+    fn workflow_status_get(self : Store, id : String) : Result(Option(String), String) do
+      pwith_conn(self, fn conn ->
+        match Connection.exec_prepared(conn, "SELECT status FROM conduit_workflows WHERE id = $1", [ParamText(id)]) do
+          Err(e)  -> Err("workflow_status_get: " ++ e)
+          Ok(res) ->
+            match res.rows do
+              Nil          -> Ok(None)
+              Cons(row, _) -> Ok(Some(preq_str(pcell(row, 0))))
+            end
+        end)
+    end
+
+    -- output/error are COALESCEd: passing None keeps the existing value.
+    -- completed_at is set whenever the status leaves 'running'; error_at when
+    -- an error is provided.
+    fn workflow_update_status(self : Store, id : String, status : String, output, error) : Result((), String) do
+      let now = ParamText(int_to_string(DateTime.now()))
+      pexec(self, "UPDATE conduit_workflows SET status = $2, output = COALESCE($3, output), error = COALESCE($4, error), completed_at = CASE WHEN $2 <> 'running' THEN $5 ELSE completed_at END, error_at = CASE WHEN $4 IS NOT NULL THEN $5 ELSE error_at END WHERE id = $1",
+        [ParamText(id), ParamText(status), popt_txt(output), popt_txt(error), now])
+    end
+
+    fn workflow_cancel(self : Store, id : String, reason : String) : Result((), String) do
+      let now = ParamText(int_to_string(DateTime.now()))
+      pexec(self, "UPDATE conduit_workflows SET status = 'cancelled', error = $2, error_at = $3, completed_at = $3 WHERE id = $1 AND status = 'running'",
+        [ParamText(id), ParamText(reason), now])
+    end
+
+    -- ── Checkpoints ──────────────────────────────────────────────
+
+    fn checkpoint_get(self : Store, workflow_id : String, name : String) : Result(Option(String), String) do
+      pwith_conn(self, fn conn ->
+        match Connection.exec_prepared(conn, "SELECT value FROM conduit_checkpoints WHERE workflow_id = $1 AND name = $2", [ParamText(workflow_id), ParamText(name)]) do
+          Err(e)  -> Err("checkpoint_get: " ++ e)
+          Ok(res) ->
+            match res.rows do
+              Nil          -> Ok(None)
+              Cons(row, _) -> Ok(Some(preq_str(pcell(row, 0))))
+            end
+        end)
+    end
+
+    -- First-write-wins (ON CONFLICT DO NOTHING): a checkpoint is immutable once
+    -- recorded, which keeps replay deterministic under concurrent resumes.
+    fn checkpoint_set(self : Store, workflow_id : String, name : String, value : String, dur_ms : Int) : Result((), String) do
+      pexec(self, "INSERT INTO conduit_checkpoints (workflow_id, name, value, created_at, duration_ms) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (workflow_id, name) DO NOTHING",
+        [ParamText(workflow_id), ParamText(name), ParamText(value), ParamText(int_to_string(DateTime.now())), ptxt_int(dur_ms)])
+    end
+
+    fn checkpoint_load_all(self : Store, workflow_id : String) : Result(List(Conduit.WorkflowCheckpoint), String) do
+      pwith_conn(self, fn conn ->
+        match Connection.exec_prepared(conn, "SELECT " ++ pcp_cols() ++ " FROM conduit_checkpoints WHERE workflow_id = $1 ORDER BY id ASC", [ParamText(workflow_id)]) do
+          Err(e)  -> Err("checkpoint_load_all: " ++ e)
+          Ok(res) -> Ok(List.map(res.rows, fn row -> pdecode_checkpoint(row)))
+        end)
+    end
+
+    -- ── Signals ──────────────────────────────────────────────────
+
+    fn signal_insert(self : Store, signal_row) : Result(Int, String) do
+      let sql = "INSERT INTO conduit_workflow_signals (workflow_id, signal_type, payload, status, sent_at, delivered_at, expires_at, sent_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id"
+      let params = [
+        ParamText(signal_row.workflow_id),
+        ParamText(signal_row.signal_type),
+        ParamText(signal_row.payload),
+        ParamText(signal_row.status),
+        ptxt_ts(signal_row.sent_at),
+        popt_ts(signal_row.delivered_at),
+        popt_ts(signal_row.expires_at),
+        popt_txt(signal_row.sent_by)
+      ]
+      pwith_conn(self, fn conn ->
+        match Connection.exec_prepared(conn, sql, params) do
+          Err(e)  -> Err("signal_insert: " ++ e)
+          Ok(res) ->
+            match res.rows do
+              Cons(row, _) -> Ok(preq_int(pcell(row, 0)))
+              Nil          -> Err("signal_insert: no id returned")
+            end
+        end)
+    end
+
+    fn signal_peek(self : Store, workflow_id : String, signal_type : String) : Result(Option(Conduit.WorkflowSignal), String) do
+      pwith_conn(self, fn conn ->
+        match Connection.exec_prepared(conn, "SELECT " ++ psig_cols() ++ " FROM conduit_workflow_signals WHERE workflow_id = $1 AND signal_type = $2 AND status = 'pending' ORDER BY sent_at ASC LIMIT 1", [ParamText(workflow_id), ParamText(signal_type)]) do
+          Err(e)  -> Err("signal_peek: " ++ e)
+          Ok(res) ->
+            match res.rows do
+              Nil          -> Ok(None)
+              Cons(row, _) -> Ok(Some(pdecode_signal(row)))
+            end
+        end)
+    end
+
+    fn signal_mark_delivered(self : Store, id : Int) : Result((), String) do
+      pexec(self, "UPDATE conduit_workflow_signals SET status = 'delivered', delivered_at = $2 WHERE id = $1",
+        [ptxt_int(id), ParamText(int_to_string(DateTime.now()))])
+    end
 
     -- ── Dashboard queries (not yet implemented) ──────────────────
     fn dashboard_queue_summary(_self) do pnot_impl("dashboard_queue_summary") end
