@@ -88,6 +88,22 @@ mod ConduitPostgresLiveTest do
     }
   end
 
+  -- Run a no-param query returning a single boolean cell; "t" => true.
+  pfn pquery_bool(conn, sql : String) : Bool do
+    match Connection.exec_prepared(conn, sql, Nil) do
+      Err(_)  -> false
+      Ok(res) ->
+        match res.rows do
+          Nil          -> false
+          Cons(row, _) ->
+            match List.nth_opt(row, 0) do
+              Some(Some(s)) -> s == "t"
+              _             -> false
+            end
+        end
+    end
+  end
+
   -- Build a DeadLetter for an existing job.
   pfn pmk_dl(id : String, job_id : String) : Conduit.DeadLetter do
     {
@@ -617,6 +633,34 @@ mod ConduitPostgresLiveTest do
               Err(e) -> Test.assert_true(false, "release errored: " ++ e)
             end
           _ -> Test.assert_true(false, "expected to acquire the leader lock")
+        end
+    end
+  end
+
+  test "postgres: advisory lock is held across calls and blocks other sessions" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        match Conduit.Storage.cron_advisory_lock(store, 999111) do
+          Ok(true) ->
+            -- A separate session must NOT acquire the same lock while the store
+            -- holds it — proving the lock persists past cron_advisory_lock's
+            -- return (i.e. it lives on a dedicated connection, T0.3).
+            match Connection.connect({ host = "127.0.0.1", port = 5432, user = puser(),
+                                       database = "conduit_test", password = None }) do
+              Err(e)    -> Test.assert_true(false, "probe connect: " ++ e)
+              Ok(other) ->
+                Test.assert_true(pquery_bool(other, "SELECT pg_try_advisory_lock(999111)") == false,
+                  "other session is blocked while the lock is held")
+                let _ = Conduit.Storage.cron_advisory_unlock(store, 999111)
+                Test.assert_true(pquery_bool(other, "SELECT pg_try_advisory_lock(999111)"),
+                  "other session acquires after release")
+                let _ = pquery_bool(other, "SELECT pg_advisory_unlock(999111)")
+                let _ = Connection.close(other)
+                ()
+            end
+          _ -> Test.assert_true(false, "expected to acquire the advisory lock")
         end
     end
   end
