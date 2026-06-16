@@ -1,8 +1,8 @@
 -- Conduit.Storage.Postgres — Postgres-backed implementation of Conduit.Storage.
 --
--- Built on the `depot` library (Connection / Message).  This is the durable,
--- multi-node-safe storage backend; the in-memory VaultStore in the test suite
--- is for unit tests only.
+-- Built on the `depot` library (Connection / Message / Pool).  This is the
+-- durable, multi-node-safe storage backend; the in-memory VaultStore in the
+-- test suite is for unit tests only.
 --
 -- ── Status (vertical slice) ──────────────────────────────────────────────────
 -- The core JOB LIFECYCLE is fully implemented against a live database:
@@ -17,9 +17,10 @@
 --     Read and write go through the same conversion, so ordering is consistent.
 --   • List columns (errors, tags) are stored as a JSON array of strings in a
 --     TEXT column, encoded/decoded by pencode_str_list / pdecode_str_list.
---   • Data-path operations connect per operation (pwith_conn). Pooling via
---     depot's Pool is blocked in compiled builds (imported module-actor spawn
---     glue is not emitted); the seam is kept so a pool drops in later.
+--   • Data-path operations use a per-database connection pool (pwith_conn).
+--     One pool per (host:port/db@user) is lazily started and stored in a
+--     process-wide Vault, so all Store values sharing the same signature
+--     share a single pool.
 --   • Advisory locks (cron scheduler, leader election) run on a dedicated
 --     persistent connection per lock id (pwith_lock_conn) — session-scoped
 --     locks must outlive a single operation — giving real cross-node mutual
@@ -30,6 +31,7 @@ mod Conduit.Storage.Postgres do
   use Conduit
   import Connection
   import Message
+  import Pool
 
   -- Connection parameters for the backing database.
   type Store = {
@@ -64,23 +66,40 @@ mod Conduit.Storage.Postgres do
     self.host ++ ":" ++ int_to_string(self.port) ++ "/" ++ self.database ++ "@" ++ self.user
   end
 
-  -- ── Data-path connections ────────────────────────────────────
-  -- Open a connection, run f, close, return f's Result.
-  --
-  -- NOTE: this is connect-per-operation. Pooling via depot's Pool is blocked in
-  -- compiled builds: Pool is a module-actor spawned with `spawn(Pool)`, and the
-  -- actor-spawn glue (`_Pool_spawn`) is not emitted for an actor imported from a
-  -- dependency (depot's own tests run under the interpreter, so this path is
-  -- never compiled by a consumer). Routed through pwith_conn so a pool — or a
-  -- fix to cross-package actor-spawn codegen — drops in here with no other
-  -- changes. Advisory locks below already use persistent connections, which is
-  -- the correctness half of pooling.
+  -- ── Data-path connections (pooled) ──────────────────────────
+  -- One Pool actor per database signature, lazily started and stored in a
+  -- process-wide Vault.  All Store values with the same host/port/db/user
+  -- share the same pool; concurrent callers get distinct connections from it.
+
+  pfn ppool_table() do
+    match Vault.whereis("conduit_pg_pools") do
+      Some(t) -> t
+      None    -> Vault.new("conduit_pg_pools")
+    end
+  end
+
+  pfn pget_or_start_pool(self : Store) do
+    let tbl = ppool_table()
+    let key = psig(self)
+    match Vault.get(tbl, key) do
+      Some(pool) -> pool
+      None ->
+        -- min_size=0: no warm-up connections; the pool grows on demand up to max_size.
+        -- This avoids blocking the first caller on TCP handshakes during startup.
+        let base_cfg = Pool.default_pool_config(pconn_config(self))
+        let pool = Pool.start({ base_cfg with min_size = 0 })
+        let _ = Vault.set(tbl, key, pool)
+        pool
+    end
+  end
+
   pfn pwith_conn(self : Store, f) do
-    match Connection.connect(pconn_config(self)) do
-      Err(e)   -> Err("connect: " ++ e)
+    let pool = pget_or_start_pool(self)
+    match Pool.checkout(pool) do
+      Err(e)   -> Err("pool checkout: " ++ e)
       Ok(conn) ->
         let result = f(conn)
-        let _ = Connection.close(conn)
+        let _ = Pool.checkin(pool, conn)
         result
     end
   end
