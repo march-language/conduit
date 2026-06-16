@@ -1,0 +1,90 @@
+-- Conduit.Pruner — leader-only background task that batched-DELETEs terminal
+-- rows past their configured retention horizon.
+--
+-- Only the cluster leader runs prune ticks.  Non-leaders skip every tick, so
+-- pruning never races across nodes and table locks stay short.
+--
+-- Each table is pruned in a loop: one batch DELETE per tick, repeated up to
+-- `max_passes` times per table per tick to avoid leaving a huge backlog after a
+-- long pause.  The loop stops early when a batch returns 0 rows (caught up).
+mod Conduit.Pruner do
+
+  -- Maximum DELETE passes per table per tick.  Keeps a single tick bounded
+  -- even when a large backlog has accumulated.
+  let max_passes = 10
+
+  doc """
+  Start the pruner as a background task.
+
+  Only the cluster leader executes prune ticks; non-leaders skip each interval.
+  Call this from Conduit.API.start when config.retention is Some.
+
+  Returns the task handle.  Keep it alive for the lifetime of the node.
+  """
+  fn start(storage : s, retention : Conduit.RetentionConfig) : Task(()) do
+    task_spawn(fn _ -> ppruner_loop(storage, retention))
+  end
+
+  pfn ppruner_loop(storage : s, retention : Conduit.RetentionConfig) : () do
+    psleep_ms(retention.prune_interval_ms)
+    ptick(storage, retention)
+    ppruner_loop(storage, retention)
+  end
+
+  pfn ptick(storage : s, retention : Conduit.RetentionConfig) : () do
+    if Conduit.Node.is_leader() do
+      let now_s = DateTime.now()
+      pprune_jobs(storage, now_s - int_div(retention.completed_after_ms, 1000), retention.prune_batch_size)
+      pprune_dead_letters(storage, now_s - int_div(retention.dead_after_ms, 1000), retention.prune_batch_size)
+      pprune_workflows(storage, now_s - int_div(retention.workflow_after_ms, 1000), retention.prune_batch_size)
+    else
+      ()
+    end
+  end
+
+  pfn pprune_jobs(storage : s, cutoff_s : Int, batch_size : Int) : () do
+    pprune_loop("jobs", storage, cutoff_s, batch_size, max_passes,
+      fn st -> Conduit.Storage.prune_jobs(st, cutoff_s, batch_size))
+  end
+
+  pfn pprune_dead_letters(storage : s, cutoff_s : Int, batch_size : Int) : () do
+    pprune_loop("dead_letters", storage, cutoff_s, batch_size, max_passes,
+      fn st -> Conduit.Storage.prune_dead_letters(st, cutoff_s, batch_size))
+  end
+
+  pfn pprune_workflows(storage : s, cutoff_s : Int, batch_size : Int) : () do
+    pprune_loop("workflows", storage, cutoff_s, batch_size, max_passes,
+      fn st -> Conduit.Storage.prune_workflows(st, cutoff_s, batch_size))
+  end
+
+  -- Run up to `remaining` passes of a single-batch prune fn.  Stops early when
+  -- a pass returns 0 (table is caught up) or on storage error.
+  pfn pprune_loop(label : String, storage : s, _cutoff_s : Int, _batch_size : Int, remaining : Int, f : s -> Result(Int, String)) : () do
+    if remaining <= 0 do
+      ()
+    else
+      match f(storage) do
+        Err(e) ->
+          Logger.error("conduit_pruner: " ++ label ++ " error: " ++ e)
+        Ok(0) ->
+          ()
+        Ok(n) ->
+          Logger.debug("conduit_pruner: pruned " ++ int_to_string(n) ++ " " ++ label ++ " rows")
+          pprune_loop(label, storage, _cutoff_s, _batch_size, remaining - 1, f)
+      end
+    end
+  end
+
+  pfn psleep_ms(ms : Int) : () do
+    psleep_loop(int_div(ms, 10))
+  end
+
+  pfn psleep_loop(n : Int) : () do
+    if n <= 0 do
+      ()
+    else
+      task_yield()
+      psleep_loop(n - 1)
+    end
+  end
+end

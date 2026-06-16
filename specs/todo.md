@@ -4,7 +4,7 @@
 > [roadmap.md](./roadmap.md); shipped work is catalogued in [features.md](./features.md).
 > Item IDs (T0.1 …) map to roadmap §4.
 >
-> **Last updated:** 2026-06-15
+> **Last updated:** 2026-06-16
 
 ---
 
@@ -26,9 +26,9 @@ work that remains to be competitive with Oban + Temporal.
 - [x] **T0.2c** Postgres impl — node methods (`node_register` upsert`/heartbeat/deregister/list_active`, `node_reclaim_jobs` (stale-heartbeat orphans — worker_id is a per-exec UUID, not a node link)`/cleanup_stale` (RETURNING count)`/try_leader_lock/release_leader_lock`). `NodeInfo` decoder. 5 live tests. *(Leader lock now held on a dedicated persistent connection (T0.3) — real cross-node election.)*
 - [x] **T0.2d** Postgres impl — dashboard queries (`dashboard_queue_summary` (GROUP BY + FILTER aggregates)`/jobs_list` (queue+status filters, paginated)`/job_by_id/crons_list/workflows_list`). `QueueSummary` decoder. 5 live tests.
 - [x] **T0.2e** Postgres impl — dead-letter admin + rate-limit + unique + event store (`dead_letter_list/list_all/load/delete/delete_all`, `job_retry/cancel/delete`, `notify_subscribe` (no-op — LISTEN needs a persistent receive loop; dashboard polls), `rate_limit_acquire` (atomic token bucket via `ON CONFLICT … WHERE`), `unique_check/release`, `event_append` (RETURNING id)`/load_all/load_up_to/count`). `DeadLetter` + `WorkflowEvent` decoders. 7 live tests. **All 60 Storage methods now implemented; pnot_impl stub helper removed.**
-- [~] **T0.3** Connection lifetime.
-  - [x] **Advisory locks on persistent connections** (`pwith_lock_conn`): cron scheduler + leader election now hold their `pg_advisory_lock` on a dedicated connection per lock id, cached process-wide — **real cross-node mutual exclusion** (verified by a cross-session test: a second connection is blocked while the lock is held). This was the correctness half of T0.3.
-  - [ ] **Data-path pooling — BLOCKED.** depot's `Pool` is a module-actor spawned via `spawn(Pool)`; the actor-spawn glue (`_Pool_spawn`) is not emitted for an actor imported from a dependency, so a compiled consumer fails to link. Data path stays connect-per-operation (correct, unpooled) behind the `pwith_conn` seam. Unblock needs either a cross-package actor-spawn codegen fix in march, or a non-actor pool. Tracked separately.
+- [x] **T0.3** Connection lifetime.
+  - [x] **Advisory locks on persistent connections** (`pwith_lock_conn`): cron scheduler + leader election hold their `pg_advisory_lock` on a dedicated connection per lock id, cached process-wide — real cross-node mutual exclusion.
+  - [x] **Data-path pooling** (`pwith_conn` → `Pool`): depot's `Pool` actor wired in. Required a march compiler fix (`lower_mod_decls` was missing a `DActor` case, so actor spawn glue for module-nested actors was silently dropped). Fixed in march `lib/tir/lower.ml`; merged to march main 2026-06-16.
 - [ ] **T0.4** Live integration test matrix: job lifecycle, cron fire, workflow run, multi-node reclaim, DLQ, rate-limit, unique. Each new `Storage` method ships with its in-memory test-store stub too.
 
 ---

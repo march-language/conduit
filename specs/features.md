@@ -407,3 +407,92 @@
 ### Known gaps
 - Deterministic time/randomness interception — deferred (would require wrapping `DateTime.now()` and `Random.int()`)
 - Workflow event history in dashboard — deferred (events queryable via `Conduit.workflow_events/2` API)
+
+---
+
+## Phase 9 — Postgres Storage Backend (all 60 methods) ✅
+
+**Merged:** 2026-06-16
+
+Prior to this phase `Conduit.Storage.Postgres` was a stub. All 60 `Storage` interface methods are now backed by real SQL.
+
+### Implementation file
+
+`lib/conduit/storage/postgres.march` — `impl Storage(Store)` backed by depot's Postgres wire protocol (`Connection`, `Pool`, `Message`).
+
+### Connection management
+
+- **`pwith_conn`** — borrows a connection from a lazy `Pool` actor per `(host:port/db@user)` signature. Pools are started on first use (`min_size = 0`) and cached process-wide in a Vault table (`pool_sigs`). All non-lock data-path methods use this path.
+- **`pwith_lock_conn`** — advisory-lock methods require a dedicated, persistent connection (advisory locks are session-scoped in Postgres). Lock connections are also cached process-wide in a Vault table (`lock_conns`), keyed by lock id. Cron scheduler and leader election hold their lock for the lifetime of the node.
+- **Connection pooling compiler fix** — `Pool` is a module-nested actor (`mod Pool do actor Pool do … end end`). The march compiler's `lower_mod_decls` was missing a `DActor` case, silently dropping the actor spawn glue (`_Pool_spawn`). Fixed in march `lib/tir/lower.ml`; merged to march `main` 2026-06-16.
+
+### Methods by group
+
+#### Job lifecycle (T0.1 / initial vertical slice)
+- `enqueue` — `INSERT … RETURNING id`; sets `unique_key` when provided
+- `fetch_next` — `UPDATE … WHERE id = (SELECT … FOR UPDATE SKIP LOCKED) RETURNING …`; returns the claimed job or `None`
+- `mark_running`, `mark_completed`, `mark_failed`, `mark_snoozed` — status transitions
+- `heartbeat` — `UPDATE … SET last_heartbeat_at = $2`
+- `schedule_retry` — reset to `pending` with incremented attempt count and future `run_at`
+- `discard` — set `status = 'dead'` in-place (no DLQ row)
+- `move_to_dead_letter` — INSERT dead-letter row + mark source job dead
+- `rescue_stale` — `UPDATE … SET status = 'pending' WHERE status = 'running' AND last_heartbeat_at < $2`
+
+#### Cron (T0.2a)
+- `cron_upsert` — `INSERT … ON CONFLICT (name) DO UPDATE …`; adds `jitter_ms` column
+- `cron_load_due` — `SELECT … WHERE enabled = true AND next_run_at <= $1`
+- `cron_load_by_id`, `cron_mark_fired`, `cron_job_active`, `cron_cancel_job`, `cron_delete`
+- `cron_advisory_lock` / `cron_advisory_unlock` — `pg_advisory_lock` / `pg_advisory_unlock` on dedicated persistent connection
+
+#### Workflows, checkpoints, signals (T0.2b)
+- `workflow_insert`, `workflow_load`, `workflow_list_all`, `workflow_status_get`, `workflow_update_status`, `workflow_cancel`
+- `checkpoint_get`, `checkpoint_set` (`ON CONFLICT DO NOTHING` — first-write-wins), `checkpoint_load_all`
+- `signal_insert` (`RETURNING` serial id), `signal_peek`, `signal_mark_delivered`
+- Row decoders: `pdecode_workflow`, `pdecode_checkpoint`, `pdecode_signal`
+
+#### Node coordination (T0.2c)
+- `node_register` — upsert on `(node_id)` conflict
+- `node_heartbeat`, `node_deregister`, `node_list_active`
+- `node_reclaim_jobs` — orphan reclaim: `UPDATE conduit_jobs SET status = 'pending' WHERE worker_id = $1 AND status = 'running'`
+- `node_cleanup_stale` — `UPDATE conduit_workers SET status = 'stopped' … RETURNING *`; returns count
+- `node_try_leader_lock` / `node_release_leader_lock` — `pg_try_advisory_lock` / `pg_advisory_unlock` on dedicated persistent connection
+- Row decoder: `pdecode_node`
+
+#### Dashboard queries (T0.2d)
+- `dashboard_queue_summary` — `GROUP BY queue` with `FILTER (WHERE status = …)` aggregates + 24 h throughput
+- `dashboard_jobs_list` — paginated with optional queue + status filters
+- `dashboard_job_by_id`, `dashboard_crons_list`, `dashboard_workflows_list`
+- Row decoder: `pdecode_queue_summary`
+
+#### Dead-letter admin, rate limiting, unique, event store (T0.2e)
+- `dead_letter_list`, `dead_letter_list_all`, `dead_letter_load`, `dead_letter_delete`, `dead_letter_delete_all`
+- `job_retry` — reset attempt count to 0, `status = 'pending'`
+- `job_cancel`, `job_delete`
+- `notify_subscribe` — no-op (LISTEN requires a persistent receive loop; dashboard uses polling)
+- `rate_limit_acquire` — atomic token-bucket via `INSERT … ON CONFLICT … DO UPDATE … WHERE`
+- `unique_check`, `unique_release`
+- `event_append` (`RETURNING id`), `event_load_all`, `event_load_up_to`, `event_count`
+- Row decoders: `pdecode_dead_letter`, `pdecode_event`
+
+### Schema
+
+`priv/migrations/001_conduit_schema.sql` — all tables in a single migration file:
+- `conduit_jobs` — BIGINT epoch-seconds timestamps, TEXT array for errors/tags, `unique_key` column
+- `conduit_dead_letters`
+- `conduit_cron_schedules` (includes `jitter_ms`)
+- `conduit_workflows`, `conduit_checkpoints`, `conduit_workflow_signals`
+- `conduit_workflow_events` — (workflow_id, sequence) unique constraint
+- `conduit_workers`
+- `conduit_rate_limit_buckets`
+
+### Live tests
+
+`test/test_postgres_live.march` — 33 live integration tests covering all method groups. Each test calls `psetup()` and silently passes (skips) when no DB is available, so the test suite is always green in CI. Run against a `conduit_test` database for full coverage.
+
+CI: `forge test --release` (`--release` = `-O2`) avoids a Perceus RC bug at `-O0` that causes task_spawn-based worker tests to crash. Both ubuntu-24.04 and macos-14 are green.
+
+### Known gaps
+- `notify_subscribe` is a no-op; full `LISTEN/NOTIFY` requires a persistent receive-loop connection (deferred)
+- Payload serialization still uses `show/1` placeholder — see T1.1 in todo.md
+- Pruning/retention not yet implemented — tables grow unbounded — see T1.2 in todo.md
+- Scenario-level integration tests (cron fire end-to-end, workflow run, multi-node reclaim, etc.) — see T0.4 in todo.md

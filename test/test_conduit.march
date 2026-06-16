@@ -225,6 +225,18 @@ mod ConduitTest do
     fn mark_snoozed(_self : FakeWorkflowStorage, _id : String, _wake_at : DateTime) : Result((), String) do
       Ok(())
     end
+
+    fn prune_jobs(_self : FakeWorkflowStorage, _cutoff_s : Int, _batch_size : Int) : Result(Int, String) do
+      Ok(0)
+    end
+
+    fn prune_dead_letters(_self : FakeWorkflowStorage, _cutoff_s : Int, _batch_size : Int) : Result(Int, String) do
+      Ok(0)
+    end
+
+    fn prune_workflows(_self : FakeWorkflowStorage, _cutoff_s : Int, _batch_size : Int) : Result(Int, String) do
+      Ok(0)
+    end
   end
 
   -- Local wrappers that supply the empty message string required by

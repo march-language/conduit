@@ -53,7 +53,12 @@ mod Conduit.API do
 
     let cron_task = Conduit.CronScheduler.start(storage, config.cron_tick_interval_ms)
 
-    List.append(node_tasks, Cons(cron_task, worker_tasks))
+    let pruner_tasks = match config.retention do
+      None            -> Nil
+      Some(retention) -> Cons(Conduit.Pruner.start(storage, retention), Nil)
+    end
+
+    List.append(node_tasks, List.append(Cons(cron_task, worker_tasks), pruner_tasks))
   end
 
   doc """

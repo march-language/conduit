@@ -8,7 +8,9 @@ mod Conduit.Config do
       node_id                 = uuid_v7(()),
       heartbeat_interval_ms   = 15000,
       stale_node_threshold_ms = 60000,
-      drain_timeout_ms        = 15000
+      drain_timeout_ms        = 15000,
+      retention               = None
     }
   end
 end
+

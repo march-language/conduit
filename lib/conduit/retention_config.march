@@ -1,0 +1,11 @@
+mod Conduit.RetentionConfig do
+  fn default() : Conduit.RetentionConfig do
+    {
+      completed_after_ms = 86400000,
+      dead_after_ms      = 604800000,
+      workflow_after_ms  = 604800000,
+      prune_batch_size   = 1000,
+      prune_interval_ms  = 300000
+    }
+  end
+end
