@@ -1132,11 +1132,15 @@ mod Conduit.Storage.Postgres do
 
     -- Delete up to batch_size completed jobs older than cutoff_s (epoch seconds).
     fn prune_jobs(self : Store, cutoff_s : Int, batch_size : Int) : Result(Int, String) do
-      let sql = "DELETE FROM conduit_jobs WHERE id IN (SELECT id FROM conduit_jobs WHERE status = 'completed' AND completed_at < $1 LIMIT $2) RETURNING id"
+      let sql = "WITH del AS (DELETE FROM conduit_jobs WHERE id IN (SELECT id FROM conduit_jobs WHERE status = 'completed' AND completed_at < $1 LIMIT $2) RETURNING id) SELECT COUNT(*) FROM del"
       pwith_conn(self, fn conn ->
         match Connection.exec_prepared(conn, sql, [ParamText(int_to_string(cutoff_s)), ParamText(int_to_string(batch_size))]) do
           Err(e)  -> Err("prune_jobs: " ++ e)
-          Ok(res) -> Ok(List.length(res.rows))
+          Ok(res) ->
+            match res.rows do
+              Cons(row, _) -> Ok(preq_int(pcell(row, 0)))
+              Nil          -> Ok(0)
+            end
         end)
     end
 
@@ -1159,8 +1163,10 @@ mod Conduit.Storage.Postgres do
     -- Delete up to batch_size terminal workflows older than cutoff_s, cascading
     -- to their checkpoints, signals, and events (no FK ON DELETE CASCADE in the
     -- schema, so child rows are deleted explicitly inside a CTE).
+    -- The NOT EXISTS guard prevents FK violations: only prune a workflow if none
+    -- of its children are still active (parent_id self-reference on conduit_workflows).
     fn prune_workflows(self : Store, cutoff_s : Int, batch_size : Int) : Result(Int, String) do
-      let sql = "WITH to_prune AS (SELECT id FROM conduit_workflows WHERE status IN ('completed','failed','cancelled','timed_out') AND completed_at < $1 LIMIT $2), del_events AS (DELETE FROM conduit_workflow_events WHERE workflow_id IN (SELECT id FROM to_prune)), del_checkpoints AS (DELETE FROM conduit_checkpoints WHERE workflow_id IN (SELECT id FROM to_prune)), del_signals AS (DELETE FROM conduit_workflow_signals WHERE workflow_id IN (SELECT id FROM to_prune)), del_wf AS (DELETE FROM conduit_workflows WHERE id IN (SELECT id FROM to_prune) RETURNING id) SELECT COUNT(*) FROM del_wf"
+      let sql = "WITH to_prune AS (SELECT w.id FROM conduit_workflows w WHERE w.status IN ('completed','failed','cancelled','timed_out') AND w.completed_at < $1 AND NOT EXISTS (SELECT 1 FROM conduit_workflows c WHERE c.parent_id = w.id AND NOT (c.status IN ('completed','failed','cancelled','timed_out') AND c.completed_at < $1)) LIMIT $2), del_events AS (DELETE FROM conduit_workflow_events WHERE workflow_id IN (SELECT id FROM to_prune)), del_checkpoints AS (DELETE FROM conduit_checkpoints WHERE workflow_id IN (SELECT id FROM to_prune)), del_signals AS (DELETE FROM conduit_workflow_signals WHERE workflow_id IN (SELECT id FROM to_prune)), del_wf AS (DELETE FROM conduit_workflows WHERE id IN (SELECT id FROM to_prune) RETURNING id) SELECT COUNT(*) FROM del_wf"
       pwith_conn(self, fn conn ->
         match Connection.exec_prepared(conn, sql, [ParamText(int_to_string(cutoff_s)), ParamText(int_to_string(batch_size))]) do
           Err(e)  -> Err("prune_workflows: " ++ e)

@@ -383,18 +383,7 @@ mod Conduit.API do
     Conduit.Queue.enqueue_all(storage, items)
   end
 
-  pfn pstop_sleep(ms : Int) : () do
-    pstop_sleep_loop(int_div(ms, 10))
-  end
-
-  pfn pstop_sleep_loop(n : Int) : () do
-    if n <= 0 do
-      ()
-    else
-      task_yield()
-      pstop_sleep_loop(n - 1)
-    end
-  end
+  pfn pstop_sleep(ms : Int) : () do Conduit.Time.sleep_ms(ms) end
 
   -- ─────────────────────────────────────────────────────────────
   -- Replay API (Phase 8)

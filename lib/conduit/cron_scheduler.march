@@ -202,16 +202,5 @@ mod Conduit.CronScheduler do
     end
   end
 
-  pfn psleep_ms(ms : Int) : () do
-    psleep_loop(int_div(ms, 10))
-  end
-
-  pfn psleep_loop(n : Int) : () do
-    if n <= 0 do
-      ()
-    else
-      task_yield()
-      psleep_loop(n - 1)
-    end
-  end
+  pfn psleep_ms(ms : Int) : () do Conduit.Time.sleep_ms(ms) end
 end

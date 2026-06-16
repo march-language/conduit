@@ -337,23 +337,7 @@ mod Conduit.Worker do
     rescue_loop(storage, interval_ms)
   end
 
-  -- Cooperative sleep: yields the task scheduler `n * 10` times to sleep ~ms.
-  --
-  -- This is not a wall-clock sleep; it yields for approximately `ms` worth of
-  -- scheduler ticks.  Use for poll delays and heartbeat intervals, not for
-  -- precision timing.
-  pfn psleep_ms(ms : Int) : () do
-    psleep_loop(int_div(ms, 10))
-  end
-
-  pfn psleep_loop(n : Int) : () do
-    if n <= 0 do
-      ()
-    else
-      task_yield()
-      psleep_loop(n - 1)
-    end
-  end
+  pfn psleep_ms(ms : Int) : () do Conduit.Time.sleep_ms(ms) end
 
   -- Release the unique constraint for a job, if it has one.
   --
