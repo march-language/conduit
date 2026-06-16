@@ -1,7 +1,7 @@
 # Conduit — Job/Workflow Platform for March
 
-> **Status:** Implementation complete (Phases 1–4, 7–8); Phases 5–6 in progress
-> **Last Updated:** 2026-04-17
+> **Status:** Implementation complete (Phases 1–8); Postgres storage backend complete (all 60 Storage methods, connection pooling); CI green
+> **Last Updated:** 2026-06-16
 
 ---
 

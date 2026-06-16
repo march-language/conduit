@@ -5,7 +5,7 @@
 > The actionable checklist lives in [todo.md](./todo.md); this document is the
 > *why* and the *design*.
 >
-> **Last updated:** 2026-06-15
+> **Last updated:** 2026-06-16
 
 ---
 
@@ -40,7 +40,7 @@ effort for an audience we are not built for.
 
 ---
 
-## 2. Current State (2026-06-15)
+## 2. Current State (2026-06-16)
 
 What is **actually real**, as opposed to designed:
 
@@ -50,11 +50,11 @@ What is **actually real**, as opposed to designed:
 - ✅ Checkpoint/replay workflow model + opt-in deterministic event replay
 - ✅ Wired telemetry bus (enqueue/start/complete/snooze/fail/dead-letter events) with pluggable handlers + a logger handler
 - ✅ Server-rendered dashboard (overview, queues, jobs, crons, dead-letters, nodes)
-- ✅ **Postgres storage backend — job-lifecycle slice, verified live end-to-end** (enqueue, claim via `SELECT … FOR UPDATE SKIP LOCKED`, mark/retry/discard/dead-letter/rescue, *and* `fetch_next` returning decoded rows). 9/9 postgres integration tests pass against a live DB; full conduit suite 204/0. The remaining 50 `Storage` methods are still stubs (Tier 0.2).
-- ✅ **Read-path blocker resolved** — the March compiler `Bytes.slice` FBIP-reuse-under-aliasing bug is fixed in `llvm_emit.ml` (dup extracted heap fields at branch entry when the scrutinee is both reused and shared) and installed; depot's wire-protocol row decoding works compiled.
+- ✅ **Postgres storage backend — all 60 `Storage` methods implemented** across job lifecycle, cron, workflow/checkpoint/signal, node coordination, dead-letter admin, rate limiting, unique, event store, and dashboard queries. All methods backed by real SQL; `pnot_impl` stub removed. Live integration tests cover all method groups.
+- ✅ **Connection pooling** — `pwith_conn` uses depot's `Pool` actor (lazy per-sig pool, `min_size = 0`). Advisory-lock connections remain dedicated per lock id (`pwith_lock_conn`). Required a march compiler fix for module-nested actor spawn glue.
+- ✅ **CI green** — both ubuntu-24.04 and macos-14 pass `forge build` + `forge test --release`. depot is a public path dep cloned in CI; postgres live tests self-skip when no DB is present.
 
-The backend is now genuinely real for the job lifecycle; Tier 0 is about
-completing it (the other 50 methods + pooling + integration coverage).
+Tier 0 (make the backend real) is complete. Next: Tier 1 (serialization + pruning) and T0.4 (fuller integration test coverage).
 
 ---
 
@@ -64,11 +64,11 @@ completing it (the other 50 methods + pooling + integration coverage).
 
 | Capability | Status | Gap |
 |---|---|---|
-| Postgres `SKIP LOCKED` queue | 🚧 write path done | finish read path (RC fix) + remaining methods |
+| Postgres `SKIP LOCKED` queue | ✅ | complete — all 60 Storage methods, pooled connections, live tests |
 | Real serialization | 🔴 `show/1` placeholder | typed payloads can't safely round-trip through the DB |
 | Job pruning / retention | 🔴 none (only stale *nodes*) | tables grow unbounded — an immediate prod failure |
 | Cron / unique / rate-limit / DLQ / telemetry / dashboard | ✅ | parity |
-| Production maturity | 🔴 unproven | needs tests against the real backend + soak |
+| Production maturity | 🔴 unproven | needs broader integration test coverage (T0.4) + soak |
 
 ### vs Temporal (workflows) — right model, "cheap" version of the primitives
 
@@ -97,15 +97,12 @@ parallel task execution**, which we want anyway for Temporal-lane fan-out.
 Tiers are ordered by dependency and leverage. Within a tier, items can largely
 proceed in parallel.
 
-### Tier 0 — Make the backend real *(in progress)*
+### Tier 0 — Make the backend real *(complete except T0.4)*
 
-The precondition for everything else. Nothing below is trustworthy until jobs
-durably survive a process restart and a real multi-node cluster works.
-
-- **T0.1** Fix the `Bytes.slice` Perceus RC bug (march compiler) — *in flight*.
-- **T0.2** Finish `Conduit.Storage.Postgres`: the remaining 50 methods (cron, workflow, checkpoint, signal, node, dashboard query, rate-limit, unique, event store), each backed by SQL against the existing schema.
-- **T0.3** Connection pooling — replace the per-operation `pwith_conn` with depot's `Pool` (single choke-point change).
-- **T0.4** Integration test matrix against a live DB (job lifecycle, cron fire, workflow run, multi-node reclaim, dead-letter, rate-limit, unique).
+- ~~**T0.1**~~ ✅ `Bytes.slice` RC fix (moot — depot main uses `Bytes.to_string`; no RC issue).
+- ~~**T0.2**~~ ✅ All 60 `Conduit.Storage.Postgres` methods implemented (cron, workflow, checkpoint, signal, node, dashboard query, rate-limit, unique, event store).
+- ~~**T0.3**~~ ✅ Connection pooling via depot `Pool` actor + persistent advisory-lock connections.
+- **T0.4** Integration test matrix against a live DB — *still open*. Current coverage: per-method live tests in `test/test_postgres_live.march` (self-skip without DB). Missing: end-to-end scenario tests (cron fire, workflow run end-to-end, multi-node reclaim, rate-limit enforce, unique conflict).
 
 ### Tier 1 — Oban table stakes
 
@@ -180,8 +177,7 @@ durably survive a process restart and a real multi-node cluster works.
 
 ## 5. Sequencing & Milestones
 
-1. **M1 — Durable backend (Tier 0).** Postgres backend complete + pooled +
-   integration-tested. *Conduit survives a restart and runs a real cluster.*
+1. **M1 — Durable backend (Tier 0).** ✅ Postgres backend complete + pooled. T0.4 (scenario integration tests) is the remaining tail.
 2. **M2 — Oban-credible (Tier 1).** Real serialization + pruning. *Safe to run
    in production without unbounded growth or stringly-typed payloads.*
 3. **M3 — Temporal-lite (Tier 2.1–2.3).** Durable sleep + true parallel +
