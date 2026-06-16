@@ -876,4 +876,86 @@ mod ConduitPostgresLiveTest do
     end
   end
 
+  -- ── Pruning / retention ──────────────────────────────────────────
+
+  test "postgres: prune_jobs removes completed jobs past the cutoff" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let j = pmk_job("prj1", "default", 0, 0)
+        let _ = Conduit.Storage.enqueue(store, j)
+        let _ = Conduit.Storage.mark_running(store, "prj1", "w1")
+        let _ = Conduit.Storage.mark_completed(store, "prj1")
+        match Conduit.Storage.prune_jobs(store, DateTime.now() + 1, 100) do
+          Ok(n)  -> Test.assert_eq_int(n, 1, "one completed job pruned")
+          Err(e) -> Test.assert_true(false, "prune_jobs errored: " ++ e)
+        end
+        match Conduit.Storage.dashboard_job_by_id(store, "prj1") do
+          Ok(None) -> Test.assert_true(true, "")
+          _        -> Test.assert_true(false, "pruned job should be gone")
+        end
+    end
+  end
+
+  test "postgres: prune_jobs does not remove jobs before the cutoff" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let j = pmk_job("prj2", "default", 0, 0)
+        let _ = Conduit.Storage.enqueue(store, j)
+        let _ = Conduit.Storage.mark_running(store, "prj2", "w2")
+        let _ = Conduit.Storage.mark_completed(store, "prj2")
+        match Conduit.Storage.prune_jobs(store, DateTime.now() - 3600, 100) do
+          Ok(n)  -> Test.assert_eq_int(n, 0, "zero jobs pruned (not past cutoff)")
+          Err(e) -> Test.assert_true(false, "prune_jobs errored: " ++ e)
+        end
+    end
+  end
+
+  test "postgres: prune_dead_letters removes old dead letters" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let j = pmk_job("prdl1", "default", 0, 0)
+        let _ = Conduit.Storage.enqueue(store, j)
+        let _ = Conduit.Storage.mark_running(store, "prdl1", "w3")
+        let dl : Conduit.DeadLetter = {
+          id = "dl-1", job_id = "prdl1", queue = "default", job_type = "TestJob",
+          payload = "{}", errors = Cons("boom", Nil), attempts = 1,
+          first_attempted_at = None, last_attempted_at = None,
+          discarded_at = DateTime.from_timestamp(DateTime.now()),
+          reviewed = false, reviewed_by = None, reviewed_at = None, retry_count = 0
+        }
+        let _ = Conduit.Storage.move_to_dead_letter(store, dl)
+        match Conduit.Storage.prune_dead_letters(store, DateTime.now() + 1, 100) do
+          Ok(n)  -> Test.assert_eq_int(n, 1, "one dead letter pruned")
+          Err(e) -> Test.assert_true(false, "prune_dead_letters errored: " ++ e)
+        end
+    end
+  end
+
+  test "postgres: prune_workflows removes terminal workflows and child rows" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = pstore()
+        let wf = pmk_workflow("prwf1")
+        let _ = Conduit.Storage.workflow_insert(store, wf)
+        let _ = Conduit.Storage.workflow_update_status(store, "prwf1", "completed", Some("{}"), None)
+        let _ = Conduit.Storage.checkpoint_set(store, "prwf1", "step1", "42", 10)
+        let _ = Conduit.Storage.event_append(store, "prwf1", 0, "checkpoint", "{\"v\":1}")
+        match Conduit.Storage.prune_workflows(store, DateTime.now() + 1, 100) do
+          Ok(n)  -> Test.assert_eq_int(n, 1, "one workflow pruned")
+          Err(e) -> Test.assert_true(false, "prune_workflows errored: " ++ e)
+        end
+        match Conduit.Storage.workflow_load(store, "prwf1") do
+          Ok(None) -> Test.assert_true(true, "")
+          _        -> Test.assert_true(false, "pruned workflow should be gone")
+        end
+    end
+  end
+
 end

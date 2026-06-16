@@ -214,6 +214,31 @@ mod Conduit do
     errors       : List(String)
   }
 
+  -- ── Retention / pruning ────────────────────────────────────────────────────
+  --
+  -- `RetentionConfig` controls how long terminal rows are kept before the
+  -- leader-only background pruner deletes them in batches.  Set
+  -- `Config.retention = Some(RetentionConfig.default())` to enable pruning.
+  --
+  --   completed_after_ms  — delete completed jobs older than this.
+  --                         Defaults to 86 400 000 (24 h).
+  --   dead_after_ms       — delete dead/discarded job rows AND their dead-letter
+  --                         records older than this.  Defaults to 604 800 000 (7 d).
+  --   workflow_after_ms   — delete completed/failed/cancelled/timed-out workflows,
+  --                         their checkpoints, signals, and events older than this.
+  --                         Defaults to 604 800 000 (7 d).
+  --   prune_batch_size    — max rows per DELETE statement.  Keeps transactions short
+  --                         and avoids long table locks.  Defaults to 1 000.
+  --   prune_interval_ms   — how often the pruner runs (on the leader).
+  --                         Defaults to 300 000 (5 min).
+  type RetentionConfig = {
+    completed_after_ms : Int,
+    dead_after_ms      : Int,
+    workflow_after_ms  : Int,
+    prune_batch_size   : Int,
+    prune_interval_ms  : Int
+  }
+
   -- ── Runtime configuration ──────────────────────────────────────────────────
   --
   -- `Config` is passed to `Conduit.API.start` and governs worker pool sizing,
@@ -241,6 +266,9 @@ mod Conduit do
   --                             to finish before deregistering the node.  Workers
   --                             stop polling new jobs immediately when drain begins.
   --                             Defaults to 15 000 ms.
+  --   retention               — optional pruning config.  None disables the pruner
+  --                             (default).  Set to Some(RetentionConfig.default())
+  --                             to enable automatic table pruning on the leader.
   type Config = {
     queues                  : List(String),
     workers_per_queue       : Int,
@@ -249,7 +277,8 @@ mod Conduit do
     node_id                 : String,
     heartbeat_interval_ms   : Int,
     stale_node_threshold_ms : Int,
-    drain_timeout_ms        : Int
+    drain_timeout_ms        : Int,
+    retention               : Option(RetentionConfig)
   }
 
   -- ── Cron ──────────────────────────────────────────────────────────────────
@@ -709,6 +738,24 @@ mod Conduit do
     fn event_load_all : s -> String -> Result(List(WorkflowEvent), String)
     fn event_load_up_to : s -> String -> Int -> Result(List(WorkflowEvent), String)
     fn event_count : s -> String -> Result(Int, String)
+
+    -- ── Pruning / retention ────────────────────────────────────────────────
+    --
+    -- Each method deletes at most `batch_size` rows older than `cutoff_s`
+    -- (Unix epoch seconds) and returns the number of rows deleted.  Callers
+    -- run in a loop until 0 is returned or a configured limit is reached.
+    --
+    -- `prune_jobs`        — DELETE completed conduit_jobs rows (status = 'completed')
+    --                       where completed_at < cutoff_s.
+    -- `prune_dead_letters` — DELETE conduit_dead_letters rows where discarded_at < cutoff_s.
+    --                        Also deletes the associated conduit_jobs row (status 'dead').
+    -- `prune_workflows`   — DELETE terminal conduit_workflows rows (status IN
+    --                       ('completed','failed','cancelled','timed_out')) where
+    --                       completed_at < cutoff_s, cascading to conduit_checkpoints,
+    --                       conduit_workflow_signals, and conduit_workflow_events.
+    fn prune_jobs         : s -> Int -> Int -> Result(Int, String)
+    fn prune_dead_letters : s -> Int -> Int -> Result(Int, String)
+    fn prune_workflows    : s -> Int -> Int -> Result(Int, String)
   end
 
   -- ── Top-level convenience forwarders ────────────────────────────────────────
