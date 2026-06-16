@@ -27,4 +27,4 @@ jobs:
         run: forge build
 
       - name: Test
-        run: forge test
+        run: forge test --release
