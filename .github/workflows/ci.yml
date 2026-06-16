@@ -17,6 +17,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check out depot
+        uses: actions/checkout@v4
+        with:
+          repository: march-language/depot
+          path: ../depot
+
       - name: Set up March
         uses: march-language/setup-march@main
 
