@@ -18,10 +18,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Check out depot
-        uses: actions/checkout@v4
-        with:
-          repository: march-language/depot
-          path: ../depot
+        run: git clone --depth 1 https://github.com/march-language/depot.git ../depot
 
       - name: Set up March
         uses: march-language/setup-march@main
