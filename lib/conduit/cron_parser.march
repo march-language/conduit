@@ -84,7 +84,7 @@ mod Conduit.CronParser do
                pparse_field(mo,  1, 12),
                pparse_field(dow, 0, 6)) do
           (Ok(m), Ok(h), Ok(d), Ok(mo2), Ok(w)) ->
-            Ok({ minute = m, hour = h, dom = d, month = mo2, dow = w })
+            Ok({ minute: m, hour: h, dom: d, month: mo2, dow: w })
           (Err(e), _, _, _, _) -> Err("minute: " ++ e)
           (_, Err(e), _, _, _) -> Err("hour: "   ++ e)
           (_, _, Err(e), _, _) -> Err("dom: "    ++ e)

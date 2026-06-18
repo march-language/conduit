@@ -24,8 +24,8 @@ mod Conduit.Queue do
         Raise   → return Err("unique constraint violated …").
         Replace → continue with insert (the caller is responsible for the old job).
 
-  The new row is inserted with status = "pending", attempt = 0, and
-  run_at = NOW().
+  The new row is inserted with status: "pending", attempt: 0, and
+  run_at: NOW().
   """
   fn enqueue(storage : s, job_type : String, payload : String, config : Conduit.JobConfig) : Result(String, String) do
     let id  = uuid_v7(())
@@ -38,26 +38,26 @@ mod Conduit.Queue do
           Some(eid) -> Ok(eid)
           None ->
             let row : Conduit.JobRow = {
-              id                = id,
-              queue             = config.queue,
-              job_type          = job_type,
-              payload           = payload,
-              status            = "pending",
-              attempt           = 0,
-              max_attempts      = config.max_attempts,
-              priority          = config.priority,
-              backoff           = pbackoff_name(config.backoff),
-              dead_letter_queue = config.dead_letter_queue,
-              inserted_at       = now,
-              scheduled_at      = now,
-              run_at            = now,
-              started_at        = None,
-              completed_at      = None,
-              heartbeat_at      = None,
-              worker_id         = None,
-              unique_key        = unique_key,
-              errors            = Nil,
-              tags              = config.tags
+              id: id,
+              queue: config.queue,
+              job_type: job_type,
+              payload: payload,
+              status: "pending",
+              attempt: 0,
+              max_attempts: config.max_attempts,
+              priority: config.priority,
+              backoff: pbackoff_name(config.backoff),
+              dead_letter_queue: config.dead_letter_queue,
+              inserted_at: now,
+              scheduled_at: now,
+              run_at: now,
+              started_at: None,
+              completed_at: None,
+              heartbeat_at: None,
+              worker_id: None,
+              unique_key: unique_key,
+              errors: Nil,
+              tags: config.tags
             }
             let result = Conduit.Storage.enqueue(storage, row)
             let _ = match result do
@@ -91,26 +91,26 @@ mod Conduit.Queue do
           Some(eid) -> Ok(eid)
           None ->
             let row : Conduit.JobRow = {
-              id                = id,
-              queue             = config.queue,
-              job_type          = job_type,
-              payload           = payload,
-              status            = "pending",
-              attempt           = 0,
-              max_attempts      = config.max_attempts,
-              priority          = config.priority,
-              backoff           = pbackoff_name(config.backoff),
-              dead_letter_queue = config.dead_letter_queue,
-              inserted_at       = now,
-              scheduled_at      = now,
-              run_at            = run_at,
-              started_at        = None,
-              completed_at      = None,
-              heartbeat_at      = None,
-              worker_id         = None,
-              unique_key        = unique_key,
-              errors            = Nil,
-              tags              = config.tags
+              id: id,
+              queue: config.queue,
+              job_type: job_type,
+              payload: payload,
+              status: "pending",
+              attempt: 0,
+              max_attempts: config.max_attempts,
+              priority: config.priority,
+              backoff: pbackoff_name(config.backoff),
+              dead_letter_queue: config.dead_letter_queue,
+              inserted_at: now,
+              scheduled_at: now,
+              run_at: run_at,
+              started_at: None,
+              completed_at: None,
+              heartbeat_at: None,
+              worker_id: None,
+              unique_key: unique_key,
+              errors: Nil,
+              tags: config.tags
             }
             let result = Conduit.Storage.enqueue(storage, row)
             let _ = match result do

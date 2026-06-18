@@ -5,7 +5,7 @@
 -- can render an error page on failure.
 mod Conduit.Dashboard.Actions do
 
-  doc "Retry a job: reset to pending with attempt = 0."
+  doc "Retry a job: reset to pending with attempt: 0."
   fn retry_job(storage : s, job_id : String) : Result((), String) do
     Conduit.Storage.job_retry(storage, job_id)
   end
@@ -37,20 +37,20 @@ mod Conduit.Dashboard.Actions do
       Ok(Some(dl)) ->
         let base_config = Conduit.Queue.lookup_config(dl.job_type)
           |> Option.unwrap_or({
-              queue             = dl.queue,
-              max_attempts      = 3,
-              timeout           = 30000,
-              backoff           = Conduit.Backoff.exponential(),
-              dead_letter_queue = None,
-              unique_for        = None,
-              on_conflict       = Conduit.UniqueConflict.Ignore,
-              rate_limit        = None,
-              on_dead_letter    = None,
-              priority          = 0,
-              tags              = Nil,
-              discard_after     = None
+              queue: dl.queue,
+              max_attempts: 3,
+              timeout: 30000,
+              backoff: Conduit.Backoff.exponential(),
+              dead_letter_queue: None,
+              unique_for: None,
+              on_conflict: Conduit.UniqueConflict.Ignore,
+              rate_limit: None,
+              on_dead_letter: None,
+              priority: 0,
+              tags: Nil,
+              discard_after: None
             })
-        let job_config = { base_config with queue = dl.queue }
+        let job_config = { base_config with queue: dl.queue }
         match Conduit.Queue.enqueue(storage, dl.job_type, dl.payload, job_config) do
           Err(e)       -> Err(e)
           Ok(new_id) ->
@@ -114,7 +114,7 @@ mod Conduit.Dashboard.Actions do
       Ok(Some(sched)) ->
         let base_config = Conduit.Queue.lookup_config(sched.job_type)
           |> Option.unwrap_or(Conduit.JobConfig.default())
-        let job_config = { base_config with queue = sched.queue }
+        let job_config = { base_config with queue: sched.queue }
         Conduit.Queue.enqueue(storage, sched.job_type, sched.payload, job_config)
     end
   end

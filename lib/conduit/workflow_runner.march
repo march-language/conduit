@@ -42,11 +42,11 @@ mod Conduit.WorkflowRunner do
     let base_config = Conduit.Queue.lookup_config(job_type())
       |> Option.unwrap_or(Conduit.JobConfig.default())
     let job_config = { base_config with
-      max_attempts  = 3,
-      timeout       = 30000,
-      backoff       = Conduit.Backoff.exponential(),
-      tags          = config.tags,
-      discard_after = None
+      max_attempts: 3,
+      timeout: 30000,
+      backoff: Conduit.Backoff.exponential(),
+      tags: config.tags,
+      discard_after: None
     }
     let payload = "{\"workflow_id\":\"" ++ workflow_id ++ "\"}"
     Conduit.Queue.enqueue(storage, job_type(), payload, job_config)

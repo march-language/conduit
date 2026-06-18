@@ -244,19 +244,19 @@ mod Conduit.API do
     end
     let timeout_at = Option.map(config.timeout, fn dur -> DateTime.add(now, dur))
     let row = {
-      id            = id,
-      workflow_type = workflow_type,
-      parent_id     = None,
-      input         = input_json,
-      output        = None,
-      status        = "running",
-      started_at    = now,
-      completed_at  = None,
-      timeout_at    = timeout_at,
-      error         = None,
-      error_at      = None,
-      tags          = config.tags,
-      meta          = "{}"
+      id: id,
+      workflow_type: workflow_type,
+      parent_id: None,
+      input: input_json,
+      output: None,
+      status: "running",
+      started_at: now,
+      completed_at: None,
+      timeout_at: timeout_at,
+      error: None,
+      error_at: None,
+      tags: config.tags,
+      meta: "{}"
     }
     match Conduit.Storage.workflow_insert(storage, row) do
       Err(e)  -> Err(e)
@@ -264,7 +264,7 @@ mod Conduit.API do
         match Conduit.WorkflowRunner.enqueue(storage, id, config) do
           Err(e) -> Err(e)
           Ok(_)  ->
-            Ok({ id = id, workflow_type = workflow_type, started_at = now })
+            Ok({ id: id, workflow_type: workflow_type, started_at: now })
         end
     end
   end
@@ -293,15 +293,15 @@ mod Conduit.API do
   fn signal_workflow(workflow_id : String, signal_type : String, payload_json : String, storage : s) : Result(Int, String) do
     let now = DateTime.from_timestamp(DateTime.now())
     let signal : Conduit.WorkflowSignal = {
-      id           = 0,
-      workflow_id  = workflow_id,
-      signal_type  = signal_type,
-      payload      = payload_json,
-      status       = "pending",
-      sent_at      = now,
-      delivered_at = None,
-      expires_at   = None,
-      sent_by      = None
+      id: 0,
+      workflow_id: workflow_id,
+      signal_type: signal_type,
+      payload: payload_json,
+      status: "pending",
+      sent_at: now,
+      delivered_at: None,
+      expires_at: None,
+      sent_by: None
     }
     Conduit.Storage.signal_insert(storage, signal)
   end
@@ -318,7 +318,7 @@ mod Conduit.API do
   doc """
   Return all currently active cluster nodes.
 
-  Queries `conduit_workers` for nodes with status='running'.
+  Queries `conduit_workers` for nodes with status:'running'.
   Useful for dashboards and monitoring.
   """
   fn cluster_nodes(storage : s) : Result(List(NodeInfo), String) do
@@ -474,7 +474,7 @@ mod Conduit.API do
     match Conduit.Storage.cron_load_by_id(storage, cron_id) do
       Err(e)          -> Err(e)
       Ok(None)        -> Err("cron schedule not found: " ++ cron_id)
-      Ok(Some(sched)) -> Ok({ sched with enabled = enabled })
+      Ok(Some(sched)) -> Ok({ sched with enabled: enabled })
     end
   end
 end

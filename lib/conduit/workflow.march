@@ -1,9 +1,9 @@
 mod Conduit.WorkflowConfig do
   fn default() : Conduit.WorkflowConfig do
     {
-      execution_mode = Conduit.ExecutionMode.Checkpoint,
-      timeout        = None,
-      tags           = Nil
+      execution_mode: Conduit.ExecutionMode.Checkpoint,
+      timeout: None,
+      tags: Nil
     }
   end
 end

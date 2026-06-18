@@ -13,24 +13,24 @@ import Migration
 fn up() do
   [
     CreateTable({
-      name    = "conduit_cron_schedules",
-      columns = [
-        { name = "id",          col_type = "text",        nullable = false, default_ = None,               primary_key = true,  unique_ = false, references = None },
-        { name = "job_type",    col_type = "text",        nullable = false, default_ = None,               primary_key = false, unique_ = false, references = None },
-        { name = "schedule",    col_type = "text",        nullable = false, default_ = None,               primary_key = false, unique_ = false, references = None },
-        { name = "timezone",    col_type = "text",        nullable = false, default_ = Some("'UTC'"),       primary_key = false, unique_ = false, references = None },
-        { name = "queue",       col_type = "text",        nullable = false, default_ = Some("'default'"),   primary_key = false, unique_ = false, references = None },
-        { name = "payload",     col_type = "text",        nullable = false, default_ = Some("'{}'"),        primary_key = false, unique_ = false, references = None },
-        { name = "overlap",     col_type = "text",        nullable = false, default_ = Some("'skip'"),      primary_key = false, unique_ = false, references = None },
-        { name = "enabled",     col_type = "boolean",     nullable = false, default_ = Some("TRUE"),        primary_key = false, unique_ = false, references = None },
-        { name = "last_run_at", col_type = "timestamptz", nullable = true,  default_ = None,               primary_key = false, unique_ = false, references = None },
-        { name = "last_job_id", col_type = "text",        nullable = true,  default_ = None,               primary_key = false, unique_ = false, references = Some(("conduit_jobs", "id")) },
-        { name = "next_run_at", col_type = "timestamptz", nullable = true,  default_ = None,               primary_key = false, unique_ = false, references = None },
-        { name = "tags",        col_type = "text",        nullable = false, default_ = Some("''"),          primary_key = false, unique_ = false, references = None },
-        { name = "inserted_at", col_type = "timestamptz", nullable = false, default_ = Some("NOW()"),       primary_key = false, unique_ = false, references = None },
-        { name = "updated_at",  col_type = "timestamptz", nullable = false, default_ = Some("NOW()"),       primary_key = false, unique_ = false, references = None }
+      name: "conduit_cron_schedules",
+      columns: [
+        { name: "id",          col_type: "text",        nullable: false, default_: None,               primary_key: true,  unique_: false, references: None },
+        { name: "job_type",    col_type: "text",        nullable: false, default_: None,               primary_key: false, unique_: false, references: None },
+        { name: "schedule",    col_type: "text",        nullable: false, default_: None,               primary_key: false, unique_: false, references: None },
+        { name: "timezone",    col_type: "text",        nullable: false, default_: Some("'UTC'"),       primary_key: false, unique_: false, references: None },
+        { name: "queue",       col_type: "text",        nullable: false, default_: Some("'default'"),   primary_key: false, unique_: false, references: None },
+        { name: "payload",     col_type: "text",        nullable: false, default_: Some("'{}'"),        primary_key: false, unique_: false, references: None },
+        { name: "overlap",     col_type: "text",        nullable: false, default_: Some("'skip'"),      primary_key: false, unique_: false, references: None },
+        { name: "enabled",     col_type: "boolean",     nullable: false, default_: Some("TRUE"),        primary_key: false, unique_: false, references: None },
+        { name: "last_run_at", col_type: "timestamptz", nullable: true,  default_: None,               primary_key: false, unique_: false, references: None },
+        { name: "last_job_id", col_type: "text",        nullable: true,  default_: None,               primary_key: false, unique_: false, references: Some(("conduit_jobs", "id")) },
+        { name: "next_run_at", col_type: "timestamptz", nullable: true,  default_: None,               primary_key: false, unique_: false, references: None },
+        { name: "tags",        col_type: "text",        nullable: false, default_: Some("''"),          primary_key: false, unique_: false, references: None },
+        { name: "inserted_at", col_type: "timestamptz", nullable: false, default_: Some("NOW()"),       primary_key: false, unique_: false, references: None },
+        { name: "updated_at",  col_type: "timestamptz", nullable: false, default_: Some("NOW()"),       primary_key: false, unique_: false, references: None }
       ],
-      pk = None
+      pk: None
     }),
     -- Fast lookup for the scheduler tick: all enabled schedules that are due.
     RawSql("CREATE INDEX IF NOT EXISTS idx_conduit_cron_due ON conduit_cron_schedules (next_run_at) WHERE enabled = TRUE"),

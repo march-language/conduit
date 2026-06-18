@@ -19,7 +19,7 @@ mod Conduit.WorkflowRegistry do
   fn lookup(workflow_type : String) : Option(WorkflowEntry) do
     match Vault.get(registry_key(), "cfg:" ++ workflow_type) do
       None      -> None
-      Some(cfg) -> Some({ config = cfg })
+      Some(cfg) -> Some({ config: cfg })
     end
   end
 

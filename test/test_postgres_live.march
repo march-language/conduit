@@ -20,8 +20,8 @@ mod ConduitPostgresLiveTest do
   -- Connect and TRUNCATE the job tables for a clean slate.
   -- Returns Err if the DB is unreachable (tests treat that as "skip").
   pfn psetup() : Result((), String) do
-    match Connection.connect({ host = "127.0.0.1", port = 5432, user = puser(),
-                               database = "conduit_test", password = None }) do
+    match Connection.connect({ host: "127.0.0.1", port: 5432, user: puser(),
+                               database: "conduit_test", password: None }) do
       Err(e)   -> Err(e)
       Ok(conn) ->
         let _ = Connection.simple_query(conn, "TRUNCATE conduit_jobs, conduit_dead_letters, conduit_cron_schedules, conduit_workflows, conduit_checkpoints, conduit_workflow_signals, conduit_workers, conduit_rate_limit_buckets CASCADE")
@@ -35,56 +35,56 @@ mod ConduitPostgresLiveTest do
   pfn pmk_job(id : String, queue : String, priority : Int, run_offset : Int) : Conduit.JobRow do
     let now = DateTime.now()
     {
-      id = id, queue = queue, job_type = "TestJob", payload = "{}",
-      status = "pending", attempt = 0, max_attempts = 3, priority = priority,
-      backoff = "exponential", dead_letter_queue = None,
-      inserted_at = DateTime.from_timestamp(now),
-      scheduled_at = DateTime.from_timestamp(now),
-      run_at = DateTime.from_timestamp(now + run_offset),
-      started_at = None, completed_at = None, heartbeat_at = None,
-      worker_id = None, unique_key = None, errors = Nil, tags = Nil
+      id: id, queue: queue, job_type: "TestJob", payload: "{}",
+      status: "pending", attempt: 0, max_attempts: 3, priority: priority,
+      backoff: "exponential", dead_letter_queue: None,
+      inserted_at: DateTime.from_timestamp(now),
+      scheduled_at: DateTime.from_timestamp(now),
+      run_at: DateTime.from_timestamp(now + run_offset),
+      started_at: None, completed_at: None, heartbeat_at: None,
+      worker_id: None, unique_key: None, errors: Nil, tags: Nil
     }
   end
 
   -- Build a CronSchedule whose next_run_at is now + offset seconds.
   pfn pmk_cron(id : String, next_offset : Int) : Conduit.CronSchedule do
     {
-      id = id, job_type = "CronJob", schedule = "* * * * *", timezone = "UTC",
-      queue = "default", payload = "{}", overlap = "skip", enabled = true,
-      last_run_at = None, last_job_id = None,
-      next_run_at = Some(DateTime.from_timestamp(DateTime.now() + next_offset)),
-      tags = Nil, jitter_ms = None
+      id: id, job_type: "CronJob", schedule: "* * * * *", timezone: "UTC",
+      queue: "default", payload: "{}", overlap: "skip", enabled: true,
+      last_run_at: None, last_job_id: None,
+      next_run_at: Some(DateTime.from_timestamp(DateTime.now() + next_offset)),
+      tags: Nil, jitter_ms: None
     }
   end
 
   -- Build a running WorkflowRow.
   pfn pmk_workflow(id : String) : Conduit.WorkflowRow do
     {
-      id = id, workflow_type = "TestWf", parent_id = None, input = "{}",
-      output = None, status = "running",
-      started_at = DateTime.from_timestamp(DateTime.now()),
-      completed_at = None, timeout_at = None, error = None, error_at = None,
-      tags = Nil, meta = "{}"
+      id: id, workflow_type: "TestWf", parent_id: None, input: "{}",
+      output: None, status: "running",
+      started_at: DateTime.from_timestamp(DateTime.now()),
+      completed_at: None, timeout_at: None, error: None, error_at: None,
+      tags: Nil, meta: "{}"
     }
   end
 
   -- Build a pending WorkflowSignal for an existing workflow.
   pfn pmk_signal(wf_id : String, stype : String) : Conduit.WorkflowSignal do
     {
-      id = 0, workflow_id = wf_id, signal_type = stype, payload = "{}",
-      status = "pending", sent_at = DateTime.from_timestamp(DateTime.now()),
-      delivered_at = None, expires_at = None, sent_by = None
+      id: 0, workflow_id: wf_id, signal_type: stype, payload: "{}",
+      status: "pending", sent_at: DateTime.from_timestamp(DateTime.now()),
+      delivered_at: None, expires_at: None, sent_by: None
     }
   end
 
   -- Build a running NodeInfo; last_seen_at = now + offset seconds.
   pfn pmk_node(id : String, last_seen_offset : Int) : Conduit.NodeInfo do
     {
-      id = id, hostname = "host1", pid = 4321,
-      queues = Cons("default", Nil), pool_size = 4,
-      started_at = DateTime.from_timestamp(DateTime.now()),
-      last_seen_at = DateTime.from_timestamp(DateTime.now() + last_seen_offset),
-      status = "running"
+      id: id, hostname: "host1", pid: 4321,
+      queues: Cons("default", Nil), pool_size: 4,
+      started_at: DateTime.from_timestamp(DateTime.now()),
+      last_seen_at: DateTime.from_timestamp(DateTime.now() + last_seen_offset),
+      status: "running"
     }
   end
 
@@ -107,11 +107,11 @@ mod ConduitPostgresLiveTest do
   -- Build a DeadLetter for an existing job.
   pfn pmk_dl(id : String, job_id : String) : Conduit.DeadLetter do
     {
-      id = id, job_id = job_id, queue = "default", job_type = "TestJob",
-      payload = "{}", errors = Cons("boom", Nil), attempts = 3,
-      first_attempted_at = None, last_attempted_at = None,
-      discarded_at = DateTime.from_timestamp(DateTime.now()),
-      reviewed = false, reviewed_by = None, reviewed_at = None, retry_count = 0
+      id: id, job_id: job_id, queue: "default", job_type: "TestJob",
+      payload: "{}", errors: Cons("boom", Nil), attempts: 3,
+      first_attempted_at: None, last_attempted_at: None,
+      discarded_at: DateTime.from_timestamp(DateTime.now()),
+      reviewed: false, reviewed_by: None, reviewed_at: None, retry_count: 0
     }
   end
 
@@ -224,11 +224,11 @@ mod ConduitPostgresLiveTest do
         let _ = Conduit.Storage.enqueue(store, pmk_job("j5", "default", 0, 0))
         let now = DateTime.from_timestamp(DateTime.now())
         let dl = {
-          id = "dl5", job_id = "j5", queue = "default", job_type = "TestJob",
-          payload = "{}", errors = Cons("boom", Nil), attempts = 3,
-          first_attempted_at = None, last_attempted_at = None,
-          discarded_at = now, reviewed = false, reviewed_by = None,
-          reviewed_at = None, retry_count = 0
+          id: "dl5", job_id: "j5", queue: "default", job_type: "TestJob",
+          payload: "{}", errors: Cons("boom", Nil), attempts: 3,
+          first_attempted_at: None, last_attempted_at: None,
+          discarded_at: now, reviewed: false, reviewed_by: None,
+          reviewed_at: None, retry_count: 0
         }
         match Conduit.Storage.move_to_dead_letter(store, dl) do
           Err(e) -> Test.assert_true(false, "move_to_dead_letter errored: " ++ e)
@@ -249,7 +249,7 @@ mod ConduitPostgresLiveTest do
         -- A job stuck 'running' with a heartbeat from an hour ago.
         let old  = DateTime.from_timestamp(DateTime.now() - 3600)
         let base = pmk_job("j6", "default", 0, 0)
-        let stuck = { base with status = "running", started_at = Some(old), heartbeat_at = Some(old) }
+        let stuck = { base with status: "running", started_at: Some(old), heartbeat_at: Some(old) }
         let _ = Conduit.Storage.enqueue(store, stuck)
         -- threshold 60s: cutoff = now-60; heartbeat (now-3600) is older → stale.
         match Conduit.Storage.rescue_stale(store, 60) do
@@ -290,7 +290,7 @@ mod ConduitPostgresLiveTest do
         let store = pstore()
         let _ = Conduit.Storage.cron_upsert(store, pmk_cron("c1", 0))
         let base = pmk_cron("c1", 0)
-        let _ = Conduit.Storage.cron_upsert(store, { base with queue = "high" })
+        let _ = Conduit.Storage.cron_upsert(store, { base with queue: "high" })
         match Conduit.Storage.cron_load_by_id(store, "c1") do
           Ok(Some(c)) -> Test.assert_eq_str(c.queue, "high", "upsert updated the queue in place")
           _           -> Test.assert_true(false, "expected the updated cron")
@@ -306,7 +306,7 @@ mod ConduitPostgresLiveTest do
         let _ = Conduit.Storage.cron_upsert(store, pmk_cron("due", -10))
         let _ = Conduit.Storage.cron_upsert(store, pmk_cron("future", 3600))
         let dis = pmk_cron("disabled", -10)
-        let _ = Conduit.Storage.cron_upsert(store, { dis with enabled = false })
+        let _ = Conduit.Storage.cron_upsert(store, { dis with enabled: false })
         match Conduit.Storage.cron_load_due(store) do
           Err(e)  -> Test.assert_true(false, "cron_load_due errored: " ++ e)
           Ok(due) ->
@@ -608,7 +608,7 @@ mod ConduitPostgresLiveTest do
         let store = pstore()
         let old  = DateTime.from_timestamp(DateTime.now() - 3600)
         let base = pmk_job("orphan", "default", 0, 0)
-        let stuck = { base with status = "running", started_at = Some(old), heartbeat_at = Some(old) }
+        let stuck = { base with status: "running", started_at: Some(old), heartbeat_at: Some(old) }
         let _ = Conduit.Storage.enqueue(store, stuck)
         match Conduit.Storage.node_reclaim_jobs(store, 60) do
           Err(e)  -> Test.assert_true(false, "node_reclaim_jobs errored: " ++ e)
@@ -647,8 +647,8 @@ mod ConduitPostgresLiveTest do
             -- A separate session must NOT acquire the same lock while the store
             -- holds it — proving the lock persists past cron_advisory_lock's
             -- return (i.e. it lives on a dedicated connection, T0.3).
-            match Connection.connect({ host = "127.0.0.1", port = 5432, user = puser(),
-                                       database = "conduit_test", password = None }) do
+            match Connection.connect({ host: "127.0.0.1", port: 5432, user: puser(),
+                                       database: "conduit_test", password: None }) do
               Err(e)    -> Test.assert_true(false, "probe connect: " ++ e)
               Ok(other) ->
                 Test.assert_true(pquery_bool(other, "SELECT pg_try_advisory_lock(999111)") == false,
@@ -837,7 +837,7 @@ mod ConduitPostgresLiveTest do
       Ok(_)  ->
         let store = pstore()
         let base = pmk_job("u1", "default", 0, 0)
-        let _ = Conduit.Storage.enqueue(store, { base with unique_key = Some("fp-1") })
+        let _ = Conduit.Storage.enqueue(store, { base with unique_key: Some("fp-1") })
         match Conduit.Storage.unique_check(store, "fp-1") do
           Ok(true) ->
             let _ = Conduit.Storage.unique_release(store, "u1")
@@ -923,11 +923,11 @@ mod ConduitPostgresLiveTest do
         let _ = Conduit.Storage.enqueue(store, j)
         let _ = Conduit.Storage.mark_running(store, "prdl1", "w3")
         let dl : Conduit.DeadLetter = {
-          id = "dl-1", job_id = "prdl1", queue = "default", job_type = "TestJob",
-          payload = "{}", errors = Cons("boom", Nil), attempts = 1,
-          first_attempted_at = None, last_attempted_at = None,
-          discarded_at = DateTime.from_timestamp(DateTime.now()),
-          reviewed = false, reviewed_by = None, reviewed_at = None, retry_count = 0
+          id: "dl-1", job_id: "prdl1", queue: "default", job_type: "TestJob",
+          payload: "{}", errors: Cons("boom", Nil), attempts: 1,
+          first_attempted_at: None, last_attempted_at: None,
+          discarded_at: DateTime.from_timestamp(DateTime.now()),
+          reviewed: false, reviewed_by: None, reviewed_at: None, retry_count: 0
         }
         let _ = Conduit.Storage.move_to_dead_letter(store, dl)
         match Conduit.Storage.prune_dead_letters(store, DateTime.now() + 1, 100) do

@@ -13,18 +13,18 @@ import Migration
 fn up() do
   [
     -- Unique job fingerprints.
-    AddColumn("conduit_jobs", { name = "unique_key", col_type = "text", nullable = true, default_ = None, primary_key = false, unique_ = false, references = None }),
+    AddColumn("conduit_jobs", { name: "unique_key", col_type: "text", nullable: true, default_: None, primary_key: false, unique_: false, references: None }),
     -- Partial unique index: one active job per fingerprint at a time.
     RawSql("CREATE UNIQUE INDEX idx_conduit_jobs_unique_key ON conduit_jobs (unique_key) WHERE unique_key IS NOT NULL AND unique_key != '' AND status NOT IN ('completed', 'dead')"),
     -- Token bucket per rate-limit key.
     CreateTable({
-      name    = "conduit_rate_limit_buckets",
-      columns = [
-        { name = "key",         col_type = "text",        nullable = false, default_ = None,          primary_key = true,  unique_ = false, references = None },
-        { name = "tokens",      col_type = "decimal",     nullable = false, default_ = Some("0"),      primary_key = false, unique_ = false, references = None },
-        { name = "last_refill", col_type = "timestamptz", nullable = false, default_ = Some("NOW()"),  primary_key = false, unique_ = false, references = None }
+      name: "conduit_rate_limit_buckets",
+      columns: [
+        { name: "key",         col_type: "text",        nullable: false, default_: None,          primary_key: true,  unique_: false, references: None },
+        { name: "tokens",      col_type: "decimal",     nullable: false, default_: Some("0"),      primary_key: false, unique_: false, references: None },
+        { name: "last_refill", col_type: "timestamptz", nullable: false, default_: Some("NOW()"),  primary_key: false, unique_: false, references: None }
       ],
-      pk = None
+      pk: None
     }),
     -- Index for optional maintenance cleanup of stale buckets.
     RawSql("CREATE INDEX idx_conduit_rate_limit_stale ON conduit_rate_limit_buckets (last_refill) WHERE last_refill < NOW() - INTERVAL '24 hours'")

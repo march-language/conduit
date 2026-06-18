@@ -76,7 +76,7 @@ mod Conduit.CronScheduler do
     -- performer to different queues per cron schedule.
     let base_config = Conduit.Queue.lookup_config(sched.job_type)
       |> Option.unwrap_or(Conduit.JobConfig.default())
-    let config = { base_config with queue = sched.queue, tags = sched.tags }
+    let config = { base_config with queue: sched.queue, tags: sched.tags }
 
     -- Apply jitter: if jitter_ms is set, delay the job by a random amount within
     -- [0, jitter_ms].  Prevents thundering-herd when many crons fire at the same second.
@@ -130,19 +130,19 @@ mod Conduit.CronScheduler do
       Err(_) -> None
     end
     let sched : Conduit.CronSchedule = {
-      id          = cron_type,    -- static crons use their type name as id
-      job_type    = cron_type,
-      schedule    = config.schedule,
-      timezone    = config.timezone,
-      queue       = config.queue,
-      payload     = "{}",
-      overlap     = Conduit.CronRegistry.overlap_to_string(config.overlap),
-      enabled     = true,
-      last_run_at = None,
-      last_job_id = None,
-      next_run_at = next,
-      tags        = config.tags,
-      jitter_ms   = config.jitter_ms
+      id: cron_type,    -- static crons use their type name as id
+      job_type: cron_type,
+      schedule: config.schedule,
+      timezone: config.timezone,
+      queue: config.queue,
+      payload: "{}",
+      overlap: Conduit.CronRegistry.overlap_to_string(config.overlap),
+      enabled: true,
+      last_run_at: None,
+      last_job_id: None,
+      next_run_at: next,
+      tags: config.tags,
+      jitter_ms: config.jitter_ms
     }
     Conduit.Storage.cron_upsert(storage, sched)
   end

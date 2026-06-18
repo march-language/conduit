@@ -2,7 +2,7 @@
 --
 -- Each strategy maps (attempt : Int) to a delay in milliseconds.  "attempt" is
 -- the 1-based retry count: attempt=1 is the first retry after the initial
--- failure, attempt=2 is the second, etc.
+-- failure, attempt:2 is the second, etc.
 --
 -- The internal Conduit.Backoff type uses constructor names prefixed with
 -- "Conduit" (ConduitLinear, ConduitExponential, etc.) so they do not clash

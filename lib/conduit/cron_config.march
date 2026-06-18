@@ -1,12 +1,12 @@
 mod Conduit.CronConfig do
   fn default() : Conduit.CronConfig do
     {
-      schedule  = "* * * * *",
-      timezone  = "UTC",
-      queue     = "default",
-      overlap   = Conduit.CronOverlap.Skip,
-      tags      = Nil,
-      jitter_ms = None
+      schedule: "* * * * *",
+      timezone: "UTC",
+      queue: "default",
+      overlap: Conduit.CronOverlap.Skip,
+      tags: Nil,
+      jitter_ms: None
     }
   end
 end

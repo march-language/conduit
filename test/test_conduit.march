@@ -167,12 +167,12 @@ mod ConduitTest do
       let key = "events:" ++ workflow_id
       let events = Vault.get(pfake_tbl(self.vault_key), key) |> unwrap_or(Nil)
       let evt = {
-        id          = List.length(events) + 1,
-        workflow_id = workflow_id,
-        sequence    = sequence,
-        event_type  = event_type,
-        payload     = payload,
-        recorded_at = DateTime.from_timestamp(DateTime.now())
+        id: List.length(events) + 1,
+        workflow_id: workflow_id,
+        sequence: sequence,
+        event_type: event_type,
+        payload: payload,
+        recorded_at: DateTime.from_timestamp(DateTime.now())
       }
       Vault.set(pfake_tbl(self.vault_key), key, List.append(events, Cons(evt, Nil)))
       Ok(evt.id)
@@ -389,33 +389,33 @@ mod ConduitTest do
     -- Wrap fake_enqueue as a storage value by calling directly.
     -- In a real test we'd use an impl; here we test Queue logic by
     -- inspecting what would be passed to the storage.
-    let config  = { Conduit.JobConfig.default() with queue = "test_queue", priority = 5 }
+    let config  = { Conduit.JobConfig.default() with queue: "test_queue", priority: 5 }
     let payload = "{\"name\": \"World\"}"
     let id      = base64_encode(random_bytes(16))
 
     -- Build the row manually as Queue.enqueue would
     let now = DateTime.from_timestamp(DateTime.now())
     let row : Conduit.JobRow = {
-      id                = id,
-      queue             = config.queue,
-      job_type          = "GreetingJob",
-      payload           = payload,
-      status            = "pending",
-      attempt           = 0,
-      max_attempts      = config.max_attempts,
-      priority          = config.priority,
-      backoff           = "exponential",
-      dead_letter_queue = None,
-      inserted_at       = now,
-      scheduled_at      = now,
-      run_at            = now,
-      started_at        = None,
-      completed_at      = None,
-      heartbeat_at      = None,
-      worker_id         = None,
-      unique_key        = None,
-      errors            = Nil,
-      tags              = config.tags
+      id: id,
+      queue: config.queue,
+      job_type: "GreetingJob",
+      payload: payload,
+      status: "pending",
+      attempt: 0,
+      max_attempts: config.max_attempts,
+      priority: config.priority,
+      backoff: "exponential",
+      dead_letter_queue: None,
+      inserted_at: now,
+      scheduled_at: now,
+      run_at: now,
+      started_at: None,
+      completed_at: None,
+      heartbeat_at: None,
+      worker_id: None,
+      unique_key: None,
+      errors: Nil,
+      tags: config.tags
     }
     fake_enqueue(key, row)
     let stored = jobs_in_store(key)
@@ -462,26 +462,26 @@ mod ConduitTest do
   pfn sample_job_row(job_type : String) : Conduit.JobRow do
     let now = DateTime.from_timestamp(DateTime.now())
     {
-      id                = base64_encode(random_bytes(16)),
-      queue             = "default",
-      job_type          = job_type,
-      payload           = "{}",
-      status            = "running",
-      attempt           = 1,
-      max_attempts      = 3,
-      priority          = 0,
-      backoff           = "exponential",
-      dead_letter_queue = None,
-      inserted_at       = now,
-      scheduled_at      = now,
-      run_at            = now,
-      started_at        = Some(now),
-      completed_at      = None,
-      heartbeat_at      = Some(now),
-      worker_id         = Some("worker-1"),
-      unique_key        = None,
-      errors            = Nil,
-      tags              = Nil
+      id: base64_encode(random_bytes(16)),
+      queue: "default",
+      job_type: job_type,
+      payload: "{}",
+      status: "running",
+      attempt: 1,
+      max_attempts: 3,
+      priority: 0,
+      backoff: "exponential",
+      dead_letter_queue: None,
+      inserted_at: now,
+      scheduled_at: now,
+      run_at: now,
+      started_at: Some(now),
+      completed_at: None,
+      heartbeat_at: Some(now),
+      worker_id: Some("worker-1"),
+      unique_key: None,
+      errors: Nil,
+      tags: Nil
     }
   end
 
@@ -628,7 +628,7 @@ mod ConduitTest do
 
   test "lookup_config_returns_registered_config" do
     let job_type = "ConfigJob_" ++ base64_encode(random_bytes(16))
-    let cfg      = { Conduit.JobConfig.default() with max_attempts = 7, queue = "priority" }
+    let cfg      = { Conduit.JobConfig.default() with max_attempts: 7, queue: "priority" }
     Conduit.Queue.register_performer(job_type, fn _ -> Ok(()), cfg)
     let result = Conduit.Queue.lookup_config(job_type)
     assert_some(result)
@@ -652,26 +652,26 @@ mod ConduitTest do
   test "dead_letter_from_job_builds_correct_record" do
     let now = DateTime.from_timestamp(DateTime.now())
     let job : Conduit.JobRow = {
-      id                = "job-123",
-      queue             = "default",
-      job_type          = "SomeJob",
-      payload           = "{\"x\": 1}",
-      status            = "running",
-      attempt           = 3,
-      max_attempts      = 3,
-      priority          = 0,
-      backoff           = "exponential",
-      dead_letter_queue = Some("dlq"),
-      inserted_at       = now,
-      scheduled_at      = now,
-      run_at            = now,
-      started_at        = Some(now),
-      completed_at      = None,
-      heartbeat_at      = Some(now),
-      worker_id         = Some("w1"),
-      unique_key        = None,
-      errors            = Cons("err1", Nil),
-      tags              = Nil
+      id: "job-123",
+      queue: "default",
+      job_type: "SomeJob",
+      payload: "{\"x\": 1}",
+      status: "running",
+      attempt: 3,
+      max_attempts: 3,
+      priority: 0,
+      backoff: "exponential",
+      dead_letter_queue: Some("dlq"),
+      inserted_at: now,
+      scheduled_at: now,
+      run_at: now,
+      started_at: Some(now),
+      completed_at: None,
+      heartbeat_at: Some(now),
+      worker_id: Some("w1"),
+      unique_key: None,
+      errors: Cons("err1", Nil),
+      tags: Nil
     }
     let dl = Conduit.DeadLetter.from_job(job, "final error")
     assert_eq_str(dl.job_id,   "job-123")
@@ -687,26 +687,26 @@ mod ConduitTest do
   test "dead_letter_to_job_info_matches_job" do
     let now = DateTime.from_timestamp(DateTime.now())
     let job : Conduit.JobRow = {
-      id                = "job-456",
-      queue             = "media",
-      job_type          = "ProcessVideo",
-      payload           = "{}",
-      status            = "running",
-      attempt           = 2,
-      max_attempts      = 5,
-      priority          = 10,
-      backoff           = "linear",
-      dead_letter_queue = None,
-      inserted_at       = now,
-      scheduled_at      = now,
-      run_at            = now,
-      started_at        = Some(now),
-      completed_at      = None,
-      heartbeat_at      = None,
-      worker_id         = None,
-      unique_key        = None,
-      errors            = Nil,
-      tags              = Cons("video", Nil)
+      id: "job-456",
+      queue: "media",
+      job_type: "ProcessVideo",
+      payload: "{}",
+      status: "running",
+      attempt: 2,
+      max_attempts: 5,
+      priority: 10,
+      backoff: "linear",
+      dead_letter_queue: None,
+      inserted_at: now,
+      scheduled_at: now,
+      run_at: now,
+      started_at: Some(now),
+      completed_at: None,
+      heartbeat_at: None,
+      worker_id: None,
+      unique_key: None,
+      errors: Nil,
+      tags: Cons("video", Nil)
     }
     let info = Conduit.DeadLetter.to_job_info(job)
     assert_eq_str(info.id,       "job-456")
@@ -740,7 +740,7 @@ mod ConduitTest do
   test "retry_with_remaining_attempts_schedules_retry" do
     let key      = setup_fake_storage()
     let job_type = "RetryRemaining_" ++ base64_encode(random_bytes(16))
-    let job      = sample_job_row(job_type)  -- attempt=1, max_attempts=3
+    let job      = sample_job_row(job_type)  -- attempt=1, max_attempts:3
     let config   = Conduit.JobConfig.default()
 
     -- Bind job.id early so Perceus tracks it as a separate local.
@@ -767,26 +767,26 @@ mod ConduitTest do
     let now      = DateTime.from_timestamp(DateTime.now())
     -- A job already at max_attempts
     let job : Conduit.JobRow = {
-      id                = base64_encode(random_bytes(16)),
-      queue             = "default",
-      job_type          = job_type,
-      payload           = "{}",
-      status            = "running",
-      attempt           = 3,
-      max_attempts      = 3,
-      priority          = 0,
-      backoff           = "exponential",
-      dead_letter_queue = None,
-      inserted_at       = now,
-      scheduled_at      = now,
-      run_at            = now,
-      started_at        = Some(now),
-      completed_at      = None,
-      heartbeat_at      = Some(now),
-      worker_id         = Some("w1"),
-      unique_key        = None,
-      errors            = Nil,
-      tags              = Nil
+      id: base64_encode(random_bytes(16)),
+      queue: "default",
+      job_type: job_type,
+      payload: "{}",
+      status: "running",
+      attempt: 3,
+      max_attempts: 3,
+      priority: 0,
+      backoff: "exponential",
+      dead_letter_queue: None,
+      inserted_at: now,
+      scheduled_at: now,
+      run_at: now,
+      started_at: Some(now),
+      completed_at: None,
+      heartbeat_at: Some(now),
+      worker_id: Some("w1"),
+      unique_key: None,
+      errors: Nil,
+      tags: Nil
     }
     let config = Conduit.JobConfig.default()
 
@@ -814,26 +814,26 @@ mod ConduitTest do
     let job_type = "DiscardDLQ_" ++ base64_encode(random_bytes(16))
     let now      = DateTime.from_timestamp(DateTime.now())
     let job : Conduit.JobRow = {
-      id                = base64_encode(random_bytes(16)),
-      queue             = "default",
-      job_type          = job_type,
-      payload           = "{}",
-      status            = "running",
-      attempt           = 1,
-      max_attempts      = 3,
-      priority          = 0,
-      backoff           = "exponential",
-      dead_letter_queue = Some("my_dlq"),
-      inserted_at       = now,
-      scheduled_at      = now,
-      run_at            = now,
-      started_at        = Some(now),
-      completed_at      = None,
-      heartbeat_at      = None,
-      worker_id         = None,
-      unique_key        = None,
-      errors            = Nil,
-      tags              = Nil
+      id: base64_encode(random_bytes(16)),
+      queue: "default",
+      job_type: job_type,
+      payload: "{}",
+      status: "running",
+      attempt: 1,
+      max_attempts: 3,
+      priority: 0,
+      backoff: "exponential",
+      dead_letter_queue: Some("my_dlq"),
+      inserted_at: now,
+      scheduled_at: now,
+      run_at: now,
+      started_at: Some(now),
+      completed_at: None,
+      heartbeat_at: None,
+      worker_id: None,
+      unique_key: None,
+      errors: Nil,
+      tags: Nil
     }
 
     -- DLQ is configured, so Discard routes to dead_letters
@@ -856,26 +856,26 @@ mod ConduitTest do
 
     let now = DateTime.from_timestamp(DateTime.now())
     let job : Conduit.JobRow = {
-      id                = base64_encode(random_bytes(16)),
-      queue             = "default",
-      job_type          = "CallbackJob",
-      payload           = "{}",
-      status            = "running",
-      attempt           = 3,
-      max_attempts      = 3,
-      priority          = 0,
-      backoff           = "exponential",
-      dead_letter_queue = Some("dlq"),
-      inserted_at       = now,
-      scheduled_at      = now,
-      run_at            = now,
-      started_at        = Some(now),
-      completed_at      = None,
-      heartbeat_at      = None,
-      worker_id         = None,
-      unique_key        = None,
-      errors            = Nil,
-      tags              = Nil
+      id: base64_encode(random_bytes(16)),
+      queue: "default",
+      job_type: "CallbackJob",
+      payload: "{}",
+      status: "running",
+      attempt: 3,
+      max_attempts: 3,
+      priority: 0,
+      backoff: "exponential",
+      dead_letter_queue: Some("dlq"),
+      inserted_at: now,
+      scheduled_at: now,
+      run_at: now,
+      started_at: Some(now),
+      completed_at: None,
+      heartbeat_at: None,
+      worker_id: None,
+      unique_key: None,
+      errors: Nil,
+      tags: Nil
     }
     let info = Conduit.DeadLetter.to_job_info(job)
     callback(info)
@@ -1354,12 +1354,12 @@ mod ConduitTest do
   pfn fake_workflow_storage_new(vault_key_name : String) : FakeWorkflowStorage do
     let vault_key = Vault.new(vault_key_name)
     Vault.set(vault_key, "checkpoints", Nil)
-    { vault_key = vault_key_name, error = None }
+    { vault_key: vault_key_name, error: None }
   end
 
   pfn fake_workflow_storage_with_error(error_msg : String) : FakeWorkflowStorage do
     let key = "fake_err_" ++ base64_encode(random_bytes(16))
-    { vault_key = key, error = Some(error_msg) }
+    { vault_key: key, error: Some(error_msg) }
   end
 
   -- ─────────────────────────────────────────────────────────────
@@ -1383,14 +1383,14 @@ mod ConduitTest do
   test "node_info_fields" do
     let now = DateTime.from_timestamp(DateTime.now())
     let node : Conduit.NodeInfo = {
-      id           = "node-abc",
-      hostname     = "web-1",
-      pid          = 42,
-      queues       = Cons("default", Nil),
-      pool_size    = 5,
-      started_at   = now,
-      last_seen_at = now,
-      status       = "running"
+      id: "node-abc",
+      hostname: "web-1",
+      pid: 42,
+      queues: Cons("default", Nil),
+      pool_size: 5,
+      started_at: now,
+      last_seen_at: now,
+      status: "running"
     }
     assert_eq_str(node.id, "node-abc")
     assert_eq_str(node.hostname, "web-1")
@@ -1442,14 +1442,14 @@ mod ConduitTest do
     let storage = fake_workflow_storage_new(vault_k)
     let now     = DateTime.from_timestamp(DateTime.now())
     let node : Conduit.NodeInfo = {
-      id           = base64_encode(random_bytes(16)),
-      hostname     = "test-host",
-      pid          = 1,
-      queues       = Cons("default", Nil),
-      pool_size    = 2,
-      started_at   = now,
-      last_seen_at = now,
-      status       = "running"
+      id: base64_encode(random_bytes(16)),
+      hostname: "test-host",
+      pid: 1,
+      queues: Cons("default", Nil),
+      pool_size: 2,
+      started_at: now,
+      last_seen_at: now,
+      status: "running"
     }
     let result = Conduit.Storage.node_register(storage, node)
     assert_ok(result)
@@ -1530,13 +1530,13 @@ mod ConduitTest do
 
   test "queue_summary_type_fields" do
     let qs : Conduit.Dashboard.QueueSummary = {
-      queue       = "default",
-      pending     = 10,
-      running     = 2,
-      failed      = 1,
-      dead        = 0,
-      throughput  = 500,
-      avg_latency = 42
+      queue: "default",
+      pending: 10,
+      running: 2,
+      failed: 1,
+      dead: 0,
+      throughput: 500,
+      avg_latency: 42
     }
     assert_eq_str(qs.queue, "default")
     assert_eq_int(qs.pending, 10)
@@ -1662,8 +1662,8 @@ mod ConduitTest do
     let storage = fake_workflow_storage_new(vault_k)
     -- Seed a summary row in the fake storage
     let qs : Conduit.Dashboard.QueueSummary = {
-      queue = "default", pending = 3, running = 1,
-      failed = 0, dead = 0, throughput = 10, avg_latency = 50
+      queue: "default", pending: 3, running: 1,
+      failed: 0, dead: 0, throughput: 10, avg_latency: 50
     }
     Vault.set(pfake_tbl(vault_k), "queue_summary", Cons(qs, Nil))
     let result = Conduit.Dashboard.Queries.queue_summary(storage)
@@ -1707,9 +1707,9 @@ mod ConduitTest do
 
   test "rate_limit_type_fields" do
     let rl : Conduit.RateLimit = {
-      max_per_second = 10,
-      per_key        = None,
-      backend        = Conduit.RateLimiterBackend.StorageBacked
+      max_per_second: 10,
+      per_key: None,
+      backend: Conduit.RateLimiterBackend.StorageBacked
     }
     assert_eq_int(rl.max_per_second, 10)
     assert_none(rl.per_key)
@@ -1717,13 +1717,13 @@ mod ConduitTest do
 
   test "rate_limit_with_per_key" do
     let pk : Conduit.PerKeyRateLimit = {
-      key_fn = fn payload -> "user_123",
-      limit  = 2
+      key_fn: fn payload -> "user_123",
+      limit: 2
     }
     let rl : Conduit.RateLimit = {
-      max_per_second = 10,
-      per_key        = Some(pk),
-      backend        = Conduit.RateLimiterBackend.StorageBacked
+      max_per_second: 10,
+      per_key: Some(pk),
+      backend: Conduit.RateLimiterBackend.StorageBacked
     }
     assert_eq_int(rl.max_per_second, 10)
     assert_some(rl.per_key)
@@ -1746,8 +1746,8 @@ mod ConduitTest do
   end
 
   test "job_config_with_rate_limit" do
-    let rl : Conduit.RateLimit = { max_per_second = 5, per_key = None, backend = Conduit.RateLimiterBackend.StorageBacked }
-    let cfg = { Conduit.JobConfig.default() with rate_limit = Some(rl) }
+    let rl : Conduit.RateLimit = { max_per_second: 5, per_key: None, backend: Conduit.RateLimiterBackend.StorageBacked }
+    let cfg = { Conduit.JobConfig.default() with rate_limit: Some(rl) }
     assert_some(cfg.rate_limit)
     match cfg.rate_limit do
       None     -> assert_true(false)
@@ -1855,7 +1855,7 @@ mod ConduitTest do
   test "rate_limiter_acquire_allowed_by_default" do
     let vault_k = "rl_acq_" ++ base64_encode(random_bytes(16))
     let storage = fake_workflow_storage_new(vault_k)
-    let rl : Conduit.RateLimit = { max_per_second = 10, per_key = None, backend = Conduit.RateLimiterBackend.StorageBacked }
+    let rl : Conduit.RateLimit = { max_per_second: 10, per_key: None, backend: Conduit.RateLimiterBackend.StorageBacked }
     let result = Conduit.RateLimiter.acquire(storage, "TestJob", rl, "{}")
     assert_ok(result)
     match result do
@@ -1869,7 +1869,7 @@ mod ConduitTest do
     let storage = fake_workflow_storage_new(vault_k)
     -- Block the global key.
     Vault.set(pfake_tbl(vault_k), "rl_blocked:conduit_rl:TestJob", true)
-    let rl : Conduit.RateLimit = { max_per_second = 10, per_key = None, backend = Conduit.RateLimiterBackend.StorageBacked }
+    let rl : Conduit.RateLimit = { max_per_second: 10, per_key: None, backend: Conduit.RateLimiterBackend.StorageBacked }
     let result = Conduit.RateLimiter.acquire(storage, "TestJob", rl, "{}")
     assert_ok(result)
     match result do
@@ -1899,8 +1899,8 @@ mod ConduitTest do
   test "priority_ordering_in_job_config" do
     -- Priority is just an Int field on JobConfig; higher values run first.
     -- The ORDER BY in fetch_next is `priority DESC, run_at ASC`.
-    let low  = { Conduit.JobConfig.default() with priority = 0 }
-    let high = { Conduit.JobConfig.default() with priority = 100 }
+    let low  = { Conduit.JobConfig.default() with priority: 0 }
+    let high = { Conduit.JobConfig.default() with priority: 100 }
     assert_eq_int(low.priority, 0)
     assert_eq_int(high.priority, 100)
     assert_true(high.priority > low.priority)
@@ -1910,15 +1910,15 @@ mod ConduitTest do
     let fired_key = Vault.new("odl_" ++ base64_encode(random_bytes(16)))
     Vault.set(fired_key, "fired", false)
     let cb = fn (_info : Conduit.JobInfo) -> Vault.set(fired_key, "fired", true)
-    let cfg = { Conduit.JobConfig.default() with on_dead_letter = Some(cb) }
+    let cfg = { Conduit.JobConfig.default() with on_dead_letter: Some(cb) }
     assert_some(cfg.on_dead_letter)
     match cfg.on_dead_letter do
       None    -> assert_true(false)
       Some(f) ->
         let dummy_info : Conduit.JobInfo = {
-          id = "x", queue = "q", job_type = "t",
-          attempt = 1, max_attempts = 3, tags = Nil,
-          inserted_at = DateTime.from_timestamp(DateTime.now()), errors = Nil
+          id: "x", queue: "q", job_type: "t",
+          attempt: 1, max_attempts: 3, tags: Nil,
+          inserted_at: DateTime.from_timestamp(DateTime.now()), errors: Nil
         }
         f(dummy_info)
         assert_eq_bool(Vault.get(fired_key, "fired") |> unwrap_or(false), true)
@@ -1932,12 +1932,12 @@ mod ConduitTest do
   test "workflow_event_type_fields" do
     let now = DateTime.from_timestamp(DateTime.now())
     let evt : Conduit.WorkflowEvent = {
-      id          = 42,
-      workflow_id = "wf-abc",
-      sequence    = 0,
-      event_type  = "checkpoint",
-      payload     = "{\"name\":\"step1\",\"value\":\"hello\"}",
-      recorded_at = now
+      id: 42,
+      workflow_id: "wf-abc",
+      sequence: 0,
+      event_type: "checkpoint",
+      payload: "{\"name\":\"step1\",\"value\":\"hello\"}",
+      recorded_at: now
     }
     assert_eq_int(evt.id, 42)
     assert_eq_str(evt.workflow_id, "wf-abc")
@@ -2578,7 +2578,7 @@ mod ConduitTest do
 
   test "cron_config: jitter_ms can be set to Some(5000)" do
     let base = Conduit.CronConfig.default()
-    let cfg = { base with jitter_ms = Some(5000) }
+    let cfg = { base with jitter_ms: Some(5000) }
     match cfg.jitter_ms do
       None    -> assert_true(false)
       Some(j) -> assert_eq_int(j, 5000)
@@ -2661,7 +2661,7 @@ mod ConduitTest do
 
   test "job_config: discard_after can be set" do
     let base = Conduit.JobConfig.default()
-    let cfg = { base with discard_after = Some(86400000) }
+    let cfg = { base with discard_after: Some(86400000) }
     match cfg.discard_after do
       None    -> assert_true(false)
       Some(v) -> assert_eq_int(v, 86400000)
@@ -2701,7 +2701,7 @@ mod ConduitTest do
 
   test "config: drain_timeout_ms can be overridden" do
     let base = Conduit.Config.default()
-    let cfg = { base with drain_timeout_ms = 30000 }
+    let cfg = { base with drain_timeout_ms: 30000 }
     assert_eq_int(cfg.drain_timeout_ms, 30000)
   end
 

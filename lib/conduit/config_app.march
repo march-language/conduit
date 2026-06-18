@@ -1,15 +1,15 @@
 mod Conduit.Config do
   fn default() do
     {
-      queues                  = Cons("default", Nil),
-      workers_per_queue       = 5,
-      poll_interval_ms        = 1000,
-      cron_tick_interval_ms   = 30000,
-      node_id                 = uuid_v7(()),
-      heartbeat_interval_ms   = 15000,
-      stale_node_threshold_ms = 60000,
-      drain_timeout_ms        = 15000,
-      retention               = None
+      queues: Cons("default", Nil),
+      workers_per_queue: 5,
+      poll_interval_ms: 1000,
+      cron_tick_interval_ms: 30000,
+      node_id: uuid_v7(()),
+      heartbeat_interval_ms: 15000,
+      stale_node_threshold_ms: 60000,
+      drain_timeout_ms: 15000,
+      retention: None
     }
   end
 end

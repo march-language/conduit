@@ -1,10 +1,10 @@
 mod Conduit.Schema do
   fn none() : Conduit.Schema(a) do
-    { validator = None }
+    { validator: None }
   end
 
   fn build(f : a -> Result((), String)) : Conduit.Schema(a) do
-    { validator = Some(f) }
+    { validator: Some(f) }
   end
 
   fn validate(schema : Conduit.Schema(a), args : a) : Result((), String) do

@@ -14,21 +14,21 @@ import Migration
 fn up() do
   [
     CreateTable({
-      name    = "conduit_workflow_events",
-      columns = [
-        { name = "id",          col_type = "bigserial", nullable = false, default_ = None,         primary_key = true,  unique_ = false, references = None },
-        { name = "workflow_id", col_type = "text",      nullable = false, default_ = None,         primary_key = false, unique_ = false, references = Some(("conduit_workflows", "id")) },
-        { name = "sequence",    col_type = "integer",   nullable = false, default_ = None,         primary_key = false, unique_ = false, references = None },
-        { name = "event_type",  col_type = "text",      nullable = false, default_ = None,         primary_key = false, unique_ = false, references = None },
-        { name = "payload",     col_type = "jsonb",     nullable = false, default_ = Some("'{}'"), primary_key = false, unique_ = false, references = None },
-        { name = "recorded_at", col_type = "timestamptz", nullable = false, default_ = Some("NOW()"), primary_key = false, unique_ = false, references = None }
+      name: "conduit_workflow_events",
+      columns: [
+        { name: "id",          col_type: "bigserial", nullable: false, default_: None,         primary_key: true,  unique_: false, references: None },
+        { name: "workflow_id", col_type: "text",      nullable: false, default_: None,         primary_key: false, unique_: false, references: Some(("conduit_workflows", "id")) },
+        { name: "sequence",    col_type: "integer",   nullable: false, default_: None,         primary_key: false, unique_: false, references: None },
+        { name: "event_type",  col_type: "text",      nullable: false, default_: None,         primary_key: false, unique_: false, references: None },
+        { name: "payload",     col_type: "jsonb",     nullable: false, default_: Some("'{}'"), primary_key: false, unique_: false, references: None },
+        { name: "recorded_at", col_type: "timestamptz", nullable: false, default_: Some("NOW()"), primary_key: false, unique_: false, references: None }
       ],
-      pk = None
+      pk: None
     }),
     -- Unique constraint on (workflow_id, sequence) ensures no duplicate events.
-    AddIndex({ name = "idx_conduit_events_wf_seq",  table = "conduit_workflow_events", columns = ["workflow_id", "sequence"], unique_ = true }),
+    AddIndex({ name: "idx_conduit_events_wf_seq",  table: "conduit_workflow_events", columns: ["workflow_id", "sequence"], unique_: true }),
     -- Query index for loading events in order.
-    AddIndex({ name = "idx_conduit_events_workflow", table = "conduit_workflow_events", columns = ["workflow_id", "sequence"], unique_ = false })
+    AddIndex({ name: "idx_conduit_events_workflow", table: "conduit_workflow_events", columns: ["workflow_id", "sequence"], unique_: false })
   ]
 end
 

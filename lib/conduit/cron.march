@@ -21,7 +21,7 @@ mod Conduit.CronRegistry do
   previous entry — useful for testing but avoid in production.
   """
   fn register(cron_type : String, config : Conduit.CronConfig, performer : String -> Result((), Conduit.ConduitError)) : () do
-    Vault.set(registry_key(), cron_type, { config = config, performer = performer })
+    Vault.set(registry_key(), cron_type, { config: config, performer: performer })
   end
 
   doc """
@@ -33,7 +33,7 @@ mod Conduit.CronRegistry do
   fn lookup(cron_type : String) : Option(Entry) do
     match Vault.get(registry_key(), cron_type) do
       None    -> None
-      Some(e) -> Some({ config = e.config, performer = e.performer })
+      Some(e) -> Some({ config: e.config, performer: e.performer })
     end
   end
 
@@ -64,7 +64,7 @@ mod Conduit.CronRegistry do
     List.filter_map(keys, fn cron_type ->
       match Vault.get(tbl, cron_type) do
         None    -> None
-        Some(e) -> Some({ cron_type = cron_type, config = e.config, performer = e.performer })
+        Some(e) -> Some({ cron_type: cron_type, config: e.config, performer: e.performer })
       end
     )
   end

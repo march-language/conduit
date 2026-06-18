@@ -94,12 +94,12 @@ mod Conduit.Worker do
       Err(e) ->
         Logger.warn("conduit: could not claim job " ++ job.id ++ ": " ++ e)
       Ok(_) ->
-        Logger.debug("conduit: execute: mark_running ok, attempt=" ++ int_to_string(job.attempt))
+        Logger.debug("conduit: execute: mark_running ok, attempt:" ++ int_to_string(job.attempt))
         -- next_attempt is the attempt number that is now executing (post-increment).
         let next_attempt = job.attempt + 1
         let config = Conduit.Queue.lookup_config(job.job_type)
           |> Option.unwrap_or(Conduit.JobConfig.default())
-        Logger.debug("conduit: execute: got config, timeout=" ++ int_to_string(config.timeout))
+        Logger.debug("conduit: execute: got config, timeout:" ++ int_to_string(config.timeout))
 
         -- Enforce discard_after: if the job is older than the configured limit,
         -- discard it immediately without spawning a heartbeat or dispatching.

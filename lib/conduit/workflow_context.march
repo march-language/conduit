@@ -2,20 +2,20 @@ mod Conduit.WorkflowContext do
   doc "Create a root context for a new or resuming workflow execution."
   fn new(workflow_id : String) : Conduit.WorkflowContext do
     {
-      workflow_id    = workflow_id,
-      parent_id      = None,
-      namespace      = "",
-      checkpoint_key = pvault_key(workflow_id)
+      workflow_id: workflow_id,
+      parent_id: None,
+      namespace: "",
+      checkpoint_key: pvault_key(workflow_id)
     }
   end
 
   doc "Create a sub-context for a parallel branch (namespaced checkpoints)."
   fn child(ctx : Conduit.WorkflowContext, branch_prefix : String) : Conduit.WorkflowContext do
     {
-      workflow_id    = ctx.workflow_id,
-      parent_id      = ctx.parent_id,
-      namespace      = ctx.namespace ++ branch_prefix,
-      checkpoint_key = ctx.checkpoint_key
+      workflow_id: ctx.workflow_id,
+      parent_id: ctx.parent_id,
+      namespace: ctx.namespace ++ branch_prefix,
+      checkpoint_key: ctx.checkpoint_key
     }
   end
 

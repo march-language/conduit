@@ -1,18 +1,18 @@
 mod Conduit.JobConfig do
   fn default() : Conduit.JobConfig do
     {
-      queue             = "default",
-      max_attempts      = 3,
-      timeout           = 30000,
-      backoff           = Conduit.Backoff.exponential(),
-      dead_letter_queue = None,
-      unique_for        = None,
-      on_conflict       = Conduit.UniqueConflict.Ignore,
-      rate_limit        = None,
-      on_dead_letter    = None,
-      priority          = 0,
-      tags              = Nil,
-      discard_after     = None
+      queue: "default",
+      max_attempts: 3,
+      timeout: 30000,
+      backoff: Conduit.Backoff.exponential(),
+      dead_letter_queue: None,
+      unique_for: None,
+      on_conflict: Conduit.UniqueConflict.Ignore,
+      rate_limit: None,
+      on_dead_letter: None,
+      priority: 0,
+      tags: Nil,
+      discard_after: None
     }
   end
 end

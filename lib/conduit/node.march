@@ -170,14 +170,14 @@ mod Conduit.Node do
       end
     let now = DateTime.from_timestamp(DateTime.now())
     {
-      id           = config.node_id,
-      hostname     = hostname,
-      pid          = System.pid(),
-      queues       = config.queues,
-      pool_size    = config.workers_per_queue,
-      started_at   = now,
-      last_seen_at = now,
-      status       = "running"
+      id: config.node_id,
+      hostname: hostname,
+      pid: System.pid(),
+      queues: config.queues,
+      pool_size: config.workers_per_queue,
+      started_at: now,
+      last_seen_at: now,
+      status: "running"
     }
   end
 

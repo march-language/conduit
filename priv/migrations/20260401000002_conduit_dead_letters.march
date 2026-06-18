@@ -12,28 +12,28 @@ import Migration
 fn up() do
   [
     CreateTable({
-      name    = "conduit_dead_letters",
-      columns = [
-        { name = "id",                 col_type = "text",        nullable = false, default_ = Some("gen_random_uuid()::text"), primary_key = true,  unique_ = false, references = None },
-        { name = "job_id",             col_type = "text",        nullable = false, default_ = None,                            primary_key = false, unique_ = true,  references = None },
-        { name = "queue",              col_type = "text",        nullable = false, default_ = None,                            primary_key = false, unique_ = false, references = None },
-        { name = "job_type",           col_type = "text",        nullable = false, default_ = None,                            primary_key = false, unique_ = false, references = None },
-        { name = "payload",            col_type = "jsonb",       nullable = false, default_ = None,                            primary_key = false, unique_ = false, references = None },
-        { name = "errors",             col_type = "jsonb",       nullable = false, default_ = Some("'[]'"),                    primary_key = false, unique_ = false, references = None },
-        { name = "attempts",           col_type = "integer",     nullable = false, default_ = Some("0"),                       primary_key = false, unique_ = false, references = None },
-        { name = "first_attempted_at", col_type = "timestamptz", nullable = true,  default_ = None,                            primary_key = false, unique_ = false, references = None },
-        { name = "last_attempted_at",  col_type = "timestamptz", nullable = true,  default_ = None,                            primary_key = false, unique_ = false, references = None },
-        { name = "discarded_at",       col_type = "timestamptz", nullable = false, default_ = Some("NOW()"),                   primary_key = false, unique_ = false, references = None },
-        { name = "reviewed",           col_type = "boolean",     nullable = false, default_ = Some("FALSE"),                   primary_key = false, unique_ = false, references = None },
-        { name = "reviewed_by",        col_type = "text",        nullable = true,  default_ = None,                            primary_key = false, unique_ = false, references = None },
-        { name = "reviewed_at",        col_type = "timestamptz", nullable = true,  default_ = None,                            primary_key = false, unique_ = false, references = None },
-        { name = "retry_count",        col_type = "integer",     nullable = false, default_ = Some("0"),                       primary_key = false, unique_ = false, references = None },
-        { name = "meta",               col_type = "jsonb",       nullable = false, default_ = Some("'{}'"),                    primary_key = false, unique_ = false, references = None }
+      name: "conduit_dead_letters",
+      columns: [
+        { name: "id",                 col_type: "text",        nullable: false, default_: Some("gen_random_uuid()::text"), primary_key: true,  unique_: false, references: None },
+        { name: "job_id",             col_type: "text",        nullable: false, default_: None,                            primary_key: false, unique_: true,  references: None },
+        { name: "queue",              col_type: "text",        nullable: false, default_: None,                            primary_key: false, unique_: false, references: None },
+        { name: "job_type",           col_type: "text",        nullable: false, default_: None,                            primary_key: false, unique_: false, references: None },
+        { name: "payload",            col_type: "jsonb",       nullable: false, default_: None,                            primary_key: false, unique_: false, references: None },
+        { name: "errors",             col_type: "jsonb",       nullable: false, default_: Some("'[]'"),                    primary_key: false, unique_: false, references: None },
+        { name: "attempts",           col_type: "integer",     nullable: false, default_: Some("0"),                       primary_key: false, unique_: false, references: None },
+        { name: "first_attempted_at", col_type: "timestamptz", nullable: true,  default_: None,                            primary_key: false, unique_: false, references: None },
+        { name: "last_attempted_at",  col_type: "timestamptz", nullable: true,  default_: None,                            primary_key: false, unique_: false, references: None },
+        { name: "discarded_at",       col_type: "timestamptz", nullable: false, default_: Some("NOW()"),                   primary_key: false, unique_: false, references: None },
+        { name: "reviewed",           col_type: "boolean",     nullable: false, default_: Some("FALSE"),                   primary_key: false, unique_: false, references: None },
+        { name: "reviewed_by",        col_type: "text",        nullable: true,  default_: None,                            primary_key: false, unique_: false, references: None },
+        { name: "reviewed_at",        col_type: "timestamptz", nullable: true,  default_: None,                            primary_key: false, unique_: false, references: None },
+        { name: "retry_count",        col_type: "integer",     nullable: false, default_: Some("0"),                       primary_key: false, unique_: false, references: None },
+        { name: "meta",               col_type: "jsonb",       nullable: false, default_: Some("'{}'"),                    primary_key: false, unique_: false, references: None }
       ],
-      pk = None
+      pk: None
     }),
     -- Dashboard: list dead letters by queue, newest first.
-    AddIndex({ name = "idx_conduit_dead_letters_queue", table = "conduit_dead_letters", columns = ["queue", "discarded_at"], unique_ = false }),
+    AddIndex({ name: "idx_conduit_dead_letters_queue", table: "conduit_dead_letters", columns: ["queue", "discarded_at"], unique_: false }),
     -- Dashboard: unreviewed dead letters.
     RawSql("CREATE INDEX idx_conduit_dead_letters_unreviewed ON conduit_dead_letters (discarded_at DESC) WHERE reviewed = FALSE"),
     -- Stale-job detection: find running jobs with old heartbeats efficiently.
