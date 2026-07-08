@@ -32,6 +32,9 @@ mod Conduit.Storage.Postgres do
   import Connection
   import Message
   import Pool
+  needs IO.Random
+  needs IO.NetConnect
+  needs IO.Spawn
 
   -- Connection parameters for the backing database.
   type Store = {
