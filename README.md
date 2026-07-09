@@ -17,6 +17,32 @@ Conduit is a **typed, crash-safe job queue and durable workflow platform** for M
 - **Dead-Letter Queues** — Jobs exhausting retries move to a DLQ with `on_dead_letter` callbacks
 - **Pluggable Storage** — Interface-based design; Postgres backend with VaultStore (in-memory) for testing
 
+## Installation
+
+Conduit is published on the [forge registry](https://forgepm.org/packages/conduit). Add it to your project with:
+
+```bash
+forge add conduit
+```
+
+That records a registry dependency in your `forge.toml`:
+
+```toml
+[deps]
+conduit = { registry = "forge", version = "0.1.0" }
+```
+
+You can also depend on it by git, or by local path during development:
+
+```toml
+[deps]
+conduit = { git = "https://github.com/march-language/conduit.git" }
+# or
+conduit = { path = "../conduit" }
+```
+
+Conduit uses [depot](https://forgepm.org/packages/depot) for its Postgres storage backend; `forge` resolves it from the registry automatically.
+
 ## Quick Start
 
 ### 1. Define a Job
