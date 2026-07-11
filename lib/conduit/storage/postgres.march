@@ -552,7 +552,7 @@ mod Conduit.Storage.Postgres do
     end
 
     fn fetch_next(self : Store, queue : String) : Result(Option(Conduit.JobRow), String) do
-      let sql = "UPDATE conduit_jobs SET status = 'running', started_at: $2 WHERE id = (SELECT id FROM conduit_jobs WHERE queue = $1 AND status IN ('pending','snoozed') AND run_at <= $2 ORDER BY priority DESC, run_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING " ++ pjob_cols()
+      let sql = "UPDATE conduit_jobs SET status = 'running', started_at = $2 WHERE id = (SELECT id FROM conduit_jobs WHERE queue = $1 AND status IN ('pending','snoozed') AND run_at <= $2 ORDER BY priority DESC, run_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING " ++ pjob_cols()
       pwith_conn(self, fn conn ->
         match Db.exec(conn, sql, [ParamText(queue), ParamText(int_to_string(DateTime.now()))]) do
           Err(e)  -> Err("fetch_next: " ++ e)
@@ -565,17 +565,17 @@ mod Conduit.Storage.Postgres do
     end
 
     fn mark_running(self : Store, id : String, worker_id : String) : Result((), String) do
-      pexec(self, "UPDATE conduit_jobs SET worker_id = $2, attempt: attempt + 1, heartbeat_at: $3 WHERE id = $1",
+      pexec(self, "UPDATE conduit_jobs SET worker_id = $2, attempt = attempt + 1, heartbeat_at = $3 WHERE id = $1",
         [ParamText(id), ParamText(worker_id), ParamText(int_to_string(DateTime.now()))])
     end
 
     fn mark_completed(self : Store, id : String) : Result((), String) do
-      pexec(self, "UPDATE conduit_jobs SET status = 'completed', completed_at: $2 WHERE id = $1",
+      pexec(self, "UPDATE conduit_jobs SET status = 'completed', completed_at = $2 WHERE id = $1",
         [ParamText(id), ParamText(int_to_string(DateTime.now()))])
     end
 
     fn mark_snoozed(self : Store, id : String, wake_at : DateTime) : Result((), String) do
-      pexec(self, "UPDATE conduit_jobs SET status = 'snoozed', run_at: $2 WHERE id = $1",
+      pexec(self, "UPDATE conduit_jobs SET status = 'snoozed', run_at = $2 WHERE id = $1",
         [ParamText(id), ptxt_ts(wake_at)])
     end
 
@@ -585,12 +585,12 @@ mod Conduit.Storage.Postgres do
     end
 
     fn schedule_retry(self : Store, id : String, error_msg : String, run_at : DateTime) : Result((), String) do
-      pexec(self, "UPDATE conduit_jobs SET status = 'pending', run_at: $2, worker_id: NULL, errors: (COALESCE(errors,'[]')::jsonb || jsonb_build_array($3::text))::text WHERE id = $1",
+      pexec(self, "UPDATE conduit_jobs SET status = 'pending', run_at = $2, worker_id = NULL, errors = (COALESCE(errors,'[]')::jsonb || jsonb_build_array($3::text))::text WHERE id = $1",
         [ParamText(id), ptxt_ts(run_at), ParamText(error_msg)])
     end
 
     fn discard(self : Store, id : String, error_msg : String) : Result((), String) do
-      pexec(self, "UPDATE conduit_jobs SET status = 'dead', completed_at: $2, errors: (COALESCE(errors,'[]')::jsonb || jsonb_build_array($3::text))::text WHERE id = $1",
+      pexec(self, "UPDATE conduit_jobs SET status = 'dead', completed_at = $2, errors = (COALESCE(errors,'[]')::jsonb || jsonb_build_array($3::text))::text WHERE id = $1",
         [ParamText(id), ParamText(int_to_string(DateTime.now())), ParamText(error_msg)])
     end
 
@@ -621,7 +621,7 @@ mod Conduit.Storage.Postgres do
     fn rescue_stale(self : Store, threshold_secs : Int) : Result(List(String), String) do
       let cutoff = DateTime.now() - threshold_secs
       pwith_conn(self, fn conn ->
-        match Db.exec(conn, "UPDATE conduit_jobs SET status = 'pending', worker_id: NULL WHERE status = 'running' AND COALESCE(heartbeat_at, started_at, 0) < $1 RETURNING id", [ParamText(int_to_string(cutoff))]) do
+        match Db.exec(conn, "UPDATE conduit_jobs SET status = 'pending', worker_id = NULL WHERE status = 'running' AND COALESCE(heartbeat_at, started_at, 0) < $1 RETURNING id", [ParamText(int_to_string(cutoff))]) do
           Err(e)  -> Err("rescue_stale: " ++ e)
           Ok(res) -> Ok(pids_from_rows(res.rows))
         end)
@@ -630,7 +630,7 @@ mod Conduit.Storage.Postgres do
     -- ── Cron ─────────────────────────────────────────────────────
 
     fn cron_upsert(self : Store, sched) : Result((), String) do
-      let sql = "INSERT INTO conduit_cron_schedules (" ++ pcron_cols() ++ ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (id) DO UPDATE SET job_type = EXCLUDED.job_type, schedule: EXCLUDED.schedule, timezone: EXCLUDED.timezone, queue: EXCLUDED.queue, payload: EXCLUDED.payload, overlap: EXCLUDED.overlap, enabled: EXCLUDED.enabled, last_run_at: EXCLUDED.last_run_at, last_job_id: EXCLUDED.last_job_id, next_run_at: EXCLUDED.next_run_at, tags: EXCLUDED.tags, jitter_ms: EXCLUDED.jitter_ms"
+      let sql = "INSERT INTO conduit_cron_schedules (" ++ pcron_cols() ++ ") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) ON CONFLICT (id) DO UPDATE SET job_type = EXCLUDED.job_type, schedule = EXCLUDED.schedule, timezone = EXCLUDED.timezone, queue = EXCLUDED.queue, payload = EXCLUDED.payload, overlap = EXCLUDED.overlap, enabled = EXCLUDED.enabled, last_run_at = EXCLUDED.last_run_at, last_job_id = EXCLUDED.last_job_id, next_run_at = EXCLUDED.next_run_at, tags = EXCLUDED.tags, jitter_ms = EXCLUDED.jitter_ms"
       pexec(self, sql, [
         ParamText(sched.id),
         ParamText(sched.job_type),
@@ -669,7 +669,7 @@ mod Conduit.Storage.Postgres do
     end
 
     fn cron_mark_fired(self : Store, id : String, job_id : String, next) : Result((), String) do
-      pexec(self, "UPDATE conduit_cron_schedules SET last_run_at = $2, last_job_id: $3, next_run_at: $4 WHERE id = $1",
+      pexec(self, "UPDATE conduit_cron_schedules SET last_run_at = $2, last_job_id = $3, next_run_at = $4 WHERE id = $1",
         [ParamText(id), ParamText(int_to_string(DateTime.now())), ParamText(job_id), popt_ts(next)])
     end
 
@@ -721,7 +721,7 @@ mod Conduit.Storage.Postgres do
     -- ── Node coordination ────────────────────────────────────────
 
     fn node_register(self : Store, node) : Result((), String) do
-      let sql = "INSERT INTO conduit_workers (id, hostname, pid, queues, pool_size, started_at, last_seen_at, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO UPDATE SET hostname = EXCLUDED.hostname, pid: EXCLUDED.pid, queues: EXCLUDED.queues, pool_size: EXCLUDED.pool_size, started_at: EXCLUDED.started_at, last_seen_at: EXCLUDED.last_seen_at, status: 'running', stopped_at: NULL"
+      let sql = "INSERT INTO conduit_workers (id, hostname, pid, queues, pool_size, started_at, last_seen_at, status) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT (id) DO UPDATE SET hostname = EXCLUDED.hostname, pid = EXCLUDED.pid, queues = EXCLUDED.queues, pool_size = EXCLUDED.pool_size, started_at = EXCLUDED.started_at, last_seen_at = EXCLUDED.last_seen_at, status = 'running', stopped_at = NULL"
       pexec(self, sql, [
         ParamText(node.id),
         ParamText(node.hostname),
@@ -740,7 +740,7 @@ mod Conduit.Storage.Postgres do
     end
 
     fn node_deregister(self : Store, node_id : String) : Result((), String) do
-      pexec(self, "UPDATE conduit_workers SET status = 'stopped', stopped_at: $2 WHERE id = $1",
+      pexec(self, "UPDATE conduit_workers SET status = 'stopped', stopped_at = $2 WHERE id = $1",
         [ParamText(node_id), ParamText(int_to_string(DateTime.now()))])
     end
 
@@ -759,7 +759,7 @@ mod Conduit.Storage.Postgres do
     fn node_reclaim_jobs(self : Store, threshold_s : Int) : Result(List(String), String) do
       let cutoff = DateTime.now() - threshold_s
       pwith_conn(self, fn conn ->
-        match Db.exec(conn, "UPDATE conduit_jobs SET status = 'pending', worker_id: NULL WHERE status = 'running' AND COALESCE(heartbeat_at, started_at, 0) < $1 RETURNING id", [ParamText(int_to_string(cutoff))]) do
+        match Db.exec(conn, "UPDATE conduit_jobs SET status = 'pending', worker_id = NULL WHERE status = 'running' AND COALESCE(heartbeat_at, started_at, 0) < $1 RETURNING id", [ParamText(int_to_string(cutoff))]) do
           Err(e)  -> Err("node_reclaim_jobs: " ++ e)
           Ok(res) -> Ok(pids_from_rows(res.rows))
         end)
@@ -770,7 +770,7 @@ mod Conduit.Storage.Postgres do
     fn node_cleanup_stale(self : Store, threshold_s : Int) : Result(Int, String) do
       let cutoff = DateTime.now() - threshold_s
       pwith_conn(self, fn conn ->
-        match Db.exec(conn, "UPDATE conduit_workers SET status = 'stopped', stopped_at: $2 WHERE status = 'running' AND last_seen_at < $1 RETURNING id", [ParamText(int_to_string(cutoff)), ParamText(int_to_string(DateTime.now()))]) do
+        match Db.exec(conn, "UPDATE conduit_workers SET status = 'stopped', stopped_at = $2 WHERE status = 'running' AND last_seen_at < $1 RETURNING id", [ParamText(int_to_string(cutoff)), ParamText(int_to_string(DateTime.now()))]) do
           Err(e)  -> Err("node_cleanup_stale: " ++ e)
           Ok(res) -> Ok(List.length(res.rows))
         end)
@@ -862,13 +862,13 @@ mod Conduit.Storage.Postgres do
     -- an error is provided.
     fn workflow_update_status(self : Store, id : String, status : String, output, error) : Result((), String) do
       let now = ParamText(int_to_string(DateTime.now()))
-      pexec(self, "UPDATE conduit_workflows SET status = $2, output: COALESCE($3, output), error: COALESCE($4, error), completed_at: CASE WHEN $2 <> 'running' THEN $5 ELSE completed_at END, error_at: CASE WHEN $4 IS NOT NULL THEN $5 ELSE error_at END WHERE id = $1",
+      pexec(self, "UPDATE conduit_workflows SET status = $2, output = COALESCE($3, output), error = COALESCE($4, error), completed_at = CASE WHEN $2 <> 'running' THEN $5 ELSE completed_at END, error_at = CASE WHEN $4 IS NOT NULL THEN $5 ELSE error_at END WHERE id = $1",
         [ParamText(id), ParamText(status), popt_txt(output), popt_txt(error), now])
     end
 
     fn workflow_cancel(self : Store, id : String, reason : String) : Result((), String) do
       let now = ParamText(int_to_string(DateTime.now()))
-      pexec(self, "UPDATE conduit_workflows SET status = 'cancelled', error: $2, error_at: $3, completed_at: $3 WHERE id = $1 AND status = 'running'",
+      pexec(self, "UPDATE conduit_workflows SET status = 'cancelled', error = $2, error_at = $3, completed_at = $3 WHERE id = $1 AND status = 'running'",
         [ParamText(id), ParamText(reason), now])
     end
 
@@ -939,7 +939,7 @@ mod Conduit.Storage.Postgres do
     end
 
     fn signal_mark_delivered(self : Store, id : Int) : Result((), String) do
-      pexec(self, "UPDATE conduit_workflow_signals SET status = 'delivered', delivered_at: $2 WHERE id = $1",
+      pexec(self, "UPDATE conduit_workflow_signals SET status = 'delivered', delivered_at = $2 WHERE id = $1",
         [ptxt_int(id), ParamText(int_to_string(DateTime.now()))])
     end
 
@@ -1033,12 +1033,12 @@ mod Conduit.Storage.Postgres do
     end
 
     fn job_retry(self : Store, id : String) : Result((), String) do
-      pexec(self, "UPDATE conduit_jobs SET status = 'pending', attempt: 0, run_at: $2, worker_id: NULL, completed_at: NULL WHERE id = $1",
+      pexec(self, "UPDATE conduit_jobs SET status = 'pending', attempt = 0, run_at = $2, worker_id = NULL, completed_at = NULL WHERE id = $1",
         [ParamText(id), ParamText(int_to_string(DateTime.now()))])
     end
 
     fn job_cancel(self : Store, id : String, reason : String) : Result((), String) do
-      pexec(self, "UPDATE conduit_jobs SET status = 'dead', completed_at: $2, errors: (COALESCE(errors,'[]')::jsonb || jsonb_build_array($3::text))::text WHERE id = $1",
+      pexec(self, "UPDATE conduit_jobs SET status = 'dead', completed_at = $2, errors = (COALESCE(errors,'[]')::jsonb || jsonb_build_array($3::text))::text WHERE id = $1",
         [ParamText(id), ParamText(int_to_string(DateTime.now())), ParamText(reason)])
     end
 
@@ -1062,7 +1062,7 @@ mod Conduit.Storage.Postgres do
     -- one token is available after refill, so "row returned" == acquired.
     fn rate_limit_acquire(self : Store, key : String, rate : Int) : Result(Bool, String) do
       let now = int_to_string(DateTime.now())
-      let sql = "INSERT INTO conduit_rate_limit_buckets AS b (key, tokens, last_refill) VALUES ($1, $2::decimal - 1, $3) ON CONFLICT (key) DO UPDATE SET tokens = LEAST($2::decimal, b.tokens + $2::decimal * GREATEST($3 - b.last_refill, 0)) - 1, last_refill: $3 WHERE LEAST($2::decimal, b.tokens + $2::decimal * GREATEST($3 - b.last_refill, 0)) >= 1 RETURNING b.tokens"
+      let sql = "INSERT INTO conduit_rate_limit_buckets AS b (key, tokens, last_refill) VALUES ($1, $2::decimal - 1, $3) ON CONFLICT (key) DO UPDATE SET tokens = LEAST($2::decimal, b.tokens + $2::decimal * GREATEST($3 - b.last_refill, 0)) - 1, last_refill = $3 WHERE LEAST($2::decimal, b.tokens + $2::decimal * GREATEST($3 - b.last_refill, 0)) >= 1 RETURNING b.tokens"
       pwith_conn(self, fn conn ->
         match Db.exec(conn, sql, [ParamText(key), ParamText(int_to_string(rate)), ParamText(now)]) do
           Err(e)  -> Err("rate_limit_acquire: " ++ e)
