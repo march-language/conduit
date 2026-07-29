@@ -1198,7 +1198,7 @@ mod ConduitTest do
 
   pfn pparallel_error_fn(item : String, _branch_ctx : Conduit.WorkflowContext) : Result(String, WorkflowError) do
     if item == "x" do
-      Err(Failed("item x failed"))
+      Err(Conduit.Failed("item x failed"))
     else
       Ok("ok_" ++ item)
     end

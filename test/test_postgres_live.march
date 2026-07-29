@@ -7,6 +7,9 @@
 --   createdb conduit_test
 --   psql -d conduit_test -f priv/migrations/001_conduit_schema.sql
 mod ConduitPostgresLiveTest do
+  needs IO.NetConnect
+  needs IO.Random
+
   use Test
   use Conduit
   import Connection

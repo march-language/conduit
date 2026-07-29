@@ -29,7 +29,7 @@ fn gen_migrations(dest_dir) do
   else
     let _ = Dir.mkdir_p(dest_dir)
     match Dir.list(src) do
-    Err(e)    -> Err("cannot list " ++ src ++ ": " ++ e)
+    Err(e)    -> Err("cannot list " ++ src ++ ": " ++ to_string(e))
     Ok(names) -> do
       let march_files = filter_march_files(names)
       let count       = list_length(march_files)
@@ -62,10 +62,10 @@ pfn copy_files(names, src_dir, dest_dir, copied) do
       copy_files(rest, src_dir, dest_dir, copied)
     else
       match File.read(src_path) do
-      Err(e) -> Err("cannot read " ++ src_path ++ ": " ++ e)
+      Err(e) -> Err("cannot read " ++ src_path ++ ": " ++ to_string(e))
       Ok(content) ->
         match File.write(dest_path, content) do
-        Err(e) -> Err("cannot write " ++ dest_path ++ ": " ++ e)
+        Err(e) -> Err("cannot write " ++ dest_path ++ ": " ++ to_string(e))
         Ok(_)  -> do
           println("  create " ++ dest_path)
           copy_files(rest, src_dir, dest_dir, copied + 1)
