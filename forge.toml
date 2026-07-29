@@ -1,6 +1,6 @@
 [package]
 name = "conduit"
-version = "0.1.0"
+version = "0.1.1"
 type = "lib"
 description = "A typed, crash-safe job queue and durable workflow engine for March — retries, cron, workflows, multi-node clustering, and a web dashboard"
 author = "Chase Gilliam"
