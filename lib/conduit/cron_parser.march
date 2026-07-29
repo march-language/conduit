@@ -184,16 +184,96 @@ mod Conduit.CronParser do
     end
   end
 
+  -- A list item (post-split on ",") can never itself contain a "," — so it is
+  -- parsed via a dedicated path rather than through [pparse_field]/
+  -- [pparse_field_no_step]'s "," check, which would call back into
+  -- [pparse_list] (a static mutual-recursion cycle, unreachable at runtime
+  -- here since a split item is comma-free by construction).
+  --
+  -- [pparse_list_item] and [pparse_range_or_step_values] return `Result(
+  -- List(Int), String)` directly — never `Result(Field, String)` — so that
+  -- [pparse_list]'s recursive accumulator loop only ever pattern-matches a
+  -- single-constructor `Result`. A version where the per-item helper
+  -- returned `Result(Field, String)` instead (forcing [pparse_list] to
+  -- destructure `Ok(Any)` / `Ok(Values(vs))` on every recursive step)
+  -- reliably segfaulted the *compiled* (`march --compile`) binary on any
+  -- list field ("1,3 * * * *"), while the interpreter evaluated the
+  -- identical logic correctly — a March native-codegen bug (isolated to a
+  -- ~40-line standalone repro: a private helper returning `Result(<ADT
+  -- with a List-payload constructor>, String)`, called from a self-recursive
+  -- accumulator loop and destructured there via `Ok(Ctor(vs))`, corrupts the
+  -- compiled binary's RC/tail-call handling), not a logic bug in this
+  -- module. Keeping every function in [pparse_list]'s own recursive family
+  -- on plain `Result(List(Int), String)` avoids the miscompile.
+  pfn pparse_list_item(item : String, lo : Int, hi : Int) : Result(List(Int), String) do
+    if item == "*" do
+      Ok(List.range(lo, hi))
+    else
+      if String.starts_with(item, "*/") do
+        let step_str = String.slice(item, 2, String.byte_size(item) - 2)
+        match String.to_int(step_str) do
+          Err(_) -> Err("invalid step in */N: " ++ item)
+          Ok(n) ->
+            if n <= 0 do
+              Err("step must be > 0: " ++ item)
+            else
+              Ok(pstep_values(lo, hi, n))
+            end
+        end
+      else
+        if String.contains(item, "-") do
+          pparse_range_or_step_values(item, lo, hi)
+        else
+          match String.to_int(item) do
+            Err(_) -> Err("invalid field value: " ++ item)
+            Ok(n) ->
+              if n < lo || n > hi do
+                Err("value " ++ int_to_string(n) ++ " out of range [" ++ int_to_string(lo) ++ "," ++ int_to_string(hi) ++ "]")
+              else
+                Ok(Cons(n, Nil))
+              end
+          end
+        end
+      end
+    end
+  end
+
+  pfn pparse_range_or_step_values(s : String, lo : Int, hi : Int) : Result(List(Int), String) do
+    let (range_part, step_opt) = match String.split_first(s, "/") do
+      None        -> (s, None)
+      Some((r, step_s)) ->
+        let step_i = match String.to_int(step_s) do
+          Ok(n)  -> Some(n)
+          Err(_) -> None
+        end
+        (r, step_i)
+    end
+    match String.split_first(range_part, "-") do
+      None ->
+        Err("expected range N-M in: " ++ s)
+      Some((lo_s, hi_s)) ->
+        match (String.to_int(lo_s), String.to_int(hi_s)) do
+          (Ok(rlo), Ok(rhi)) ->
+            let step = Option.unwrap_or(step_opt, 1)
+            if rlo < lo || rhi > hi || rlo > rhi do
+              Err("range out of bounds in: " ++ s)
+            else
+              Ok(pstep_values(rlo, rhi, step))
+            end
+          _ ->
+            Err("non-integer in range: " ++ s)
+        end
+    end
+  end
+
   pfn pparse_list(items : List(String), lo : Int, hi : Int, acc : List(Int)) : Result(Field, String) do
     match items do
       Nil ->
         Ok(Values(List.sort_by(acc, fn (a, b) -> a < b)))
       Cons(item, rest) ->
-        match pparse_field(item, lo, hi) do
+        match pparse_list_item(item, lo, hi) do
           Err(e) -> Err(e)
-          Ok(Any) ->
-            Ok(Values(List.range(lo, hi)))
-          Ok(Values(vs)) ->
+          Ok(vs) ->
             pparse_list(rest, lo, hi, List.append(acc, vs))
         end
     end
