@@ -46,8 +46,8 @@ mod Conduit.RateLimiter do
   -- Dispatch token acquisition to the configured backend.
   pfn pacquire_token(storage, backend, key : String, rate : Int) : Result(Bool, String) do
     match backend do
-      StorageBacked -> Conduit.Storage.rate_limit_acquire(storage, key, rate)
-      Custom(f)     -> f(key, rate)
+      StorageBacked  -> Conduit.Storage.rate_limit_acquire(storage, key, rate)
+      Conduit.Custom(f) -> f(key, rate)
     end
   end
 end
