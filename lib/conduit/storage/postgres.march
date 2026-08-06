@@ -90,7 +90,15 @@ mod Conduit.Storage.Postgres do
       None ->
         -- min_size=0: no warm-up connections; the pool grows on demand up to max_size.
         -- This avoids blocking the first caller on TCP handshakes during startup.
-        let base_cfg = Pool.default_pool_config(pconn_config(self))
+        --
+        -- The `: Pool.PoolConfig` annotation is load-bearing: `default_pool_config`
+        -- has an un-annotated (structurally-inferred) return type, and compiled
+        -- record-update `{ base_cfg with min_size: 0 }` on a structural record lays
+        -- its fields out inconsistently with the named `PoolConfig` the Pool actor
+        -- reads them back as — so `cfg.min_size` reads a garbage pointer, `warm_up`
+        -- loops billions of times against a corrupt config, and connect faults into
+        -- a hang. Pinning the type gives the update the canonical PoolConfig layout.
+        let base_cfg : Pool.PoolConfig = Pool.default_pool_config(pconn_config(self))
         let pool = Pool.start({ base_cfg with min_size: 0 })
         let _ = Vault.set(tbl, key, pool)
         pool
