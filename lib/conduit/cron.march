@@ -8,6 +8,7 @@
 -- a named table.  `Vault.new` is idempotent, so the registry is process-global
 -- and shared across all callers in the same OS process.
 mod Conduit.CronRegistry do
+  needs IO.Mut
   ptype Entry = {
     config    : Conduit.CronConfig,
     performer : String -> Result((), Conduit.ConduitError)

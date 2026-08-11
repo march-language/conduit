@@ -1,4 +1,5 @@
 mod Conduit.Config do
+  needs IO.Clock
   fn default() do
     {
       queues: Cons("default", Nil),

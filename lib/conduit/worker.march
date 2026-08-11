@@ -16,6 +16,8 @@
 -- `start_workers/4` also spawns one stale-rescue loop per queue group that
 -- reclaims jobs abandoned by workers that died mid-execution.
 mod Conduit.Worker do
+  needs IO.Spawn
+  needs IO.Clock
 
   doc """
   Start `count` worker tasks for the given queue, plus one stale-rescue task.

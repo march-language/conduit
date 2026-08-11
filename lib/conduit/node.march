@@ -19,6 +19,9 @@
 -- Override via `CONDUIT_HOSTNAME` for bare-metal deployments that use a
 -- non-standard env variable.
 mod Conduit.Node do
+  needs IO.Mut
+  needs IO.Spawn
+  needs IO.Process
 
   -- Postgres advisory lock id used for leader election.
   -- This is an arbitrary 32-bit constant shared across all Conduit processes.

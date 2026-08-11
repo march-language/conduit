@@ -1,4 +1,8 @@
 mod ConduitTest do
+  needs IO.Clock
+  needs IO.Mut
+  needs IO.Process
+  needs IO.Random
   use Test
   use Conduit
 

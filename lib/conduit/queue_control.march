@@ -9,6 +9,7 @@
 -- State is stored in a Vault table so it is visible to all worker tasks in
 -- the same process without any DB round-trip.
 mod Conduit.QueueControl do
+  needs IO.Mut
 
   doc """
   Pause all workers polling `queue` on this node.

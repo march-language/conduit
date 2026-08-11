@@ -8,6 +8,7 @@
 -- `max_passes` times per table per tick to avoid leaving a huge backlog after a
 -- long pause.  The loop stops early when a batch returns 0 rows (caught up).
 mod Conduit.Pruner do
+  needs IO.Spawn
 
   -- Maximum DELETE passes per table per tick.  Keeps a single tick bounded
   -- even when a large backlog has accumulated.

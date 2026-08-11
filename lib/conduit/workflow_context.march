@@ -1,4 +1,6 @@
 mod Conduit.WorkflowContext do
+  needs IO.Clock
+  needs IO.Mut
   doc "Create a root context for a new or resuming workflow execution."
   fn new(workflow_id : String) : Conduit.WorkflowContext do
     {

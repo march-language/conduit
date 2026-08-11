@@ -1,4 +1,5 @@
 mod Conduit.Dashboard do
+  needs IO.Spawn
   -- Aggregated queue statistics for the dashboard overview.
   type QueueSummary = {
     queue       : String,

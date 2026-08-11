@@ -1,4 +1,5 @@
 mod Conduit.API do
+  needs IO.Clock
   doc """
   Start the Conduit worker pool, cron scheduler, and workflow runner.
 

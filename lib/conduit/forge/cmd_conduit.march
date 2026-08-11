@@ -10,6 +10,7 @@
 --   forge conduit.gen.migrations --dest db/migrate
 
 mod Forge.CmdConduit do
+  needs IO.Console
 
 -- ---- Constants ----
 
