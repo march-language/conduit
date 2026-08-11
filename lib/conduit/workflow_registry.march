@@ -1,4 +1,5 @@
 mod Conduit.WorkflowRegistry do
+  needs IO.Mut
 
   type WorkflowEntry = { config : Conduit.WorkflowConfig }
 

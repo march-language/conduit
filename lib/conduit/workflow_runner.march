@@ -1,4 +1,5 @@
 mod Conduit.WorkflowRunner do
+  needs IO.Clock
   doc "The job_type constant (public so callers can use it in tests)."
   fn job_type() : String do
     "conduit.workflow_runner"

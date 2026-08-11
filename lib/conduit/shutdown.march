@@ -9,6 +9,7 @@
 -- individually.  It is never reset automatically; restart the process to
 -- resume processing after a drain.
 mod Conduit.Shutdown do
+  needs IO.Mut
 
   doc """
   Signal all workers on this node to stop polling for new jobs.

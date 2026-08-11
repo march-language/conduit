@@ -1,4 +1,5 @@
 mod Conduit.RateLimiter do
+  needs IO.Clock
   doc """
   Attempt to acquire a rate-limit token for the given job.
 

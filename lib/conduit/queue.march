@@ -12,6 +12,7 @@
 -- Workers call `dispatch` to execute a job and `lookup_config` to read the
 -- registered JobConfig (used for backoff, timeout, DLQ routing, and callbacks).
 mod Conduit.Queue do
+  needs IO.Mut
   needs IO.Clock
 
   doc """

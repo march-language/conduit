@@ -28,6 +28,7 @@
 --
 -- Schema: priv/migrations/001_conduit_schema.sql
 mod Conduit.Storage.Postgres do
+  needs IO.Mut
   use Conduit
   import Connection
   import Db
