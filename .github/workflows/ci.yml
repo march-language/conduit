@@ -17,11 +17,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check out depot
-        run: git clone --depth 1 https://github.com/march-language/depot.git ../depot
-
       - name: Set up March
         uses: march-language/setup-march@main
+
+      # `forge build` does not resolve dependencies — with an empty CAS on a
+      # fresh runner, depot is simply absent and every module it provides
+      # reports as unknown ("Unknown module `Pool`. Did you mean `Plot`?").
+      - name: Resolve dependencies
+        run: forge deps
 
       - name: Build
         run: forge build
