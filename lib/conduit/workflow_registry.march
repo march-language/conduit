@@ -8,17 +8,16 @@ mod Conduit.WorkflowRegistry do
     runner        : String -> Conduit.WorkflowContext -> Result(String, Conduit.WorkflowError),
     config        : Conduit.WorkflowConfig
   ) : () do
-    let tbl = registry_key()
-    Vault.set(tbl, "fn:" ++ workflow_type, runner)
-    Vault.set(tbl, "cfg:" ++ workflow_type, config)
+    Vault.set(fn_registry_key(), "fn:" ++ workflow_type, runner)
+    Vault.set(cfg_registry_key(), "cfg:" ++ workflow_type, config)
   end
 
   fn lookup_config(workflow_type : String) : Option(Conduit.WorkflowConfig) do
-    Vault.get(registry_key(), "cfg:" ++ workflow_type)
+    Vault.get(cfg_registry_key(), "cfg:" ++ workflow_type)
   end
 
   fn lookup(workflow_type : String) : Option(WorkflowEntry) do
-    match Vault.get(registry_key(), "cfg:" ++ workflow_type) do
+    match Vault.get(cfg_registry_key(), "cfg:" ++ workflow_type) do
       None      -> None
       Some(cfg) -> Some({ config: cfg })
     end
@@ -29,7 +28,7 @@ mod Conduit.WorkflowRegistry do
     input_json    : String,
     ctx           : Conduit.WorkflowContext
   ) do
-    match Vault.get(registry_key(), "fn:" ++ workflow_type) do
+    match Vault.get(fn_registry_key(), "fn:" ++ workflow_type) do
       None    -> Err(Conduit.WorkflowError.Failed("No workflow registered for type: " ++ workflow_type))
       Some(runner) ->
         let apply_ctx = runner(input_json)
@@ -37,10 +36,19 @@ mod Conduit.WorkflowRegistry do
     end
   end
 
-  pfn registry_key() do
-    match Vault.whereis("conduit_workflow_registry") do
+  -- Vault table handles are typed `Vault(v)`, so runner functions and
+  -- configs (different element types) need separate tables now.
+  pfn fn_registry_key() do
+    match Vault.whereis("conduit_workflow_registry_fn") do
       Some(tbl) -> tbl
-      None      -> Vault.new("conduit_workflow_registry")
+      None      -> Vault.new("conduit_workflow_registry_fn")
+    end
+  end
+
+  pfn cfg_registry_key() do
+    match Vault.whereis("conduit_workflow_registry_cfg") do
+      Some(tbl) -> tbl
+      None      -> Vault.new("conduit_workflow_registry_cfg")
     end
   end
 end

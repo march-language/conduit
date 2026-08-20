@@ -44,9 +44,8 @@ mod Conduit.Node do
       Ok(_)  -> ()
       Err(e)  -> Logger.warn("conduit_node: register failed: " ++ e)
     end
-    let cluster_tbl = pcluster_tbl()
-    Vault.set(cluster_tbl, "node_id",   config.node_id)
-    Vault.set(cluster_tbl, "is_leader",  false)
+    Vault.set(pcluster_str_tbl(),  "node_id",   config.node_id)
+    Vault.set(pcluster_bool_tbl(), "is_leader", false)
 
     let heartbeat_task =
       task_spawn(fn _ -> pheartbeat_loop(storage, config.node_id, config.heartbeat_interval_ms))
@@ -74,7 +73,7 @@ mod Conduit.Node do
     end
     if is_leader() do
       let _ = Conduit.Storage.node_release_leader_lock(storage, leader_lock_id)
-      Vault.set(pcluster_tbl(), "is_leader", false)
+      Vault.set(pcluster_bool_tbl(), "is_leader", false)
     else () end
   end
 
@@ -85,7 +84,7 @@ mod Conduit.Node do
   on every heartbeat cycle.
   """
   fn is_leader() : Bool do
-    Vault.get(pcluster_tbl(), "is_leader") |> unwrap_or(false)
+    Vault.get(pcluster_bool_tbl(), "is_leader") |> unwrap_or(false)
   end
 
   doc """
@@ -95,7 +94,7 @@ mod Conduit.Node do
   May lag by up to one heartbeat interval when the leader changes.
   """
   fn leader_node_id() : Option(String) do
-    Vault.get(pcluster_tbl(), "leader_node_id")
+    Vault.get(pcluster_str_tbl(), "leader_node_id")
   end
 
   -- Update this node's `last_seen_at` in the DB every `interval_ms`.
@@ -144,11 +143,10 @@ mod Conduit.Node do
   pfn pleader_loop(storage : s, node_id : String, interval_ms : Int) : () do
     match Conduit.Storage.node_try_leader_lock(storage, leader_lock_id) do
       Ok(true) ->
-        let ct = pcluster_tbl()
-        Vault.set(ct, "is_leader",      true)
-        Vault.set(ct, "leader_node_id", node_id)
+        Vault.set(pcluster_bool_tbl(), "is_leader",      true)
+        Vault.set(pcluster_str_tbl(),  "leader_node_id", node_id)
       Ok(false) ->
-        Vault.set(pcluster_tbl(), "is_leader", false)
+        Vault.set(pcluster_bool_tbl(), "is_leader", false)
       Err(e) ->
         Logger.warn("conduit_node: leader election error: " ++ e)
     end
@@ -184,14 +182,23 @@ mod Conduit.Node do
     }
   end
 
-  -- Return (or create) the Vault table used for cluster state.
+  -- Return (or create) the Vault tables used for cluster state.
   --
   -- Uses Vault.whereis to find an existing table before creating a new one,
-  -- ensuring the cluster table is process-global and idempotent.
-  pfn pcluster_tbl() do
-    match Vault.whereis("conduit_cluster") do
+  -- ensuring the cluster tables are process-global and idempotent. Split by
+  -- element type (String vs Bool) since Vault table handles are typed
+  -- `Vault(v)` and cannot mix value types within one table.
+  pfn pcluster_str_tbl() do
+    match Vault.whereis("conduit_cluster_str") do
       Some(tbl) -> tbl
-      None      -> Vault.new("conduit_cluster")
+      None      -> Vault.new("conduit_cluster_str")
+    end
+  end
+
+  pfn pcluster_bool_tbl() do
+    match Vault.whereis("conduit_cluster_bool") do
+      Some(tbl) -> tbl
+      None      -> Vault.new("conduit_cluster_bool")
     end
   end
 

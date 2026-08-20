@@ -1,8 +1,17 @@
 mod Conduit.EventStore do
   needs IO.Mut
-  doc "The Vault namespace key used for replay state of a given workflow."
-  fn replay_key(workflow_id : String) do
-    let name = "conduit_wf_replay_" ++ workflow_id
+  doc "The Vault(String) table used for replay state (mode + cached event payloads)."
+  fn replay_str_key(workflow_id : String) do
+    let name = "conduit_wf_replay_str_" ++ workflow_id
+    match Vault.whereis(name) do
+      Some(tbl) -> tbl
+      None      -> Vault.new(name)
+    end
+  end
+
+  doc "The Vault(Int) table used for replay state (cursor / event_count / next_seq)."
+  fn replay_int_key(workflow_id : String) do
+    let name = "conduit_wf_replay_int_" ++ workflow_id
     match Vault.whereis(name) do
       Some(tbl) -> tbl
       None      -> Vault.new(name)
@@ -45,15 +54,16 @@ mod Conduit.EventStore do
     match load_all(storage, workflow_id) do
       Err(e) -> Err(e)
       Ok(events) ->
-        let rk = replay_key(workflow_id)
+        let rk_str = replay_str_key(workflow_id)
+        let rk_int = replay_int_key(workflow_id)
         let count = List.length(events)
-        Vault.set(rk, "mode", "deterministic_replay")
-        Vault.set(rk, "cursor", 0)
-        Vault.set(rk, "event_count", count)
-        Vault.set(rk, "next_seq", count)
+        Vault.set(rk_str, "mode", "deterministic_replay")
+        Vault.set(rk_int, "cursor", 0)
+        Vault.set(rk_int, "event_count", count)
+        Vault.set(rk_int, "next_seq", count)
         -- Cache each event payload by sequence number
         List.each(events, fn evt ->
-          Vault.set(rk, "event:" ++ int_to_string(evt.sequence), evt.payload))
+          Vault.set(rk_str, "event:" ++ int_to_string(evt.sequence), evt.payload))
         Ok(())
     end
   end
@@ -67,14 +77,15 @@ mod Conduit.EventStore do
     match load_up_to(storage, workflow_id, max_sequence) do
       Err(e) -> Err(e)
       Ok(events) ->
-        let rk = replay_key(workflow_id)
+        let rk_str = replay_str_key(workflow_id)
+        let rk_int = replay_int_key(workflow_id)
         let count = List.length(events)
-        Vault.set(rk, "mode", "deterministic_replay")
-        Vault.set(rk, "cursor", 0)
-        Vault.set(rk, "event_count", count)
-        Vault.set(rk, "next_seq", count)
+        Vault.set(rk_str, "mode", "deterministic_replay")
+        Vault.set(rk_int, "cursor", 0)
+        Vault.set(rk_int, "event_count", count)
+        Vault.set(rk_int, "next_seq", count)
         List.each(events, fn evt ->
-          Vault.set(rk, "event:" ++ int_to_string(evt.sequence), evt.payload))
+          Vault.set(rk_str, "event:" ++ int_to_string(evt.sequence), evt.payload))
         Ok(())
     end
   end
