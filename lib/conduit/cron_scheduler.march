@@ -1,5 +1,6 @@
 mod Conduit.CronScheduler do
   needs IO.Spawn
+  needs IO.Clock
   doc "Start the cron scheduler as a background task."
   fn start(storage : s, tick_interval_ms : Int) : Task(()) do
     task_spawn(fn _ -> scheduler_loop(storage, tick_interval_ms))
