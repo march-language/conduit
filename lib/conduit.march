@@ -615,7 +615,7 @@ mod Conduit do
     workflow_id    : String,
     parent_id      : Option(String),
     namespace      : String,
-    checkpoint_key : String
+    checkpoint_key : Vault(String)
   }
 
   -- `WorkflowEvent` mirrors a row in `conduit_workflow_events`.  Events are

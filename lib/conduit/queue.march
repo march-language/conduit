@@ -161,9 +161,8 @@ mod Conduit.Queue do
   overwrites the previous entry — useful for testing but avoid in production.
   """
   fn register_performer(job_type : String, performer, config : Conduit.JobConfig) : () do
-    let tbl = registry_key()
-    Vault.set(tbl, "fn:" ++ job_type, performer)
-    Vault.set(tbl, "cfg:" ++ job_type, config)
+    Vault.set(fn_registry_key(), "fn:" ++ job_type, performer)
+    Vault.set(cfg_registry_key(), "cfg:" ++ job_type, config)
   end
 
   doc """
@@ -182,7 +181,7 @@ mod Conduit.Queue do
   """
   fn dispatch(job_type : String, payload : String) do
     Logger.debug("queue: dispatch job_type=" ++ job_type)
-    match Vault.get(registry_key(), "fn:" ++ job_type) do
+    match Vault.get(fn_registry_key(), "fn:" ++ job_type) do
       None    ->
         Logger.debug("queue: dispatch: no performer found for " ++ job_type)
         Err(Conduit.ConduitError.Discard("No performer registered for job type: " ++ job_type))
@@ -200,7 +199,7 @@ mod Conduit.Queue do
   registered, the worker falls back to `JobConfig.default()`.
   """
   fn lookup_config(job_type : String) : Option(Conduit.JobConfig) do
-    Vault.get(registry_key(), "cfg:" ++ job_type)
+    Vault.get(cfg_registry_key(), "cfg:" ++ job_type)
   end
 
   -- Return the serialised name for a Backoff strategy.
@@ -251,14 +250,23 @@ mod Conduit.Queue do
     end
   end
 
-  -- Return (or create) the Vault table used as the performer registry.
+  -- Return (or create) the Vault tables used as the performer registry.
   --
   -- Uses Vault.whereis to find an existing table before creating a new one,
-  -- ensuring the registry is process-global and idempotent.
-  pfn registry_key() do
-    match Vault.whereis("conduit_performer_registry") do
+  -- ensuring the registry is process-global and idempotent. Split by element
+  -- type (performer fn vs config) since Vault table handles are typed
+  -- `Vault(v)` and cannot mix value types within one table.
+  pfn fn_registry_key() do
+    match Vault.whereis("conduit_performer_registry_fn") do
       Some(tbl) -> tbl
-      None      -> Vault.new("conduit_performer_registry")
+      None      -> Vault.new("conduit_performer_registry_fn")
+    end
+  end
+
+  pfn cfg_registry_key() do
+    match Vault.whereis("conduit_performer_registry_cfg") do
+      Some(tbl) -> tbl
+      None      -> Vault.new("conduit_performer_registry_cfg")
     end
   end
 end

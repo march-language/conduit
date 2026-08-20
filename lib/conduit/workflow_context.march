@@ -36,10 +36,11 @@ mod Conduit.WorkflowContext do
   fn checkpoint(storage : s, ctx : Conduit.WorkflowContext, name : String, f) : Result(String, WorkflowError) do
     let full_name = ctx.namespace ++ name
     -- Check if deterministic replay mode is active for this workflow.
-    let replay_key = Conduit.EventStore.replay_key(ctx.workflow_id)
-    let mode = Vault.get(replay_key, "mode") |> unwrap_or("")
+    let replay_str = Conduit.EventStore.replay_str_key(ctx.workflow_id)
+    let mode = Vault.get(replay_str, "mode") |> unwrap_or("")
     if mode == "deterministic_replay" do
-      preplay_checkpoint(storage, ctx, replay_key, full_name, f)
+      let replay_int = Conduit.EventStore.replay_int_key(ctx.workflow_id)
+      preplay_checkpoint(storage, ctx, replay_str, replay_int, full_name, f)
     else
       -- Normal checkpoint mode (Phase 4 behavior).
       pnormal_checkpoint(storage, ctx, full_name, f)
@@ -90,14 +91,14 @@ mod Conduit.WorkflowContext do
   end
 
   -- Deterministic replay checkpoint: consume from event store or execute + append.
-  pfn preplay_checkpoint(storage : s, ctx : Conduit.WorkflowContext, replay_key, full_name : String, f) do
-    let cursor      = Vault.get(replay_key, "cursor")      |> unwrap_or(0)
-    let event_count = Vault.get(replay_key, "event_count") |> unwrap_or(0)
+  pfn preplay_checkpoint(storage : s, ctx : Conduit.WorkflowContext, replay_str, replay_int, full_name : String, f) do
+    let cursor      = Vault.get(replay_int, "cursor")      |> unwrap_or(0)
+    let event_count = Vault.get(replay_int, "event_count") |> unwrap_or(0)
     if cursor < event_count do
       -- Replay: read recorded event, advance cursor, return value.
-      let event_payload = Vault.get(replay_key, "event:" ++ int_to_string(cursor)) |> unwrap_or("{}")
+      let event_payload = Vault.get(replay_str, "event:" ++ int_to_string(cursor)) |> unwrap_or("{}")
       let value = Conduit.EventStore.extract_value(event_payload)
-      let _ = Vault.incr(replay_key, "cursor", 1)
+      let _ = Vault.incr(replay_int, "cursor", 1)
       -- Also populate the normal checkpoint cache so subsequent non-replay reads work.
       pvault_set(ctx.checkpoint_key, full_name, value)
       Ok(value)
@@ -106,16 +107,16 @@ mod Conduit.WorkflowContext do
       let started = DateTime.now()
       let value   = f()
       let dur_ms  = (DateTime.now() - started) * 1000
-      let next_seq = Vault.get(replay_key, "next_seq") |> unwrap_or(cursor)
+      let next_seq = Vault.get(replay_int, "next_seq") |> unwrap_or(cursor)
       let event_payload = Conduit.EventStore.checkpoint_payload(full_name, value, dur_ms)
       match Conduit.EventStore.append(storage, ctx.workflow_id, next_seq, "checkpoint", event_payload) do
         Err(e) -> Err(StorageError(e))
         Ok(_)  ->
           -- Cache the event in Vault for potential later replay access.
-          Vault.set(replay_key, "event:" ++ int_to_string(next_seq), event_payload)
-          let _ = Vault.incr(replay_key, "cursor",      1)
-          let _ = Vault.incr(replay_key, "next_seq",    1)
-          let _ = Vault.incr(replay_key, "event_count", 1)
+          Vault.set(replay_str, "event:" ++ int_to_string(next_seq), event_payload)
+          let _ = Vault.incr(replay_int, "cursor",      1)
+          let _ = Vault.incr(replay_int, "next_seq",    1)
+          let _ = Vault.incr(replay_int, "event_count", 1)
           -- Also populate normal checkpoint cache + DB.
           match Conduit.Storage.checkpoint_set(storage, ctx.workflow_id, full_name, value, dur_ms) do
             Err(e) -> Err(StorageError(e))
