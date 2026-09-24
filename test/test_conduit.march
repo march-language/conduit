@@ -1,6 +1,8 @@
 mod ConduitTest do
   needs IO.Clock
+  needs IO.Console
   needs IO.Mut
+  needs IO.NetConnect
   needs IO.Process
   needs IO.Random
   use Test

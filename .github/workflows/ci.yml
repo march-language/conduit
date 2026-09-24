@@ -20,11 +20,28 @@ jobs:
       - name: Set up March
         uses: march-language/setup-march@main
 
+      # Keep resolved dependency sources across runs so a forgepm.org outage
+      # (tarball downloads returning 502) doesn't fail CI when nothing changed.
+      - name: Restore dependency cache
+        id: deps-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.march/cas/deps
+          key: forge-deps-${{ runner.os }}-${{ hashFiles('forge.toml', 'forge.lock') }}
+
       # `forge build` does not resolve dependencies — with an empty CAS on a
       # fresh runner, depot is simply absent and every module it provides
       # reports as unknown ("Unknown module `Pool`. Did you mean `Plot`?").
+      # Retry with backoff: registry downloads fail transiently.
       - name: Resolve dependencies
-        run: forge deps
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: |
+          for attempt in 1 2 3 4; do
+            forge deps && exit 0
+            echo "forge deps failed (attempt $attempt); retrying in $((attempt * 20))s"
+            sleep $((attempt * 20))
+          done
+          exit 1
 
       - name: Build
         run: forge build

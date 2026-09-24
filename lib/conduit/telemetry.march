@@ -26,6 +26,7 @@
 -- ── Telemetry event type and dispatch ─────────────────────────────────────────
 
 mod Conduit.Telemetry do
+  needs IO.Mut
 
   -- All events emitted by the Conduit engine.
   --
