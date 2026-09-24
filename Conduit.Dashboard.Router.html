@@ -1,0 +1,516 @@
+<!DOCTYPE html><html lang="en" data-theme="dark"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Conduit.Dashboard.Router — March Docs</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,500;0,600;1,400;1,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"><style>
+/* Dark theme (default) — deep navy with cyan accent, matching the March homepage */
+:root{--bg:#07101a;--sb:#0a1622;--bg-nav:rgba(7,16,26,.92);--card:#0c1928;--bdr:#0f2438;
+--acc:oklch(63% .12 207);--acc2:oklch(74% .11 200);--text:#cce5f5;--dim:#4a7898;
+--faint:#1e4060;--bright:#eaf4fb;--code:#0c1928;
+--fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d}
+
+/* Light theme overrides */
+[data-theme='light']{--bg:#f0f6fc;--sb:#e3eef8;--bg-nav:rgba(240,246,252,.92);--card:#ddeaf5;--bdr:#b5cce0;
+--acc:oklch(37% .11 210);--acc2:oklch(45% .11 215);--text:#071828;--dim:#2e5c7c;
+--faint:#6a96b5;--bright:#071828;--code:#ddeaf5;
+--fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5}
+
+/* Reset + base */
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Inter',sans-serif;font-size:15px;line-height:1.6;display:flex;flex-direction:column;min-height:100vh}
+a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline;color:var(--acc2)}
+
+/* Top bar */
+#topbar{display:flex;align-items:center;justify-content:space-between;padding:0 24px;height:60px;background:var(--bg-nav);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--bdr);flex-shrink:0;position:sticky;top:0;z-index:100}
+#topbar .brand{font-family:'Lora',Georgia,serif;font-size:18px;font-weight:600;color:var(--text);letter-spacing:-.02em;display:flex;align-items:center;gap:9px}
+#topbar .brand svg{width:20px;height:20px}
+#topbar .actions{display:flex;align-items:center;gap:12px}
+#theme-toggle{background:none;border:1px solid var(--bdr);border-radius:6px;color:var(--dim);cursor:pointer;padding:5px 8px;font-size:13px;font-family:'JetBrains Mono',monospace;display:flex;align-items:center;gap:4px;transition:all .15s}
+#theme-toggle:hover{color:var(--text);border-color:var(--acc)}
+#search-trigger{background:var(--card);border:1px solid var(--bdr);border-radius:6px;color:var(--dim);cursor:pointer;padding:5px 14px;font-size:13px;display:flex;align-items:center;gap:8px;transition:all .15s;min-width:200px}
+#search-trigger:hover{border-color:var(--acc);color:var(--text)}
+#search-trigger kbd{font-size:10px;background:var(--bg);border:1px solid var(--bdr);border-radius:3px;padding:1px 5px;margin-left:auto;font-family:inherit}
+
+/* Content wrapper (sidebar + main) */
+.content-wrap{display:flex;flex:1;overflow:hidden}
+
+/* Typography */
+code,pre{font-family:'JetBrains Mono','Fira Code','SF Mono',monospace;font-size:13px}
+pre{background:var(--code);border:1px solid var(--bdr);border-radius:6px;padding:14px 18px;overflow-x:auto;margin:12px 0;line-height:1.5}
+code{background:var(--code);padding:2px 6px;border-radius:4px;font-size:12px;color:var(--acc)}pre code{background:none;padding:0;color:var(--text);font-size:13px}
+h1{font-family:'Lora',Georgia,serif;font-size:2.1rem;color:var(--bright);margin-bottom:12px;font-weight:600;letter-spacing:-.02em}
+h2{font-family:'JetBrains Mono','Fira Code',monospace;font-size:.72rem;color:var(--acc);margin:38px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--bdr);font-weight:500;text-transform:uppercase;letter-spacing:.12em}
+p{margin:8px 0}
+
+/* Sidebar */
+#sb{width:248px;min-width:208px;background:var(--sb);border-right:1px solid var(--bdr);padding:8px 10px 28px;position:sticky;top:60px;height:calc(100vh - 60px);overflow-y:auto;flex-shrink:0}
+#sb::-webkit-scrollbar{width:5px}#sb::-webkit-scrollbar-thumb{background:var(--bdr);border-radius:3px}#sb::-webkit-scrollbar-thumb:hover{background:var(--dim)}
+.sb-section{padding:0}
+.sb-heading{font-family:'JetBrains Mono','Fira Code',monospace;font-size:10px;font-weight:500;color:var(--faint);text-transform:uppercase;letter-spacing:.16em;padding:20px 10px 8px;user-select:none}
+
+/* Generic nav link (top-level + sub-items) */
+.sl{display:block;padding:5px 10px;border-radius:6px;font-size:13px;line-height:1.45;color:var(--dim);transition:color .12s,background .12s}
+.sl:hover{background:color-mix(in oklab,var(--acc) 9%,transparent);color:var(--text);text-decoration:none}
+.sl.active{color:var(--acc);font-weight:500}
+.sb-section>.sl.active,.sb-sub .sl.active{background:color-mix(in oklab,var(--acc) 12%,transparent);box-shadow:inset 2px 0 0 var(--acc)}
+
+/* Hierarchical sidebar groups */
+.sb-group{margin:1px 0}
+.sb-group-hdr{display:flex;align-items:center;border-radius:6px;cursor:pointer;user-select:none;transition:background .12s}
+.sb-group-hdr:hover{background:color-mix(in oklab,var(--acc) 9%,transparent)}
+.sb-group-hdr:hover .sl,.sb-group-hdr:hover .sb-chevron{color:var(--text)}
+.sb-group-hdr:has(.sl.active){background:color-mix(in oklab,var(--acc) 12%,transparent);box-shadow:inset 2px 0 0 var(--acc)}
+.sb-group-hdr .sl{flex:1;padding-left:1px}
+.sb-chevron{font-size:9px;transition:transform .15s,color .12s;width:20px;align-self:stretch;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--faint)}
+.sb-group.open>.sb-group-hdr .sb-chevron{transform:rotate(90deg);color:var(--acc)}
+.sb-sub{display:none;margin:1px 0 6px 19px;padding-left:8px;border-left:1px solid var(--bdr)}
+.sb-group.open .sb-sub{display:block}
+.sb-sub .sl{font-size:12px;padding:3px 8px;color:var(--dim)}
+.sb-sub .sl:hover{color:var(--text)}
+.sb-kind{display:inline-block;width:12px;font-family:'JetBrains Mono',monospace;font-size:8px;font-weight:700;letter-spacing:.03em;margin-right:8px;text-transform:uppercase;text-align:center}
+
+/* Main content */
+#main{flex:1;padding:40px max(52px,calc(50% - 574px));min-width:0;overflow-y:auto;height:calc(100vh - 60px)}
+
+/* Breadcrumb */
+.breadcrumb{font-size:12px;color:var(--dim);margin-bottom:16px;display:flex;align-items:center;gap:6px}
+.breadcrumb a{color:var(--dim);font-size:12px}.breadcrumb a:hover{color:var(--acc)}
+.breadcrumb .sep{color:var(--bdr)}
+
+/* Module doc card */
+.mdoc{background:var(--card);border:1px solid var(--bdr);border-radius:8px;padding:20px 24px;margin-bottom:24px;color:var(--dim);font-size:14px;line-height:1.7}
+
+/* Items */
+.item{border:1px solid var(--bdr);border-radius:8px;margin-bottom:12px;overflow:hidden;transition:border-color .15s}
+.item:hover{border-color:color-mix(in srgb,var(--acc) 40%,var(--bdr))}
+.ih{display:flex;align-items:baseline;gap:10px;padding:12px 16px;background:var(--card);cursor:pointer;user-select:none;transition:background .1s}
+.ih:hover{background:color-mix(in srgb,var(--card) 80%,var(--acc) 20%)}
+
+/* Badges */
+.badge{font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:500;letter-spacing:.08em;padding:2px 9px;border-radius:100px;text-transform:uppercase;flex-shrink:0;border:1px solid transparent}
+.bfn{background:color-mix(in oklab,var(--fn) 13%,transparent);color:var(--fn);border-color:color-mix(in oklab,var(--fn) 24%,transparent)}
+.bpfn{background:color-mix(in oklab,var(--prv) 18%,transparent);color:var(--prv);border-color:color-mix(in oklab,var(--prv) 30%,transparent)}
+.bty{background:color-mix(in oklab,var(--ty) 12%,transparent);color:var(--ty);border-color:color-mix(in oklab,var(--ty) 24%,transparent)}
+.bpt{background:color-mix(in oklab,var(--prv) 15%,transparent);color:var(--prv);border-color:color-mix(in oklab,var(--prv) 26%,transparent)}
+.bif{background:color-mix(in oklab,var(--if) 12%,transparent);color:var(--if);border-color:color-mix(in oklab,var(--if) 24%,transparent)}
+
+/* Item content */
+.name{font-family:'JetBrains Mono','Fira Code',monospace;font-size:13px;color:var(--bright);font-weight:600}
+.sig{font-family:'JetBrains Mono','Fira Code',monospace;font-size:12px;color:var(--dim);flex:1;margin-left:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ib{padding:18px 20px;border-top:1px solid var(--bdr);display:none;font-size:14px;color:var(--text);line-height:1.7}
+.ib.open{display:block}
+
+/* Source + anchor links */
+.src-link{font-size:10px;color:var(--dim);background:var(--bg);border:1px solid var(--bdr);border-radius:4px;padding:1px 6px;margin-left:auto;opacity:0;transition:all .15s;text-decoration:none;flex-shrink:0}
+.ih:hover .src-link{opacity:1}.src-link:hover{color:var(--acc);border-color:var(--acc);text-decoration:none}
+.anchor-link{color:var(--bdr);font-size:14px;margin-left:6px;opacity:0;transition:opacity .15s;text-decoration:none}
+.ih:hover .anchor-link{opacity:1}.anchor-link:hover{color:var(--acc);text-decoration:none}
+
+/* Module cards (index page) */
+.mc{border:1px solid var(--bdr);border-radius:8px;padding:16px 20px;margin-bottom:12px;background:var(--card);transition:all .15s}
+.mc:hover{border-color:var(--acc);transform:translateY(-1px)}
+.mc h3{font-family:'Lora',Georgia,serif;color:var(--acc);font-size:1.05rem;font-weight:600;letter-spacing:-.01em}
+.mc p{font-size:13px;color:var(--dim);margin-top:6px}
+.st{font-size:12px;color:var(--dim);margin-top:8px;display:flex;gap:16px}
+.st span{display:flex;align-items:center;gap:4px}
+
+/* Copy button */
+.pre-wrap{position:relative}
+.copy-btn{position:absolute;top:8px;right:10px;background:var(--card);color:var(--dim);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;opacity:0;transition:all .15s}
+.pre-wrap:hover .copy-btn{opacity:1}
+.copy-btn:hover{color:var(--text);border-color:var(--acc)}
+.copy-btn.copied{color:var(--fn);border-color:var(--fn);opacity:1}
+
+/* Search overlay (Cmd+K) */
+#search-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:flex-start;justify-content:center;padding-top:min(20vh,160px)}
+#search-overlay.open{display:flex}
+#search-modal{background:var(--sb);border:1px solid var(--bdr);border-radius:12px;width:560px;max-width:90vw;max-height:70vh;display:flex;flex-direction:column;box-shadow:0 16px 48px rgba(0,0,0,.4)}
+#search-input{width:100%;background:transparent;border:none;border-bottom:1px solid var(--bdr);color:var(--text);padding:16px 20px;font-size:15px;outline:none;font-family:inherit}
+#search-input::placeholder{color:var(--dim)}
+#sr{max-height:50vh;overflow-y:auto;padding:8px}
+#sr:empty{display:none}
+.sr-item{display:flex;align-items:baseline;gap:8px;padding:8px 12px;border-radius:6px;cursor:pointer;text-decoration:none;color:var(--text);font-size:13px;transition:background .1s}
+.sr-item:hover{background:var(--card);text-decoration:none}
+.sr-kind{font-size:9px;font-weight:700;letter-spacing:.06em;padding:2px 6px;border-radius:4px;text-transform:uppercase;flex-shrink:0;min-width:32px;text-align:center}
+.sr-fn{background:color-mix(in oklab,var(--fn) 13%,transparent);color:var(--fn)}.sr-type{background:color-mix(in oklab,var(--ty) 12%,transparent);color:var(--ty)}
+.sr-interface{background:color-mix(in oklab,var(--if) 12%,transparent);color:var(--if)}.sr-module{background:color-mix(in oklab,var(--acc) 13%,transparent);color:var(--acc)}
+.sr-pfn{background:color-mix(in oklab,var(--prv) 18%,transparent);color:var(--prv)}.sr-ptype{background:color-mix(in oklab,var(--prv) 15%,transparent);color:var(--prv)}
+.sr-name{color:var(--bright);font-family:monospace;font-weight:600;white-space:nowrap}
+.sr-mod{color:var(--dim);font-size:11px;margin-left:auto;flex-shrink:0}
+.sr-doc{color:var(--dim);font-size:11px;padding:0 12px 6px 48px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sr-sep{border-top:1px solid var(--bdr);margin:2px 8px}
+
+/* Admonitions */
+.admonition{border-left:3px solid var(--acc);background:var(--card);border-radius:0 6px 6px 0;padding:12px 16px;margin:12px 0;font-size:14px;color:var(--text)}
+.admonition.warning{border-left-color:var(--ty)}
+.admonition.note{border-left-color:var(--acc2)}
+
+/* Lists */
+ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
+
+/* Guide body */
+.guide-body{line-height:1.8;font-size:15px}
+.guide-body h3{font-family:'Lora',Georgia,serif;font-size:1.4rem;margin:30px 0 12px;color:var(--bright);font-weight:600;letter-spacing:-.01em}
+.guide-body h4{font-family:'Lora',Georgia,serif;font-size:1.1rem;margin:24px 0 10px;color:var(--bright);font-weight:600}
+
+/* Code blocks follow theme tokens (light code surface in light mode, like the main page) */
+
+/* Responsive */
+@media(max-width:768px){#sb{display:none}#main{padding:24px 16px}#search-trigger{min-width:auto}}
+</style></head><body><header id="topbar"><div class="brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg> March Docs</div><div class="actions"><button id="search-trigger" onclick="openSearch()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg> Search&hellip;<kbd>&#8984;K</kbd></button><button id="theme-toggle" onclick="toggleTheme()"><svg id="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg><svg id="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></button></div></header><div id="search-overlay" onclick="closeSearch()"><div id="search-modal" onclick="event.stopPropagation()"><input id="search-input" type="text" placeholder="Search modules, functions, types&hellip;" autocomplete="off"><div id="sr"></div></div></div><div class="content-wrap"><nav id="sb"><div class="sb-section"><a href="index.html" class="sl">Overview</a><div class="sb-heading">Modules</div><div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.html">Conduit</a></div><div class="sb-sub"><a class="sl" href="Conduit.html#type-ConduitError"><span class="sb-kind" style="color:var(--ty)">T</span>ConduitError</a>
+<a class="sl" href="Conduit.html#type-Schema"><span class="sb-kind" style="color:var(--ty)">T</span>Schema</a>
+<a class="sl" href="Conduit.html#type-Backoff"><span class="sb-kind" style="color:var(--ty)">T</span>Backoff</a>
+<a class="sl" href="Conduit.html#type-UniqueScope"><span class="sb-kind" style="color:var(--ty)">T</span>UniqueScope</a>
+<a class="sl" href="Conduit.html#type-UniqueConstraint"><span class="sb-kind" style="color:var(--ty)">T</span>UniqueConstraint</a>
+<a class="sl" href="Conduit.html#type-UniqueConflict"><span class="sb-kind" style="color:var(--ty)">T</span>UniqueConflict</a>
+<a class="sl" href="Conduit.html#type-PerKeyRateLimit"><span class="sb-kind" style="color:var(--ty)">T</span>PerKeyRateLimit</a>
+<a class="sl" href="Conduit.html#type-RateLimiterBackend"><span class="sb-kind" style="color:var(--ty)">T</span>RateLimiterBackend</a>
+<a class="sl" href="Conduit.html#type-RateLimit"><span class="sb-kind" style="color:var(--ty)">T</span>RateLimit</a>
+<a class="sl" href="Conduit.html#type-JobConfig"><span class="sb-kind" style="color:var(--ty)">T</span>JobConfig</a>
+<a class="sl" href="Conduit.html#type-JobInfo"><span class="sb-kind" style="color:var(--ty)">T</span>JobInfo</a>
+<a class="sl" href="Conduit.html#type-RetentionConfig"><span class="sb-kind" style="color:var(--ty)">T</span>RetentionConfig</a>
+<a class="sl" href="Conduit.html#type-Config"><span class="sb-kind" style="color:var(--ty)">T</span>Config</a>
+<a class="sl" href="Conduit.html#type-CronOverlap"><span class="sb-kind" style="color:var(--ty)">T</span>CronOverlap</a>
+<a class="sl" href="Conduit.html#type-CronConfig"><span class="sb-kind" style="color:var(--ty)">T</span>CronConfig</a>
+<a class="sl" href="Conduit.html#type-CronSchedule"><span class="sb-kind" style="color:var(--ty)">T</span>CronSchedule</a>
+<a class="sl" href="Conduit.html#type-JobRow"><span class="sb-kind" style="color:var(--ty)">T</span>JobRow</a>
+<a class="sl" href="Conduit.html#type-DeadLetter"><span class="sb-kind" style="color:var(--ty)">T</span>DeadLetter</a>
+<a class="sl" href="Conduit.html#type-NodeInfo"><span class="sb-kind" style="color:var(--ty)">T</span>NodeInfo</a>
+<a class="sl" href="Conduit.html#type-WorkflowError"><span class="sb-kind" style="color:var(--ty)">T</span>WorkflowError</a>
+<a class="sl" href="Conduit.html#type-ExecutionMode"><span class="sb-kind" style="color:var(--ty)">T</span>ExecutionMode</a>
+<a class="sl" href="Conduit.html#type-WorkflowConfig"><span class="sb-kind" style="color:var(--ty)">T</span>WorkflowConfig</a>
+<a class="sl" href="Conduit.html#type-WorkflowHandle"><span class="sb-kind" style="color:var(--ty)">T</span>WorkflowHandle</a>
+<a class="sl" href="Conduit.html#type-WorkflowRow"><span class="sb-kind" style="color:var(--ty)">T</span>WorkflowRow</a>
+<a class="sl" href="Conduit.html#type-WorkflowCheckpoint"><span class="sb-kind" style="color:var(--ty)">T</span>WorkflowCheckpoint</a>
+<a class="sl" href="Conduit.html#type-WorkflowSignal"><span class="sb-kind" style="color:var(--ty)">T</span>WorkflowSignal</a>
+<a class="sl" href="Conduit.html#type-WorkflowContext"><span class="sb-kind" style="color:var(--ty)">T</span>WorkflowContext</a>
+<a class="sl" href="Conduit.html#type-WorkflowEvent"><span class="sb-kind" style="color:var(--ty)">T</span>WorkflowEvent</a>
+<a class="sl" href="Conduit.html#type-Auth"><span class="sb-kind" style="color:var(--ty)">T</span>Auth</a>
+<a class="sl" href="Conduit.html#iface-Storage"><span class="sb-kind" style="color:var(--if)">I</span>Storage</a>
+<a class="sl" href="Conduit.html#fn-cancel_cron"><span class="sb-kind" style="color:var(--fn)">F</span>cancel_cron</a>
+<a class="sl" href="Conduit.html#fn-cancel_workflow"><span class="sb-kind" style="color:var(--fn)">F</span>cancel_workflow</a>
+<a class="sl" href="Conduit.html#fn-cluster_leader"><span class="sb-kind" style="color:var(--fn)">F</span>cluster_leader</a>
+<a class="sl" href="Conduit.html#fn-enqueue_all"><span class="sb-kind" style="color:var(--fn)">F</span>enqueue_all</a>
+<a class="sl" href="Conduit.html#fn-pause_cron"><span class="sb-kind" style="color:var(--fn)">F</span>pause_cron</a>
+<a class="sl" href="Conduit.html#fn-pause_queue"><span class="sb-kind" style="color:var(--fn)">F</span>pause_queue</a>
+<a class="sl" href="Conduit.html#fn-resume_cron"><span class="sb-kind" style="color:var(--fn)">F</span>resume_cron</a>
+<a class="sl" href="Conduit.html#fn-resume_queue"><span class="sb-kind" style="color:var(--fn)">F</span>resume_queue</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.API.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.API.html">Conduit.API</a></div><div class="sb-sub"><a class="sl" href="Conduit.API.html#fn-cancel_cron"><span class="sb-kind" style="color:var(--fn)">F</span>cancel_cron</a>
+<a class="sl" href="Conduit.API.html#fn-cancel_workflow"><span class="sb-kind" style="color:var(--fn)">F</span>cancel_workflow</a>
+<a class="sl" href="Conduit.API.html#fn-cluster_leader"><span class="sb-kind" style="color:var(--fn)">F</span>cluster_leader</a>
+<a class="sl" href="Conduit.API.html#fn-cluster_nodes"><span class="sb-kind" style="color:var(--fn)">F</span>cluster_nodes</a>
+<a class="sl" href="Conduit.API.html#fn-enqueue"><span class="sb-kind" style="color:var(--fn)">F</span>enqueue</a>
+<a class="sl" href="Conduit.API.html#fn-enqueue_all"><span class="sb-kind" style="color:var(--fn)">F</span>enqueue_all</a>
+<a class="sl" href="Conduit.API.html#fn-enqueue_in"><span class="sb-kind" style="color:var(--fn)">F</span>enqueue_in</a>
+<a class="sl" href="Conduit.API.html#fn-enqueue_in_with"><span class="sb-kind" style="color:var(--fn)">F</span>enqueue_in_with</a>
+<a class="sl" href="Conduit.API.html#fn-enqueue_with"><span class="sb-kind" style="color:var(--fn)">F</span>enqueue_with</a>
+<a class="sl" href="Conduit.API.html#fn-is_cluster_leader"><span class="sb-kind" style="color:var(--fn)">F</span>is_cluster_leader</a>
+<a class="sl" href="Conduit.API.html#fn-pause_cron"><span class="sb-kind" style="color:var(--fn)">F</span>pause_cron</a>
+<a class="sl" href="Conduit.API.html#fn-pause_queue"><span class="sb-kind" style="color:var(--fn)">F</span>pause_queue</a>
+<a class="sl" href="Conduit.API.html#fn-register"><span class="sb-kind" style="color:var(--fn)">F</span>register</a>
+<a class="sl" href="Conduit.API.html#fn-register_cron"><span class="sb-kind" style="color:var(--fn)">F</span>register_cron</a>
+<a class="sl" href="Conduit.API.html#fn-register_default"><span class="sb-kind" style="color:var(--fn)">F</span>register_default</a>
+<a class="sl" href="Conduit.API.html#fn-register_workflow"><span class="sb-kind" style="color:var(--fn)">F</span>register_workflow</a>
+<a class="sl" href="Conduit.API.html#fn-replay_workflow"><span class="sb-kind" style="color:var(--fn)">F</span>replay_workflow</a>
+<a class="sl" href="Conduit.API.html#fn-replay_workflow_to"><span class="sb-kind" style="color:var(--fn)">F</span>replay_workflow_to</a>
+<a class="sl" href="Conduit.API.html#fn-resume_cron"><span class="sb-kind" style="color:var(--fn)">F</span>resume_cron</a>
+<a class="sl" href="Conduit.API.html#fn-resume_queue"><span class="sb-kind" style="color:var(--fn)">F</span>resume_queue</a>
+<a class="sl" href="Conduit.API.html#fn-schedule_cron"><span class="sb-kind" style="color:var(--fn)">F</span>schedule_cron</a>
+<a class="sl" href="Conduit.API.html#fn-signal_workflow"><span class="sb-kind" style="color:var(--fn)">F</span>signal_workflow</a>
+<a class="sl" href="Conduit.API.html#fn-start"><span class="sb-kind" style="color:var(--fn)">F</span>start</a>
+<a class="sl" href="Conduit.API.html#fn-start_workflow"><span class="sb-kind" style="color:var(--fn)">F</span>start_workflow</a>
+<a class="sl" href="Conduit.API.html#fn-stop"><span class="sb-kind" style="color:var(--fn)">F</span>stop</a>
+<a class="sl" href="Conduit.API.html#fn-workflow_events"><span class="sb-kind" style="color:var(--fn)">F</span>workflow_events</a>
+<a class="sl" href="Conduit.API.html#fn-workflow_status"><span class="sb-kind" style="color:var(--fn)">F</span>workflow_status</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Backoff.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Backoff.html">Conduit.Backoff</a></div><div class="sb-sub"><a class="sl" href="Conduit.Backoff.html#fn-custom"><span class="sb-kind" style="color:var(--fn)">F</span>custom</a>
+<a class="sl" href="Conduit.Backoff.html#fn-delay"><span class="sb-kind" style="color:var(--fn)">F</span>delay</a>
+<a class="sl" href="Conduit.Backoff.html#fn-exponential"><span class="sb-kind" style="color:var(--fn)">F</span>exponential</a>
+<a class="sl" href="Conduit.Backoff.html#fn-fibonacci"><span class="sb-kind" style="color:var(--fn)">F</span>fibonacci</a>
+<a class="sl" href="Conduit.Backoff.html#fn-linear_strat"><span class="sb-kind" style="color:var(--fn)">F</span>linear_strat</a>
+<a class="sl" href="Conduit.Backoff.html#fn-name"><span class="sb-kind" style="color:var(--fn)">F</span>name</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Config.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Config.html">Conduit.Config</a></div><div class="sb-sub"><a class="sl" href="Conduit.Config.html#fn-default"><span class="sb-kind" style="color:var(--fn)">F</span>default</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.CronConfig.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.CronConfig.html">Conduit.CronConfig</a></div><div class="sb-sub"><a class="sl" href="Conduit.CronConfig.html#fn-default"><span class="sb-kind" style="color:var(--fn)">F</span>default</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.CronParser.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.CronParser.html">Conduit.CronParser</a></div><div class="sb-sub"><a class="sl" href="Conduit.CronParser.html#type-Field"><span class="sb-kind" style="color:var(--ty)">T</span>Field</a>
+<a class="sl" href="Conduit.CronParser.html#type-CronExpr"><span class="sb-kind" style="color:var(--ty)">T</span>CronExpr</a>
+<a class="sl" href="Conduit.CronParser.html#fn-matches"><span class="sb-kind" style="color:var(--fn)">F</span>matches</a>
+<a class="sl" href="Conduit.CronParser.html#fn-next_run"><span class="sb-kind" style="color:var(--fn)">F</span>next_run</a>
+<a class="sl" href="Conduit.CronParser.html#fn-parse"><span class="sb-kind" style="color:var(--fn)">F</span>parse</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.CronRegistry.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.CronRegistry.html">Conduit.CronRegistry</a></div><div class="sb-sub"><a class="sl" href="Conduit.CronRegistry.html#type-Entry"><span class="sb-kind" style="color:var(--ty)">T</span>Entry</a>
+<a class="sl" href="Conduit.CronRegistry.html#fn-all"><span class="sb-kind" style="color:var(--fn)">F</span>all</a>
+<a class="sl" href="Conduit.CronRegistry.html#fn-fire"><span class="sb-kind" style="color:var(--fn)">F</span>fire</a>
+<a class="sl" href="Conduit.CronRegistry.html#fn-lookup"><span class="sb-kind" style="color:var(--fn)">F</span>lookup</a>
+<a class="sl" href="Conduit.CronRegistry.html#fn-overlap_from_string"><span class="sb-kind" style="color:var(--fn)">F</span>overlap_from_string</a>
+<a class="sl" href="Conduit.CronRegistry.html#fn-overlap_to_string"><span class="sb-kind" style="color:var(--fn)">F</span>overlap_to_string</a>
+<a class="sl" href="Conduit.CronRegistry.html#fn-register"><span class="sb-kind" style="color:var(--fn)">F</span>register</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.CronScheduler.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.CronScheduler.html">Conduit.CronScheduler</a></div><div class="sb-sub"><a class="sl" href="Conduit.CronScheduler.html#fn-start"><span class="sb-kind" style="color:var(--fn)">F</span>start</a>
+<a class="sl" href="Conduit.CronScheduler.html#fn-timezone_offset_s"><span class="sb-kind" style="color:var(--fn)">F</span>timezone_offset_s</a>
+<a class="sl" href="Conduit.CronScheduler.html#fn-upsert_static"><span class="sb-kind" style="color:var(--fn)">F</span>upsert_static</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Dashboard.html">Conduit.Dashboard</a></div><div class="sb-sub"><a class="sl" href="Conduit.Dashboard.html#type-QueueSummary"><span class="sb-kind" style="color:var(--ty)">T</span>QueueSummary</a>
+<a class="sl" href="Conduit.Dashboard.html#fn-get_summary"><span class="sb-kind" style="color:var(--fn)">F</span>get_summary</a>
+<a class="sl" href="Conduit.Dashboard.html#fn-start_standalone"><span class="sb-kind" style="color:var(--fn)">F</span>start_standalone</a>
+<a class="sl" href="Conduit.Dashboard.html#fn-subscribe_to_summary"><span class="sb-kind" style="color:var(--fn)">F</span>subscribe_to_summary</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Actions.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Dashboard.Actions.html">Conduit.Dashboard.Actions</a></div><div class="sb-sub"><a class="sl" href="Conduit.Dashboard.Actions.html#fn-cancel_job"><span class="sb-kind" style="color:var(--fn)">F</span>cancel_job</a>
+<a class="sl" href="Conduit.Dashboard.Actions.html#fn-cancel_workflow"><span class="sb-kind" style="color:var(--fn)">F</span>cancel_workflow</a>
+<a class="sl" href="Conduit.Dashboard.Actions.html#fn-delete_all_dead_letters"><span class="sb-kind" style="color:var(--fn)">F</span>delete_all_dead_letters</a>
+<a class="sl" href="Conduit.Dashboard.Actions.html#fn-delete_cron"><span class="sb-kind" style="color:var(--fn)">F</span>delete_cron</a>
+<a class="sl" href="Conduit.Dashboard.Actions.html#fn-delete_dead_letter"><span class="sb-kind" style="color:var(--fn)">F</span>delete_dead_letter</a>
+<a class="sl" href="Conduit.Dashboard.Actions.html#fn-delete_job"><span class="sb-kind" style="color:var(--fn)">F</span>delete_job</a>
+<a class="sl" href="Conduit.Dashboard.Actions.html#fn-pause_cron"><span class="sb-kind" style="color:var(--fn)">F</span>pause_cron</a>
+<a class="sl" href="Conduit.Dashboard.Actions.html#fn-resume_cron"><span class="sb-kind" style="color:var(--fn)">F</span>resume_cron</a>
+<a class="sl" href="Conduit.Dashboard.Actions.html#fn-retry_all_dead_letters"><span class="sb-kind" style="color:var(--fn)">F</span>retry_all_dead_letters</a>
+<a class="sl" href="Conduit.Dashboard.Actions.html#fn-retry_dead_letter"><span class="sb-kind" style="color:var(--fn)">F</span>retry_dead_letter</a>
+<a class="sl" href="Conduit.Dashboard.Actions.html#fn-retry_job"><span class="sb-kind" style="color:var(--fn)">F</span>retry_job</a>
+<a class="sl" href="Conduit.Dashboard.Actions.html#fn-trigger_cron_now"><span class="sb-kind" style="color:var(--fn)">F</span>trigger_cron_now</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Auth.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Dashboard.Auth.html">Conduit.Dashboard.Auth</a></div><div class="sb-sub"><a class="sl" href="Conduit.Dashboard.Auth.html#fn-check"><span class="sb-kind" style="color:var(--fn)">F</span>check</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Html.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Dashboard.Html.html">Conduit.Dashboard.Html</a></div><div class="sb-sub"><a class="sl" href="Conduit.Dashboard.Html.html#fn-action_btn"><span class="sb-kind" style="color:var(--fn)">F</span>action_btn</a>
+<a class="sl" href="Conduit.Dashboard.Html.html#fn-flash"><span class="sb-kind" style="color:var(--fn)">F</span>flash</a>
+<a class="sl" href="Conduit.Dashboard.Html.html#fn-flash_from_query"><span class="sb-kind" style="color:var(--fn)">F</span>flash_from_query</a>
+<a class="sl" href="Conduit.Dashboard.Html.html#fn-page"><span class="sb-kind" style="color:var(--fn)">F</span>page</a>
+<a class="sl" href="Conduit.Dashboard.Html.html#fn-page_with_nav"><span class="sb-kind" style="color:var(--fn)">F</span>page_with_nav</a>
+<a class="sl" href="Conduit.Dashboard.Html.html#fn-pagination"><span class="sb-kind" style="color:var(--fn)">F</span>pagination</a>
+<a class="sl" href="Conduit.Dashboard.Html.html#fn-relative_time"><span class="sb-kind" style="color:var(--fn)">F</span>relative_time</a>
+<a class="sl" href="Conduit.Dashboard.Html.html#fn-relative_time_opt"><span class="sb-kind" style="color:var(--fn)">F</span>relative_time_opt</a>
+<a class="sl" href="Conduit.Dashboard.Html.html#fn-status_badge"><span class="sb-kind" style="color:var(--fn)">F</span>status_badge</a>
+<a class="sl" href="Conduit.Dashboard.Html.html#fn-table"><span class="sb-kind" style="color:var(--fn)">F</span>table</a>
+<a class="sl" href="Conduit.Dashboard.Html.html#fn-table_with_empty"><span class="sb-kind" style="color:var(--fn)">F</span>table_with_empty</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Pages.Crons.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Dashboard.Pages.Crons.html">Conduit.Dashboard.Pages.Crons</a></div><div class="sb-sub"><a class="sl" href="Conduit.Dashboard.Pages.Crons.html#fn-render"><span class="sb-kind" style="color:var(--fn)">F</span>render</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Pages.DeadLetters.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Dashboard.Pages.DeadLetters.html">Conduit.Dashboard.Pages.DeadLetters</a></div><div class="sb-sub"><a class="sl" href="Conduit.Dashboard.Pages.DeadLetters.html#fn-render"><span class="sb-kind" style="color:var(--fn)">F</span>render</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Pages.Jobs.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Dashboard.Pages.Jobs.html">Conduit.Dashboard.Pages.Jobs</a></div><div class="sb-sub"><a class="sl" href="Conduit.Dashboard.Pages.Jobs.html#fn-render"><span class="sb-kind" style="color:var(--fn)">F</span>render</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Pages.Nodes.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Dashboard.Pages.Nodes.html">Conduit.Dashboard.Pages.Nodes</a></div><div class="sb-sub"><a class="sl" href="Conduit.Dashboard.Pages.Nodes.html#fn-render"><span class="sb-kind" style="color:var(--fn)">F</span>render</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Pages.Overview.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Dashboard.Pages.Overview.html">Conduit.Dashboard.Pages.Overview</a></div><div class="sb-sub"><a class="sl" href="Conduit.Dashboard.Pages.Overview.html#fn-render"><span class="sb-kind" style="color:var(--fn)">F</span>render</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Pages.Queues.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Dashboard.Pages.Queues.html">Conduit.Dashboard.Pages.Queues</a></div><div class="sb-sub"><a class="sl" href="Conduit.Dashboard.Pages.Queues.html#fn-render_detail"><span class="sb-kind" style="color:var(--fn)">F</span>render_detail</a>
+<a class="sl" href="Conduit.Dashboard.Pages.Queues.html#fn-render_list"><span class="sb-kind" style="color:var(--fn)">F</span>render_list</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Pages.Workflows.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Dashboard.Pages.Workflows.html">Conduit.Dashboard.Pages.Workflows</a></div><div class="sb-sub"><a class="sl" href="Conduit.Dashboard.Pages.Workflows.html#fn-render_detail"><span class="sb-kind" style="color:var(--fn)">F</span>render_detail</a>
+<a class="sl" href="Conduit.Dashboard.Pages.Workflows.html#fn-render_list"><span class="sb-kind" style="color:var(--fn)">F</span>render_list</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Queries.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Dashboard.Queries.html">Conduit.Dashboard.Queries</a></div><div class="sb-sub"><a class="sl" href="Conduit.Dashboard.Queries.html#fn-crons"><span class="sb-kind" style="color:var(--fn)">F</span>crons</a>
+<a class="sl" href="Conduit.Dashboard.Queries.html#fn-dead_letters"><span class="sb-kind" style="color:var(--fn)">F</span>dead_letters</a>
+<a class="sl" href="Conduit.Dashboard.Queries.html#fn-job_by_id"><span class="sb-kind" style="color:var(--fn)">F</span>job_by_id</a>
+<a class="sl" href="Conduit.Dashboard.Queries.html#fn-jobs_list"><span class="sb-kind" style="color:var(--fn)">F</span>jobs_list</a>
+<a class="sl" href="Conduit.Dashboard.Queries.html#fn-nodes"><span class="sb-kind" style="color:var(--fn)">F</span>nodes</a>
+<a class="sl" href="Conduit.Dashboard.Queries.html#fn-queue_summary"><span class="sb-kind" style="color:var(--fn)">F</span>queue_summary</a>
+<a class="sl" href="Conduit.Dashboard.Queries.html#fn-workflow_by_id"><span class="sb-kind" style="color:var(--fn)">F</span>workflow_by_id</a>
+<a class="sl" href="Conduit.Dashboard.Queries.html#fn-workflow_checkpoints"><span class="sb-kind" style="color:var(--fn)">F</span>workflow_checkpoints</a>
+<a class="sl" href="Conduit.Dashboard.Queries.html#fn-workflows"><span class="sb-kind" style="color:var(--fn)">F</span>workflows</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Router.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Dashboard.Router.html">Conduit.Dashboard.Router</a></div><div class="sb-sub"><a class="sl" href="Conduit.Dashboard.Router.html#fn-handle"><span class="sb-kind" style="color:var(--fn)">F</span>handle</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.DeadLetter.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.DeadLetter.html">Conduit.DeadLetter</a></div><div class="sb-sub"><a class="sl" href="Conduit.DeadLetter.html#fn-from_job"><span class="sb-kind" style="color:var(--fn)">F</span>from_job</a>
+<a class="sl" href="Conduit.DeadLetter.html#fn-to_job_info"><span class="sb-kind" style="color:var(--fn)">F</span>to_job_info</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.EventStore.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.EventStore.html">Conduit.EventStore</a></div><div class="sb-sub"><a class="sl" href="Conduit.EventStore.html#fn-append"><span class="sb-kind" style="color:var(--fn)">F</span>append</a>
+<a class="sl" href="Conduit.EventStore.html#fn-checkpoint_payload"><span class="sb-kind" style="color:var(--fn)">F</span>checkpoint_payload</a>
+<a class="sl" href="Conduit.EventStore.html#fn-count"><span class="sb-kind" style="color:var(--fn)">F</span>count</a>
+<a class="sl" href="Conduit.EventStore.html#fn-extract_value"><span class="sb-kind" style="color:var(--fn)">F</span>extract_value</a>
+<a class="sl" href="Conduit.EventStore.html#fn-load_all"><span class="sb-kind" style="color:var(--fn)">F</span>load_all</a>
+<a class="sl" href="Conduit.EventStore.html#fn-load_up_to"><span class="sb-kind" style="color:var(--fn)">F</span>load_up_to</a>
+<a class="sl" href="Conduit.EventStore.html#fn-replay_int_key"><span class="sb-kind" style="color:var(--fn)">F</span>replay_int_key</a>
+<a class="sl" href="Conduit.EventStore.html#fn-replay_str_key"><span class="sb-kind" style="color:var(--fn)">F</span>replay_str_key</a>
+<a class="sl" href="Conduit.EventStore.html#fn-warm_replay"><span class="sb-kind" style="color:var(--fn)">F</span>warm_replay</a>
+<a class="sl" href="Conduit.EventStore.html#fn-warm_replay_to"><span class="sb-kind" style="color:var(--fn)">F</span>warm_replay_to</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.JobConfig.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.JobConfig.html">Conduit.JobConfig</a></div><div class="sb-sub"><a class="sl" href="Conduit.JobConfig.html#fn-default"><span class="sb-kind" style="color:var(--fn)">F</span>default</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Middleware.Chain.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Middleware.Chain.html">Conduit.Middleware.Chain</a></div><div class="sb-sub"><a class="sl" href="Conduit.Middleware.Chain.html#fn-build"><span class="sb-kind" style="color:var(--fn)">F</span>build</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Node.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Node.html">Conduit.Node</a></div><div class="sb-sub"><a class="sl" href="Conduit.Node.html#fn-is_leader"><span class="sb-kind" style="color:var(--fn)">F</span>is_leader</a>
+<a class="sl" href="Conduit.Node.html#fn-leader_node_id"><span class="sb-kind" style="color:var(--fn)">F</span>leader_node_id</a>
+<a class="sl" href="Conduit.Node.html#fn-start"><span class="sb-kind" style="color:var(--fn)">F</span>start</a>
+<a class="sl" href="Conduit.Node.html#fn-stop"><span class="sb-kind" style="color:var(--fn)">F</span>stop</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Pruner.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Pruner.html">Conduit.Pruner</a></div><div class="sb-sub"><a class="sl" href="Conduit.Pruner.html#fn-start"><span class="sb-kind" style="color:var(--fn)">F</span>start</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Queue.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Queue.html">Conduit.Queue</a></div><div class="sb-sub"><a class="sl" href="Conduit.Queue.html#fn-dispatch"><span class="sb-kind" style="color:var(--fn)">F</span>dispatch</a>
+<a class="sl" href="Conduit.Queue.html#fn-enqueue"><span class="sb-kind" style="color:var(--fn)">F</span>enqueue</a>
+<a class="sl" href="Conduit.Queue.html#fn-enqueue_all"><span class="sb-kind" style="color:var(--fn)">F</span>enqueue_all</a>
+<a class="sl" href="Conduit.Queue.html#fn-enqueue_in"><span class="sb-kind" style="color:var(--fn)">F</span>enqueue_in</a>
+<a class="sl" href="Conduit.Queue.html#fn-lookup_config"><span class="sb-kind" style="color:var(--fn)">F</span>lookup_config</a>
+<a class="sl" href="Conduit.Queue.html#fn-register_performer"><span class="sb-kind" style="color:var(--fn)">F</span>register_performer</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.QueueControl.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.QueueControl.html">Conduit.QueueControl</a></div><div class="sb-sub"><a class="sl" href="Conduit.QueueControl.html#fn-is_paused"><span class="sb-kind" style="color:var(--fn)">F</span>is_paused</a>
+<a class="sl" href="Conduit.QueueControl.html#fn-pause"><span class="sb-kind" style="color:var(--fn)">F</span>pause</a>
+<a class="sl" href="Conduit.QueueControl.html#fn-resume"><span class="sb-kind" style="color:var(--fn)">F</span>resume</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.RateLimiter.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.RateLimiter.html">Conduit.RateLimiter</a></div><div class="sb-sub"><a class="sl" href="Conduit.RateLimiter.html#fn-acquire"><span class="sb-kind" style="color:var(--fn)">F</span>acquire</a>
+<a class="sl" href="Conduit.RateLimiter.html#fn-snooze_duration"><span class="sb-kind" style="color:var(--fn)">F</span>snooze_duration</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.RetentionConfig.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.RetentionConfig.html">Conduit.RetentionConfig</a></div><div class="sb-sub"><a class="sl" href="Conduit.RetentionConfig.html#fn-default"><span class="sb-kind" style="color:var(--fn)">F</span>default</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Schema.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Schema.html">Conduit.Schema</a></div><div class="sb-sub"><a class="sl" href="Conduit.Schema.html#fn-build"><span class="sb-kind" style="color:var(--fn)">F</span>build</a>
+<a class="sl" href="Conduit.Schema.html#fn-none"><span class="sb-kind" style="color:var(--fn)">F</span>none</a>
+<a class="sl" href="Conduit.Schema.html#fn-validate"><span class="sb-kind" style="color:var(--fn)">F</span>validate</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Shutdown.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Shutdown.html">Conduit.Shutdown</a></div><div class="sb-sub"><a class="sl" href="Conduit.Shutdown.html#fn-clear_draining"><span class="sb-kind" style="color:var(--fn)">F</span>clear_draining</a>
+<a class="sl" href="Conduit.Shutdown.html#fn-is_draining"><span class="sb-kind" style="color:var(--fn)">F</span>is_draining</a>
+<a class="sl" href="Conduit.Shutdown.html#fn-set_draining"><span class="sb-kind" style="color:var(--fn)">F</span>set_draining</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Storage.Postgres.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Storage.Postgres.html">Conduit.Storage.Postgres</a></div><div class="sb-sub"><a class="sl" href="Conduit.Storage.Postgres.html#type-Store"><span class="sb-kind" style="color:var(--ty)">T</span>Store</a>
+<a class="sl" href="Conduit.Storage.Postgres.html#fn-local"><span class="sb-kind" style="color:var(--fn)">F</span>local</a>
+<a class="sl" href="Conduit.Storage.Postgres.html#fn-new"><span class="sb-kind" style="color:var(--fn)">F</span>new</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Telemetry.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Telemetry.html">Conduit.Telemetry</a></div><div class="sb-sub"><a class="sl" href="Conduit.Telemetry.html#type-ConduitTelemetryEvent"><span class="sb-kind" style="color:var(--ty)">T</span>ConduitTelemetryEvent</a>
+<a class="sl" href="Conduit.Telemetry.html#fn-attach"><span class="sb-kind" style="color:var(--fn)">F</span>attach</a>
+<a class="sl" href="Conduit.Telemetry.html#fn-attach_logger"><span class="sb-kind" style="color:var(--fn)">F</span>attach_logger</a>
+<a class="sl" href="Conduit.Telemetry.html#fn-detach"><span class="sb-kind" style="color:var(--fn)">F</span>detach</a>
+<a class="sl" href="Conduit.Telemetry.html#fn-dispatch"><span class="sb-kind" style="color:var(--fn)">F</span>dispatch</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Time.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Time.html">Conduit.Time</a></div><div class="sb-sub"><a class="sl" href="Conduit.Time.html#fn-sleep_ms"><span class="sb-kind" style="color:var(--fn)">F</span>sleep_ms</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Unique.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Unique.html">Conduit.Unique</a></div><div class="sb-sub"><a class="sl" href="Conduit.Unique.html#fn-conflicts"><span class="sb-kind" style="color:var(--fn)">F</span>conflicts</a>
+<a class="sl" href="Conduit.Unique.html#fn-fingerprint"><span class="sb-kind" style="color:var(--fn)">F</span>fingerprint</a>
+<a class="sl" href="Conduit.Unique.html#fn-release"><span class="sb-kind" style="color:var(--fn)">F</span>release</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Worker.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.Worker.html">Conduit.Worker</a></div><div class="sb-sub"><a class="sl" href="Conduit.Worker.html#fn-start_workers"><span class="sb-kind" style="color:var(--fn)">F</span>start_workers</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.WorkflowConfig.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.WorkflowConfig.html">Conduit.WorkflowConfig</a></div><div class="sb-sub"><a class="sl" href="Conduit.WorkflowConfig.html#fn-default"><span class="sb-kind" style="color:var(--fn)">F</span>default</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.WorkflowContext.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.WorkflowContext.html">Conduit.WorkflowContext</a></div><div class="sb-sub"><a class="sl" href="Conduit.WorkflowContext.html#fn-checkpoint"><span class="sb-kind" style="color:var(--fn)">F</span>checkpoint</a>
+<a class="sl" href="Conduit.WorkflowContext.html#fn-child"><span class="sb-kind" style="color:var(--fn)">F</span>child</a>
+<a class="sl" href="Conduit.WorkflowContext.html#fn-new"><span class="sb-kind" style="color:var(--fn)">F</span>new</a>
+<a class="sl" href="Conduit.WorkflowContext.html#fn-parallel"><span class="sb-kind" style="color:var(--fn)">F</span>parallel</a>
+<a class="sl" href="Conduit.WorkflowContext.html#fn-wait_for_signal"><span class="sb-kind" style="color:var(--fn)">F</span>wait_for_signal</a>
+<a class="sl" href="Conduit.WorkflowContext.html#fn-warm_cache"><span class="sb-kind" style="color:var(--fn)">F</span>warm_cache</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.WorkflowRegistry.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.WorkflowRegistry.html">Conduit.WorkflowRegistry</a></div><div class="sb-sub"><a class="sl" href="Conduit.WorkflowRegistry.html#type-WorkflowEntry"><span class="sb-kind" style="color:var(--ty)">T</span>WorkflowEntry</a>
+<a class="sl" href="Conduit.WorkflowRegistry.html#fn-lookup"><span class="sb-kind" style="color:var(--fn)">F</span>lookup</a>
+<a class="sl" href="Conduit.WorkflowRegistry.html#fn-lookup_config"><span class="sb-kind" style="color:var(--fn)">F</span>lookup_config</a>
+<a class="sl" href="Conduit.WorkflowRegistry.html#fn-register"><span class="sb-kind" style="color:var(--fn)">F</span>register</a>
+<a class="sl" href="Conduit.WorkflowRegistry.html#fn-run"><span class="sb-kind" style="color:var(--fn)">F</span>run</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.WorkflowRunner.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.WorkflowRunner.html">Conduit.WorkflowRunner</a></div><div class="sb-sub"><a class="sl" href="Conduit.WorkflowRunner.html#fn-enqueue"><span class="sb-kind" style="color:var(--fn)">F</span>enqueue</a>
+<a class="sl" href="Conduit.WorkflowRunner.html#fn-execute"><span class="sb-kind" style="color:var(--fn)">F</span>execute</a>
+<a class="sl" href="Conduit.WorkflowRunner.html#fn-job_type"><span class="sb-kind" style="color:var(--fn)">F</span>job_type</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Forge.CmdConduit.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Forge.CmdConduit.html">Forge.CmdConduit</a></div><div class="sb-sub"><a class="sl" href="Forge.CmdConduit.html#fn-gen_migrations"><span class="sb-kind" style="color:var(--fn)">F</span>gen_migrations</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Conduit.Dashboard.Router</span></nav><h1>Conduit.Dashboard.Router</h1><h2>Functions</h2><div class="item" id="fn-handle"><div class="ih"><span class="badge bfn">fn</span><span class="name">handle</span><span class="sig">handle(storage : s, auth, base_path : String, conn : Conn)</span><a class="anchor-link" href="#fn-handle" title="Link">#</a></div><div class="ib"><p>HTTP request handler for the Conduit Dashboard.</p><pre><code>Can be used in two ways:
+
+1. Embedded in a Bastion app:
+     forward &quot;/conduit&quot;, Conduit.Dashboard.Router,
+       storage: storage, auth: MyApp.AdminAuth
+
+2. Standalone (via Conduit.Dashboard.start_standalone/3):
+     HttpServer.plug(fn conn -&gt; handle(storage, auth, &quot;/conduit&quot;, conn) end)
+
+Routes:
+  GET  /                          — overview
+  GET  /queues                    — queue list
+  GET  /queues/:queue             — queue detail  (?status=&amp;page=)
+  GET  /jobs/:id                  — job detail
+  POST /jobs/:id/retry            — retry job
+  POST /jobs/:id/cancel           — cancel job
+  POST /jobs/:id/delete           — delete job
+  GET  /workflows                 — workflow list  (?status=&amp;page=)
+  GET  /workflows/:id             — workflow detail
+  POST /workflows/:id/cancel      — cancel workflow
+  GET  /crons                     — cron list
+  POST /crons/:id/trigger         — trigger now
+  POST /crons/:id/pause           — pause
+  POST /crons/:id/resume          — resume
+  POST /crons/:id/delete          — delete cron
+  GET  /dead-letters              — dead letters  (?page=)
+  POST /dead-letters/:id/retry    — retry one
+  POST /dead-letters/:id/delete   — delete one
+  POST /dead-letters/retry-all    — retry all
+  POST /dead-letters/delete-all   — delete all
+  GET  /nodes                     — cluster nodes
+  GET  /api/summary               — JSON summary for polling</code></pre></div></div></main></div><script>
+/* Theme toggle */
+function getTheme(){var t=localStorage.getItem('march-doc-theme');
+if(t)return t;return window.matchMedia('(prefers-color-scheme:light)').matches?'light':'dark';}
+function applyTheme(t){document.documentElement.setAttribute('data-theme',t);
+var moon=document.getElementById('icon-moon'),sun=document.getElementById('icon-sun');
+if(moon&&sun){moon.style.display=t==='dark'?'block':'none';sun.style.display=t==='light'?'block':'none';}}
+function toggleTheme(){var t=getTheme()==='dark'?'light':'dark';localStorage.setItem('march-doc-theme',t);applyTheme(t);}
+applyTheme(getTheme());
+
+/* Search overlay */
+function openSearch(){document.getElementById('search-overlay').classList.add('open');
+var inp=document.getElementById('search-input');if(inp){inp.value='';inp.focus();}}
+function closeSearch(){document.getElementById('search-overlay').classList.remove('open');
+var sr=document.getElementById('sr');if(sr)sr.innerHTML='';}
+
+/* DOMContentLoaded */
+document.addEventListener('DOMContentLoaded',function(){
+
+/* Collapsible items */
+document.querySelectorAll('.ih').forEach(function(h){h.addEventListener('click',function(e){
+if(e.target.classList.contains('anchor-link'))return;
+var b=this.nextElementSibling;if(b)b.classList.toggle('open');});});
+
+/* Active sidebar link + auto-expand current module group */
+var path=window.location.pathname;
+document.querySelectorAll('.sl').forEach(function(a){var h=a.getAttribute('href');if(h&&path.endsWith(h)){a.classList.add('active');var g=a.closest('.sb-group');if(g)g.classList.add('open');}});
+
+/* Sidebar group toggle (chevron click expands/collapses) */
+document.querySelectorAll('.sb-group-hdr').forEach(function(hdr){hdr.addEventListener('click',function(e){
+if(e.target.tagName==='A')return;e.preventDefault();this.parentElement.classList.toggle('open');});});
+
+/* Copy buttons on pre blocks */
+document.querySelectorAll('.ib pre').forEach(function(pre){
+var wrap=document.createElement('div');wrap.className='pre-wrap';
+pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);
+var btn=document.createElement('button');btn.className='copy-btn';btn.textContent='Copy';
+btn.addEventListener('click',function(e){e.stopPropagation();
+var code=pre.querySelector('code');var text=code?code.textContent:pre.textContent;
+navigator.clipboard.writeText(text).then(function(){
+btn.textContent='Copied!';btn.classList.add('copied');
+setTimeout(function(){btn.textContent='Copy';btn.classList.remove('copied');},2000);
+}).catch(function(){btn.textContent='!';setTimeout(function(){btn.textContent='Copy';},1500);});});
+wrap.appendChild(btn);});
+
+/* Open anchor from URL hash */
+if(window.location.hash){var el=document.querySelector(window.location.hash);if(el){var ib=el.querySelector('.ib');if(ib)ib.classList.add('open');el.scrollIntoView({behavior:'smooth',block:'start'});}}
+
+/* Cmd+K search shortcut */
+document.addEventListener('keydown',function(e){
+if((e.metaKey||e.ctrlKey)&&e.key==='k'){e.preventDefault();openSearch();}
+if(e.key==='Escape')closeSearch();});
+
+});
+
+/* Cross-module search: loads search-index.json, fuzzy matches, renders results */
+var SI=null;
+fetch('search-index.json').then(function(r){return r.json();}).then(function(d){SI=d;}).catch(function(){});
+
+/* Levenshtein distance */
+function ld(a,b){
+if(!a.length)return b.length;if(!b.length)return a.length;
+var m=[];for(var i=0;i<=b.length;i++)m[i]=[i];
+for(var j=0;j<=a.length;j++)m[0][j]=j;
+for(i=1;i<=b.length;i++)for(j=1;j<=a.length;j++){
+m[i][j]=b[i-1]===a[j-1]?m[i-1][j-1]:Math.min(m[i-1][j-1]+1,m[i][j-1]+1,m[i-1][j]+1);
+}return m[b.length][a.length];}
+
+/* Fuzzy scoring: returns 0 if no match */
+function fs(q,t){
+if(!t)return 0;var ql=q.toLowerCase(),tl=t.toLowerCase();
+/* Exact match */
+if(tl===ql)return 10000;
+/* Starts with */
+if(tl.indexOf(ql)===0)return 5000-tl.length;
+/* Substring */
+var idx=tl.indexOf(ql);if(idx>0)return 3000-idx;
+/* Word boundary match (camelCase, snake_case) */
+var words=tl.replace(/([a-z])([A-Z])/g,'$1 $2').replace(/_/g,' ').split(' ');
+for(var w=0;w<words.length;w++){if(words[w].indexOf(ql)===0)return 2000-w*100;}
+/* Levenshtein for short queries */
+if(ql.length<=8&&tl.length<=40){var d=ld(ql,tl.substring(0,Math.max(ql.length+2,8)));
+if(d<=Math.ceil(ql.length*0.35))return 1000-d*100;}
+return 0;}
+
+/* Score an entry against a query */
+function scoreEntry(q,e){
+return Math.max(
+fs(q,e.n)*4, /* name match (highest weight) */
+fs(q,e.s)*2, /* signature match */
+fs(q,e.m)*2, /* module name match */
+fs(q,e.d) /* doc string match (lowest weight) */
+);}
+
+/* Render search results */
+function renderSR(results){
+var el=document.getElementById('sr');if(!el)return;
+if(!results.length){el.className='';el.innerHTML='';return;}
+el.className='open';var h='';
+for(var i=0;i<results.length;i++){
+var e=results[i].entry,k=e.k,href=e.m+'.html';
+if(k==='fn'||k==='pfn')href+='#fn-'+encodeURIComponent(e.n);
+else if(k==='type'||k==='ptype')href+='#type-'+encodeURIComponent(e.n);
+else if(k==='interface')href+='#iface-'+encodeURIComponent(e.n);
+var kc='sr-'+k;
+h+='<a class="sr-item" href="'+href+'">'+
+'<span class="sr-kind '+kc+'">'+k+'</span>'+
+'<span class="sr-name">'+esc(e.n)+'</span>'+
+'<span class="sr-mod">'+esc(e.m)+'</span></a>';
+if(e.d)h+='<div class="sr-doc">'+esc(e.d.substring(0,100))+'</div>';
+if(i<results.length-1)h+='<div class="sr-sep"></div>';
+}el.innerHTML=h;}
+
+/* HTML escape helper */
+function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+
+/* Search handler — uses the modal search input */
+var si=document.getElementById('search-input');
+if(si)si.addEventListener('input',function(){
+var q=this.value.trim();
+if(!q||!SI){renderSR([]);return;}
+var results=[];
+for(var i=0;i<SI.length;i++){
+var sc=scoreEntry(q,SI[i]);
+if(sc>0)results.push({entry:SI[i],score:sc});
+}
+results.sort(function(a,b){return b.score-a.score;});
+renderSR(results.slice(0,25));
+});
+</script></body></html>
