@@ -20,6 +20,7 @@
 -- non-standard env variable.
 mod Conduit.Node do
   needs IO.Mut
+  needs IO.Clock
   needs IO.Spawn
   needs IO.Process
 

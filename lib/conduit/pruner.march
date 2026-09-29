@@ -9,6 +9,7 @@
 -- long pause.  The loop stops early when a batch returns 0 rows (caught up).
 mod Conduit.Pruner do
   needs IO.Spawn
+  needs IO.Clock
 
   -- Maximum DELETE passes per table per tick.  Keeps a single tick bounded
   -- even when a large backlog has accumulated.
