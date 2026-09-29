@@ -178,7 +178,11 @@ mod ConduitTest do
         sequence: sequence,
         event_type: event_type,
         payload: payload,
-        recorded_at: DateTime.from_timestamp(DateTime.now())
+        -- Deterministic timestamp: reading the clock here gives this impl
+        -- method a hidden IO.Clock capability parameter that interface call
+        -- sites don't pass, shifting every argument in compiled tests
+        -- (march bug). The fake doesn't need wall-clock time.
+        recorded_at: DateTime.from_timestamp(sequence)
       }
       Vault.set(pfake_tbl_wf_events(self.vault_key), key, List.append(events, Cons(evt, Nil)))
       Ok(evt.id)
