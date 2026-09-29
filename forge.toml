@@ -7,4 +7,4 @@ author = "Chase Gilliam"
 license = "MIT"
 
 [deps]
-depot = { registry = "forge", version = "0.3.2" }
+depot = { registry = "forge", version = "0.3.3" }
