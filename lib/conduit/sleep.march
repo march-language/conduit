@@ -1,0 +1,9 @@
+-- Separate module so the unqualified call below resolves to the runtime's
+-- `sleep_ms` builtin, not to Conduit.Time.sleep_ms itself.
+mod Conduit.Sleep do
+  needs IO.Clock
+
+  fn park_ms(ms : Int) : () do
+    sleep_ms(ms)
+  end
+end

@@ -18,6 +18,7 @@
 mod Conduit.Worker do
   needs IO.Spawn
   needs IO.Clock
+  needs IO.Mut
 
   doc """
   Start `count` worker tasks for the given queue, plus one stale-rescue task.
