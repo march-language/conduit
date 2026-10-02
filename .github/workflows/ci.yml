@@ -20,6 +20,16 @@ jobs:
       - name: Set up March
         uses: march-language/setup-march@main
 
+      # march compiles generated IR by calling bare `clang` from PATH. On macOS
+      # that is the runner's system clang, which rejects `memory(none)` (march
+      # #716) with "expected top-level entity". setup-march already installs
+      # Homebrew LLVM; put it first on PATH. Drop once march#747 (readnone) is
+      # in the toolchain setup-march installs.
+      - name: Use Homebrew LLVM clang (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          echo "$(brew --prefix llvm)/bin" >> "$GITHUB_PATH"
+
       # Keep resolved dependency sources across runs so a forgepm.org outage
       # (tarball downloads returning 502) doesn't fail CI when nothing changed.
       - name: Restore dependency cache
