@@ -1,4 +1,5 @@
 mod Conduit.Dashboard.Router do
+  needs IO.Clock
   doc """
   HTTP request handler for the Conduit Dashboard.
 
