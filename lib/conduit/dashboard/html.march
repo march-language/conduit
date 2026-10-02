@@ -5,7 +5,8 @@ mod Conduit.Dashboard.Html do
     "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>"
     ++ Html.escape(title) ++ " — Conduit</title><style>" ++ pcss() ++ "</style></head><body>"
     ++ nav(base_path, "")
-    ++ "<main class=\"main-content\">" ++ content ++ "</main></body></html>"
+    ++ "<main class=\"main-content\">" ++ content ++ "</main>"
+    ++ "<script src=\"" ++ Html.escape(base_path) ++ "/assets/dashboard.js\" data-base=\"" ++ Html.escape(base_path) ++ "\" defer></script></body></html>"
   end
 
   doc "Renders a full HTML page with the shared nav injected, with active tab."
@@ -13,7 +14,8 @@ mod Conduit.Dashboard.Html do
     "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>"
     ++ Html.escape(title) ++ " — Conduit</title><style>" ++ pcss() ++ "</style></head><body>"
     ++ nav(base_path, current)
-    ++ "<main class=\"main-content\">" ++ content ++ "</main></body></html>"
+    ++ "<main class=\"main-content\">" ++ content ++ "</main>"
+    ++ "<script src=\"" ++ Html.escape(base_path) ++ "/assets/dashboard.js\" data-base=\"" ++ Html.escape(base_path) ++ "\" defer></script></body></html>"
   end
 
   doc "Renders the top navigation bar."
@@ -230,31 +232,17 @@ mod Conduit.Dashboard.Html do
   which would display garbage in the dialog box or leave injection gaps open.
   """
   fn action_btn(action_url : String, label : String, confirm : String) : String do
-    let on_submit = if confirm == "" do
-      "true"
-    else
-      "confirm('" ++ pjs_escape(confirm) ++ "')"
-    end
+    -- No inline onsubmit: forgepm-style CSPs (script-src 'self') block inline event
+    -- handlers, which silently dropped the confirm() and let Delete submit
+    -- unconfirmed. dashboard.js asks for data-confirm before the form submits.
+    let confirm_attr = if confirm == "" do "" else " data-confirm=\"" ++ Html.escape(confirm) ++ "\"" end
     let btn_class = match label do
       "Retry"  -> "btn-retry"
       "Delete" -> "btn-delete"
       "Cancel" -> "btn-cancel"
       _        -> "btn-default"
     end
-    "<form method=\"post\" action=\"" ++ Html.escape(action_url) ++ "\" style=\"display:inline\" onsubmit=\"return " ++ on_submit ++ "\"><button type=\"submit\" class=\"btn " ++ btn_class ++ "\">" ++ Html.escape(label) ++ "</button></form>"
-  end
-
-  -- Escape a string for safe embedding inside a single-quoted JS string literal.
-  --
-  -- Escapes: backslash, single quote, newline, carriage return.
-  -- This is intentionally minimal — it covers the characters that would break
-  -- out of the JS string context.  HTML entities must NOT be applied here.
-  pfn pjs_escape(s : String) : String do
-    s
-    |> String.replace("\\", "\\\\")
-    |> String.replace("'", "\\'")
-    |> String.replace("\n", "\\n")
-    |> String.replace("\r", "\\r")
+    "<form method=\"post\" action=\"" ++ Html.escape(action_url) ++ "\" style=\"display:inline\"" ++ confirm_attr ++ "><button type=\"submit\" class=\"btn " ++ btn_class ++ "\">" ++ Html.escape(label) ++ "</button></form>"
   end
 
   pfn pcss() : String do

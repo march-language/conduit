@@ -1,0 +1,17 @@
+mod Conduit.Dashboard.Assets do
+  doc """
+  The dashboard's one script, served same-origin at `<base_path>/assets/dashboard.js`
+  (an external file, so it runs under a strict `script-src 'self'` CSP where inline
+  scripts and inline `on*` handlers are blocked). Loaded `defer` by every page.
+
+  - Forms carrying `data-confirm` ask before submitting (retry/delete/cancel).
+  - On the overview shell, fills `#panel-summary` / `#panel-cluster` from
+    `<base>/fragments/<name>`, shows an error in a panel that fails, and refreshes
+    them in place every 5s.
+
+  Single-quoted JS only, so it needs no escaping inside a March string.
+  """
+  fn dashboard_js() : String do
+    "(function(){var s=document.currentScript;var base=s?s.getAttribute('data-base'):'';document.addEventListener('submit',function(e){var m=e.target&&e.target.getAttribute?e.target.getAttribute('data-confirm'):null;if(m&&!window.confirm(m)){e.preventDefault()}},true);if(!document.getElementById('panel-summary')){return}var panels=['summary','cluster'];function load(n){var el=document.getElementById('panel-'+n);if(!el){return}fetch(base+'/fragments/'+n,{credentials:'same-origin'}).then(function(r){if(!r.ok){throw new Error(r.status)}return r.text()}).then(function(h){el.innerHTML=h}).catch(function(){el.innerHTML='<p style=\"color:#b00;font-size:14px;\">Could not load this panel. It will retry.</p>'})}function all(){panels.forEach(load)}all();setInterval(all,5000)})();"
+  end
+end

@@ -46,23 +46,19 @@ mod Conduit.Dashboard.Pages.Overview do
   and loads each panel separately.
   """
   fn render(base_path : String, summary : List(Conduit.Dashboard.QueueSummary), nodes : List(Conduit.NodeInfo), leader : Option(String)) : String do
-    let poll_script = "<script>setInterval(function(){ fetch(window.location.href).then(function(r){ if(r.ok) window.location.reload() }) }, 5000)</script>"
-
-    let content = "<h1>Overview</h1><div class=\"section\"><h2>Queue Summary</h2>" ++ summary_fragment(summary) ++ "</div><div class=\"section\"><h2>Cluster</h2>" ++ cluster_fragment(nodes, leader) ++ "</div>" ++ poll_script
+    let content = "<h1>Overview</h1><div class=\"section\"><h2>Queue Summary</h2>" ++ summary_fragment(summary) ++ "</div><div class=\"section\"><h2>Cluster</h2>" ++ cluster_fragment(nodes, leader) ++ "</div>"
 
     Conduit.Dashboard.Html.page_with_nav("Overview", base_path, "overview", content)
   end
 
   doc """
   The overview page as an instant shell: each panel is an empty placeholder that
-  the page's script fills from `<base_path>/fragments/<name>` — so a slow or failing
+  dashboard.js (a same-origin file, so strict CSPs allow it) fills from `<base_path>/fragments/<name>` — so a slow or failing
   storage call delays/blanks only its own panel (with an error message), never the
   whole page, and the panels refresh in place every 5s instead of reloading.
   """
   fn render_shell(base_path : String) : String do
-    let script = "<script>(function(){var panels=['summary','cluster'];function load(n){var el=document.getElementById('panel-'+n);fetch('" ++ base_path ++ "/fragments/'+n,{credentials:'same-origin'}).then(function(r){if(!r.ok)throw new Error(r.status);return r.text()}).then(function(h){el.innerHTML=h}).catch(function(){el.innerHTML='<p style=\"color:#b00;font-size:14px;\">Could not load this panel. It will retry.</p>'})}function all(){panels.forEach(load)}all();setInterval(all,5000)})()</script>"
-
-    let content = "<h1>Overview</h1><div class=\"section\"><h2>Queue Summary</h2><div id=\"panel-summary\"><p style=\"color:#777;font-size:14px;\">Loading…</p></div></div><div class=\"section\"><h2>Cluster</h2><div id=\"panel-cluster\"><p style=\"color:#777;font-size:14px;\">Loading…</p></div></div>" ++ script
+    let content = "<h1>Overview</h1><div class=\"section\"><h2>Queue Summary</h2><div id=\"panel-summary\"><p style=\"color:#777;font-size:14px;\">Loading…</p></div></div><div class=\"section\"><h2>Cluster</h2><div id=\"panel-cluster\"><p style=\"color:#777;font-size:14px;\">Loading…</p></div></div>"
 
     Conduit.Dashboard.Html.page_with_nav("Overview", base_path, "overview", content)
   end
