@@ -1614,6 +1614,54 @@ mod ConduitTest do
     assert_eq_int(qs.avg_latency, 42)
   end
 
+  -- ───────────────────────────────────────────────────
+  -- Dashboard HTML (~H): escaping + CSP-safe markup
+  -- ───────────────────────────────────────────────────
+
+  test "dashboard_summary_fragment_escapes_queue_names" do
+    let qs : Conduit.Dashboard.QueueSummary = {
+      queue: "<img src=x onerror=alert(1)>", pending: 1, running: 0, failed: 0,
+      dead: 0, throughput: 0, avg_latency: 0
+    }
+    let h = Conduit.Dashboard.Pages.Overview.summary_fragment([qs])
+    assert_true(String.contains(h, "&lt;img src=x onerror=alert(1)&gt;"))
+    assert_true(!String.contains(h, "<img"))
+  end
+
+  test "dashboard_cluster_fragment_escapes_leader" do
+    let h = Conduit.Dashboard.Pages.Overview.cluster_fragment(Nil, Some("<b>node</b>"))
+    assert_true(String.contains(h, "&lt;b&gt;node&lt;/b&gt;"))
+    assert_true(!String.contains(h, "<b>"))
+  end
+
+  test "dashboard_action_btn_uses_data_confirm_not_inline_js" do
+    let h = Conduit.Dashboard.Html.action_btn("/x/jobs/j1/delete", "Delete", "Delete 'j1' & all?")
+    assert_true(String.contains(h, "data-confirm=\""))
+    assert_true(!String.contains(h, "onsubmit"))
+    assert_true(!String.contains(h, "confirm('"))
+    -- the message is HTML-escaped into the attribute, so it cannot break out
+    assert_true(String.contains(h, "&amp;"))
+  end
+
+  test "dashboard_action_btn_without_confirm_has_no_data_confirm" do
+    let h = Conduit.Dashboard.Html.action_btn("/x/jobs/j1/retry", "Retry", "")
+    assert_true(!String.contains(h, "data-confirm"))
+  end
+
+  test "dashboard_pages_have_no_inline_script_or_handlers" do
+    let h = Conduit.Dashboard.Pages.Overview.render_shell("/admin/conduit")
+    assert_true(String.contains(h, "src=\"/admin/conduit/assets/dashboard.js\""))
+    assert_true(!String.contains(h, "<script>"))
+    assert_true(!String.contains(h, " onclick="))
+    assert_true(!String.contains(h, " onsubmit="))
+  end
+
+  test "dashboard_page_keeps_stylesheet_unescaped" do
+    -- ~H CSS-escapes interpolations inside <style>; the sheet must go in whole.
+    let h = Conduit.Dashboard.Pages.Overview.render_shell("")
+    assert_true(String.contains(h, "<style>* { box-sizing: border-box;"))
+  end
+
   -- ─────────────────────────────────────────────────────────────
   -- Phase 6: Auth
   -- ─────────────────────────────────────────────────────────────

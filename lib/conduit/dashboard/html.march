@@ -1,57 +1,88 @@
 mod Conduit.Dashboard.Html do
   needs IO.Clock
-  doc "Renders a full HTML page with the shared nav injected."
+  -- HTML is built with ~H (auto-escaping interpolation → IOList), not string
+  -- concatenation + hand-rolled Html.escape. Already-built HTML goes in through
+  -- IOList.from_string (raw); everything else is escaped by ~H. The String-returning
+  -- functions below are thin wrappers kept for the pages that haven't moved yet.
+
+  pfn plist_io_go(items, item_io, acc) do
+    match items do
+      Nil           -> acc
+      Cons(x, rest) -> plist_io_go(rest, item_io, IOList.append(acc, item_io(x)))
+    end
+  end
+
+  doc "Fold `items` through `item_io` into one IOList, preserving order."
+  fn list_io(items, item_io) : IOList do
+    plist_io_go(items, item_io, IOList.empty())
+  end
+
+  -- The <style> element is interpolated whole, from HTML-text context. ~H escapes
+  -- by context, so interpolating the stylesheet *inside* <style> CSS-escapes it
+  -- (`*` -> `\\2A`) and breaks every rule.
+  pfn pstyle_io() : IOList do
+    IOList.from_string("<style>" ++ pcss() ++ "</style>")
+  end
+
+  doc "The full page (shell, nav, content, script) as an IOList. `content` is raw (already-built) HTML."
+  fn page_io(title : String, base_path : String, current : String, content : IOList) : IOList do
+    ~H"""<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${title} &mdash; Conduit</title>${pstyle_io()}</head><body>${nav_io(base_path, current)}<main class="main-content">${content}</main><script src="${base_path}/assets/dashboard.js" data-base="${base_path}" defer></script></body></html>"""
+  end
+
+  doc "Renders a full HTML page with the shared nav injected. `content` is trusted, already-built HTML."
   fn page(title : String, base_path : String, content : String) : String do
-    "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>"
-    ++ Html.escape(title) ++ " — Conduit</title><style>" ++ pcss() ++ "</style></head><body>"
-    ++ nav(base_path, "")
-    ++ "<main class=\"main-content\">" ++ content ++ "</main>"
-    ++ "<script src=\"" ++ Html.escape(base_path) ++ "/assets/dashboard.js\" data-base=\"" ++ Html.escape(base_path) ++ "\" defer></script></body></html>"
+    IOList.to_string(page_io(title, base_path, "", IOList.from_string(content)))
   end
 
-  doc "Renders a full HTML page with the shared nav injected, with active tab."
+  doc "Renders a full HTML page with the shared nav injected, with active tab. `content` is trusted, already-built HTML."
   fn page_with_nav(title : String, base_path : String, current : String, content : String) : String do
-    "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>"
-    ++ Html.escape(title) ++ " — Conduit</title><style>" ++ pcss() ++ "</style></head><body>"
-    ++ nav(base_path, current)
-    ++ "<main class=\"main-content\">" ++ content ++ "</main>"
-    ++ "<script src=\"" ++ Html.escape(base_path) ++ "/assets/dashboard.js\" data-base=\"" ++ Html.escape(base_path) ++ "\" defer></script></body></html>"
+    IOList.to_string(page_io(title, base_path, current, IOList.from_string(content)))
   end
 
-  doc "Renders the top navigation bar."
-  pfn nav(base_path : String, current : String) : String do
-    let links = Cons(
+  doc "The top navigation bar."
+  fn nav_io(base_path : String, current : String) : IOList do
+    let links = [
       ("overview",     "Overview",     base_path),
-      Cons(
-        ("queues",       "Queues",       base_path ++ "/queues"),
-        Cons(
-          ("workflows",    "Workflows",    base_path ++ "/workflows"),
-          Cons(
-            ("crons",        "Crons",        base_path ++ "/crons"),
-            Cons(
-              ("dead-letters", "Dead Letters", base_path ++ "/dead-letters"),
-              Cons(
-                ("nodes",        "Nodes",        base_path ++ "/nodes"),
-                Nil
-              )
-            )
-          )
-        )
-      )
-    )
-    let link_html = String.join(List.map(links, fn item -> prender_nav_link(item, current)), "")
-    "<nav class=\"top-nav\"><div class=\"nav-brand\">&#9889; Conduit</div><div class=\"nav-links\">" ++ link_html ++ "</div></nav>"
+      ("queues",       "Queues",       base_path ++ "/queues"),
+      ("workflows",    "Workflows",    base_path ++ "/workflows"),
+      ("crons",        "Crons",        base_path ++ "/crons"),
+      ("dead-letters", "Dead Letters", base_path ++ "/dead-letters"),
+      ("nodes",        "Nodes",        base_path ++ "/nodes")
+    ]
+    ~H"""<nav class="top-nav"><div class="nav-brand">&#9889; Conduit</div><div class="nav-links">${list_io(links, fn item -> nav_link_io(item, current))}</div></nav>"""
   end
 
-  pfn prender_nav_link(item : (String, String, String), current : String) : String do
+  pfn nav_link_io(item : (String, String, String), current : String) : IOList do
     let (key, label, href) = item
     let cls = if key == current do "nav-link active" else "nav-link" end
-    "<a href=\"" ++ Html.escape(href) ++ "\" class=\"" ++ cls ++ "\">" ++ Html.escape(label) ++ "</a>"
+    ~H"""<a href="${href}" class="${cls}">${label}</a>"""
   end
 
-  pfn prender_table_row(row : List(String)) : String do
-    let cells = String.join(List.map(row, fn cell -> "<td>" ++ cell ++ "</td>"), "")
-    "<tr>" ++ cells ++ "</tr>"
+  pfn pcell_io(cell : IOList) : IOList do
+    ~H"""<td>${cell}</td>"""
+  end
+
+  pfn pheader_io(h : String) : IOList do
+    ~H"""<th>${h}</th>"""
+  end
+
+  pfn prow_io(row : List(IOList)) : IOList do
+    ~H"""<tr>${list_io(row, fn cell -> pcell_io(cell))}</tr>"""
+  end
+
+  doc """
+  A <table> as an IOList. `rows` hold cells as IOLists (build them with ~H so
+  values are escaped). When `rows` is empty, renders one placeholder row spanning
+  every column with `empty_msg`.
+  """
+  fn table_with_empty_io(headers : List(String), rows : List(List(IOList)), empty_msg : String) : IOList do
+    let head = list_io(headers, fn h -> pheader_io(h))
+    let body = if List.is_empty(rows) do
+      ~H"""<tr class="empty-row"><td colspan="${int_to_string(List.length(headers))}" class="empty-cell">${empty_msg}</td></tr>"""
+    else
+      list_io(rows, fn row -> prow_io(row))
+    end
+    ~H"""<table class="data-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>"""
   end
 
   doc """
@@ -67,17 +98,12 @@ mod Conduit.Dashboard.Html do
 
   doc """
   Like `table/2`, but lets the caller specify the empty-state message shown
-  when `rows` is empty (e.g. "No jobs in this queue yet.").
+  when `rows` is empty (e.g. "No jobs in this queue yet."). Cells are trusted,
+  already-built HTML strings (callers escape their own values).
   """
   fn table_with_empty(headers : List(String), rows : List(List(String)), empty_msg : String) : String do
-    let header_html = String.join(List.map(headers, fn h -> "<th>" ++ Html.escape(h) ++ "</th>"), "")
-    let rows_html = if List.is_empty(rows) do
-      let cols = int_to_string(List.length(headers))
-      "<tr class=\"empty-row\"><td colspan=\"" ++ cols ++ "\" class=\"empty-cell\">" ++ Html.escape(empty_msg) ++ "</td></tr>"
-    else
-      String.join(List.map(rows, fn row -> prender_table_row(row)), "")
-    end
-    "<table class=\"data-table\"><thead><tr>" ++ header_html ++ "</tr></thead><tbody>" ++ rows_html ++ "</tbody></table>"
+    let rows_io = List.map(rows, fn row -> List.map(row, fn cell -> IOList.from_string(cell)))
+    IOList.to_string(table_with_empty_io(headers, rows_io, empty_msg))
   end
 
   doc """
@@ -223,26 +249,26 @@ mod Conduit.Dashboard.Html do
   end
 
   doc """
-  Admin action button (POST form with optional JavaScript confirm dialog).
-
-  The `confirm` message is embedded in a JavaScript string literal, so it must
-  be escaped for JS (not HTML) — single quotes and backslashes are the primary
-  injection vectors.  `Html.escape` is NOT used here because HTML entity encoding
-  (`&apos;`, `&amp;`, etc.) is not decoded inside JS string literals in browsers,
-  which would display garbage in the dialog box or leave injection gaps open.
+  Admin action button: a POST form. A non-empty `confirm` is carried as a
+  `data-confirm` attribute (HTML-escaped by ~H) that dashboard.js asks about
+  before the form submits — never as inline JavaScript.
   """
   fn action_btn(action_url : String, label : String, confirm : String) : String do
-    -- No inline onsubmit: forgepm-style CSPs (script-src 'self') block inline event
-    -- handlers, which silently dropped the confirm() and let Delete submit
-    -- unconfirmed. dashboard.js asks for data-confirm before the form submits.
-    let confirm_attr = if confirm == "" do "" else " data-confirm=\"" ++ Html.escape(confirm) ++ "\"" end
     let btn_class = match label do
       "Retry"  -> "btn-retry"
       "Delete" -> "btn-delete"
       "Cancel" -> "btn-cancel"
       _        -> "btn-default"
     end
-    "<form method=\"post\" action=\"" ++ Html.escape(action_url) ++ "\" style=\"display:inline\"" ++ confirm_attr ++ "><button type=\"submit\" class=\"btn " ++ btn_class ++ "\">" ++ Html.escape(label) ++ "</button></form>"
+    -- No inline onsubmit: a CSP with script-src 'self' blocks inline event
+    -- handlers, which silently dropped the confirm() and let Delete submit
+    -- unconfirmed. dashboard.js asks for data-confirm before the form submits.
+    let io = if confirm == "" do
+      ~H"""<form method="post" action="${action_url}" style="display:inline"><button type="submit" class="btn ${btn_class}">${label}</button></form>"""
+    else
+      ~H"""<form method="post" action="${action_url}" style="display:inline" data-confirm="${confirm}"><button type="submit" class="btn ${btn_class}">${label}</button></form>"""
+    end
+    IOList.to_string(io)
   end
 
   pfn pcss() : String do
