@@ -34,6 +34,7 @@ mod Conduit.Dashboard.Router do
     POST /dead-letters/retry-all    — retry all
     POST /dead-letters/delete-all   — delete all
     GET  /nodes                     — cluster nodes
+    GET  /assets/dashboard.js       — the dashboard's script (same-origin, CSP-safe)
     GET  /fragments/summary|cluster — overview panels (HTML), loaded by the overview shell
     GET  /api/summary               — JSON summary for polling
   """
@@ -408,13 +409,21 @@ mod Conduit.Dashboard.Router do
           conn |> HttpServer.text(405, "Method Not Allowed")
         end
 
+      -- The dashboard's script (same-origin so strict CSPs allow it)
+      Cons("assets", Cons("dashboard.js", Nil)) ->
+        if method == :get do
+          conn
+          |> HttpServer.put_resp_header("content-type", "application/javascript; charset=utf-8")
+          |> HttpServer.send_resp(200, Conduit.Dashboard.Assets.dashboard_js())
+        else
+          conn |> HttpServer.text(405, "Method Not Allowed")
+        end
+
       -- Overview panels (HTML fragments the overview shell fetches)
       Cons("fragments", Cons("summary", Nil)) ->
         if method == :get do
           let summary = Conduit.Dashboard.Queries.queue_summary(storage)
-          conn
-          |> HttpServer.put_resp_header("content-type", "text/html; charset=utf-8")
-          |> HttpServer.text(200, Conduit.Dashboard.Pages.Overview.summary_fragment(summary))
+          conn |> HttpServer.html(200, Conduit.Dashboard.Pages.Overview.summary_fragment(summary))
         else
           conn |> HttpServer.text(405, "Method Not Allowed")
         end
@@ -423,9 +432,7 @@ mod Conduit.Dashboard.Router do
         if method == :get do
           let nodes  = Conduit.Dashboard.Queries.nodes(storage)
           let leader = Conduit.cluster_leader()
-          conn
-          |> HttpServer.put_resp_header("content-type", "text/html; charset=utf-8")
-          |> HttpServer.text(200, Conduit.Dashboard.Pages.Overview.cluster_fragment(nodes, leader))
+          conn |> HttpServer.html(200, Conduit.Dashboard.Pages.Overview.cluster_fragment(nodes, leader))
         else
           conn |> HttpServer.text(405, "Method Not Allowed")
         end
@@ -435,9 +442,7 @@ mod Conduit.Dashboard.Router do
         if method == :get do
           let summary = Conduit.Dashboard.Queries.queue_summary(storage)
           let json    = psummary_to_json(summary)
-          conn
-          |> HttpServer.put_resp_header("content-type", "application/json")
-          |> HttpServer.text(200, json)
+          conn |> HttpServer.json(200, json)
         else
           conn |> HttpServer.text(405, "Method Not Allowed")
         end
