@@ -44,17 +44,31 @@ mod Conduit.Storage.Postgres do
     port     : Int,
     user     : String,
     database : String,
-    password : Option(String)
+    password : Option(String),
+    -- true: pwith_conn opens a fresh connection per operation (no actor Pool).
+    direct   : Bool
   }
 
   doc "Build a Store from explicit connection parameters."
   fn new(host : String, port : Int, user : String, database : String, password : Option(String)) : Store do
-    { host: host, port: port, user: user, database: database, password: password }
+    { host: host, port: port, user: user, database: database, password: password, direct: false }
+  end
+
+  doc """
+  Like `new`, but every operation opens its own connection and closes it after,
+  instead of going through depot's actor Pool.  Use this where the Pool's actor
+  can't answer — notably from HTTP handler threads in a compiled web server,
+  where every `Pool.checkout` times out ("pool actor: no reply") — e.g. when the
+  dashboard is mounted inside a web app.  Costs one connect+auth per operation;
+  fine for dashboard-rate traffic, not for a worker's hot path.
+  """
+  fn new_direct(host : String, port : Int, user : String, database : String, password : Option(String)) : Store do
+    { host: host, port: port, user: user, database: database, password: password, direct: true }
   end
 
   doc "Build a Store for a database on localhost:5432 with no password (trust auth)."
   fn local(user : String, database : String) : Store do
-    { host: "127.0.0.1", port: 5432, user: user, database: database, password: None }
+    { host: "127.0.0.1", port: 5432, user: user, database: database, password: None, direct: false }
   end
 
   -- ─────────────────────────────────────────────────────────────
@@ -107,6 +121,24 @@ mod Conduit.Storage.Postgres do
   end
 
   pfn pwith_conn(self : Store, f) do
+    if self.direct do pwith_direct_conn(self, f) else pwith_pooled_conn(self, f) end
+  end
+
+  -- direct stores: one connection per operation, closed afterwards. Same shape
+  -- as pwith_lock_conn's connect (Connection.connect + Db.from_postgres), which
+  -- needs no actors.
+  pfn pwith_direct_conn(self : Store, f) do
+    match Connection.connect(pconn_config(self)) do
+      Err(e)  -> Err("direct connect: " ++ e)
+      Ok(raw) ->
+        let conn = Db.from_postgres(raw)
+        let result = f(conn)
+        let _ = Db.close(conn)
+        result
+    end
+  end
+
+  pfn pwith_pooled_conn(self : Store, f) do
     let pool = pget_or_start_pool(self)
     match Pool.checkout(pool) do
       Err(e)   -> Err("pool checkout: " ++ e)

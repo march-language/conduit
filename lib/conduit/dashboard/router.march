@@ -34,6 +34,7 @@ mod Conduit.Dashboard.Router do
     POST /dead-letters/retry-all    — retry all
     POST /dead-letters/delete-all   — delete all
     GET  /nodes                     — cluster nodes
+    GET  /fragments/summary|cluster — overview panels (HTML), loaded by the overview shell
     GET  /api/summary               — JSON summary for polling
   """
   fn handle(storage : s, auth, base_path : String, conn : Conn) do
@@ -156,11 +157,9 @@ mod Conduit.Dashboard.Router do
       -- Overview
       Nil ->
         if method == :get do
-          let summary = Conduit.Dashboard.Queries.queue_summary(storage)
-          let nodes   = Conduit.Dashboard.Queries.nodes(storage)
-          let leader  = Conduit.cluster_leader()
-          let html    = Conduit.Dashboard.Pages.Overview.render(base_path, summary, nodes, leader)
-          psend_html_with_flash(conn, html)
+          -- Shell only: each panel loads from /fragments/* so one slow storage
+          -- call can't hold the whole page.
+          psend_html_with_flash(conn, Conduit.Dashboard.Pages.Overview.render_shell(base_path))
         else
           conn |> HttpServer.text(405, "Method Not Allowed")
         end
@@ -405,6 +404,28 @@ mod Conduit.Dashboard.Router do
           let leader = Conduit.cluster_leader()
           let html   = Conduit.Dashboard.Pages.Nodes.render(base_path, nodes, leader)
           psend_html_with_flash(conn, html)
+        else
+          conn |> HttpServer.text(405, "Method Not Allowed")
+        end
+
+      -- Overview panels (HTML fragments the overview shell fetches)
+      Cons("fragments", Cons("summary", Nil)) ->
+        if method == :get do
+          let summary = Conduit.Dashboard.Queries.queue_summary(storage)
+          conn
+          |> HttpServer.put_resp_header("content-type", "text/html; charset=utf-8")
+          |> HttpServer.text(200, Conduit.Dashboard.Pages.Overview.summary_fragment(summary))
+        else
+          conn |> HttpServer.text(405, "Method Not Allowed")
+        end
+
+      Cons("fragments", Cons("cluster", Nil)) ->
+        if method == :get do
+          let nodes  = Conduit.Dashboard.Queries.nodes(storage)
+          let leader = Conduit.cluster_leader()
+          conn
+          |> HttpServer.put_resp_header("content-type", "text/html; charset=utf-8")
+          |> HttpServer.text(200, Conduit.Dashboard.Pages.Overview.cluster_fragment(nodes, leader))
         else
           conn |> HttpServer.text(405, "Method Not Allowed")
         end
