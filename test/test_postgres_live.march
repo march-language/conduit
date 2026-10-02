@@ -137,6 +137,22 @@ mod ConduitPostgresLiveTest do
     end
   end
 
+  test "postgres: a direct (pool-less) store enqueues and fetches the same as a pooled one" do
+    match psetup() do
+      Err(_) -> ()
+      Ok(_)  ->
+        let store = Conduit.Storage.Postgres.new_direct("127.0.0.1", 5432, puser(), "conduit_test", None)
+        let _ = Conduit.Storage.enqueue(store, pmk_job("d1", "default", 0, 0))
+        match Conduit.Storage.fetch_next(store, "default") do
+          Err(e)        -> Test.assert_true(false, "direct fetch_next errored: " ++ e)
+          Ok(None)      -> Test.assert_true(false, "direct: expected a job, got None")
+          Ok(Some(job)) ->
+            Test.assert_eq_str(job.id, "d1", "direct: id round-trips")
+            Test.assert_eq_str(job.status, "running", "direct: claimed as running")
+        end
+    end
+  end
+
   test "postgres: fetch_next on an empty queue returns None" do
     match psetup() do
       Err(_) -> ()
