@@ -17,8 +17,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pinned to a March release; keep it in step with .march-version.
       - name: Set up March
         uses: march-language/setup-march@main
+        with:
+          march-version: v0.7.0
 
       # march compiles generated IR by calling bare `clang` from PATH. On macOS
       # that is the runner's system clang, which rejects `memory(none)` (march

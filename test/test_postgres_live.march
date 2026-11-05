@@ -350,8 +350,8 @@ mod ConduitPostgresLiveTest do
         let _ = Conduit.Storage.cron_mark_fired(store, "m", "job-123", Some(next))
         match Conduit.Storage.cron_load_by_id(store, "m") do
           Ok(Some(c)) ->
-            Test.assert_some(c.last_job_id)
-            Test.assert_some(c.last_run_at)
+            let _ = Test.assert_some(c.last_job_id, "last_job_id set after mark_fired")
+            let _ = Test.assert_some(c.last_run_at, "last_run_at set after mark_fired")
             -- next_run_at advanced into the future, so it's no longer due
             match Conduit.Storage.cron_load_due(store) do
               Ok(Nil) -> Test.assert_true(true, "")
