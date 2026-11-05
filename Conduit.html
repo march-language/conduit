@@ -1,0 +1,667 @@
+<!DOCTYPE html><html lang="en" data-theme="dark"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Conduit — March Docs</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,500;0,600;1,400;1,600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"><style>
+/* Dark theme (default) — deep navy with cyan accent, matching the March homepage */
+:root{--bg:#07101a;--sb:#0a1622;--bg-nav:rgba(7,16,26,.92);--card:#0c1928;--bdr:#0f2438;
+--acc:oklch(63% .12 207);--acc2:oklch(74% .11 200);--text:#cce5f5;--dim:#4a7898;
+--faint:#1e4060;--bright:#eaf4fb;--code:#0c1928;
+--fn:oklch(74% .13 165);--ty:oklch(82% .12 70);--if:oklch(78% .11 235);--prv:#3a5f7d;
+--hl-kw:oklch(74% .13 300);--hl-str:oklch(80% .12 140);--hl-num:oklch(80% .12 45);--hl-com:#5f89a8;--hl-ty:oklch(82% .1 80)}
+
+/* Light theme overrides */
+[data-theme='light']{--bg:#f0f6fc;--sb:#e3eef8;--bg-nav:rgba(240,246,252,.92);--card:#ddeaf5;--bdr:#b5cce0;
+--acc:oklch(37% .11 210);--acc2:oklch(45% .11 215);--text:#071828;--dim:#2e5c7c;
+--faint:#6a96b5;--bright:#071828;--code:#ddeaf5;
+--fn:oklch(45% .13 165);--ty:oklch(52% .12 70);--if:oklch(45% .11 235);--prv:#6a96b5;
+--hl-kw:oklch(45% .16 300);--hl-str:oklch(46% .13 145);--hl-num:oklch(50% .14 45);--hl-com:#4f7593;--hl-ty:oklch(47% .11 65)}
+
+/* Reset + base */
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Inter',sans-serif;font-size:15px;line-height:1.6;display:flex;flex-direction:column;min-height:100vh}
+a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline;color:var(--acc2)}
+
+/* Top bar */
+#topbar{display:flex;align-items:center;justify-content:space-between;padding:0 24px;height:60px;background:var(--bg-nav);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border-bottom:1px solid var(--bdr);flex-shrink:0;position:sticky;top:0;z-index:100}
+#topbar .brand{font-family:'Lora',Georgia,serif;font-size:18px;font-weight:600;color:var(--text);letter-spacing:-.02em;display:flex;align-items:center;gap:9px}
+#topbar .brand svg{width:20px;height:20px}
+#topbar .actions{display:flex;align-items:center;gap:12px}
+#theme-toggle{background:none;border:1px solid var(--bdr);border-radius:6px;color:var(--dim);cursor:pointer;padding:5px 8px;font-size:13px;font-family:'JetBrains Mono',monospace;display:flex;align-items:center;gap:4px;transition:all .15s}
+#theme-toggle:hover{color:var(--text);border-color:var(--acc)}
+#search-trigger{background:var(--card);border:1px solid var(--bdr);border-radius:6px;color:var(--dim);cursor:pointer;padding:5px 14px;font-size:13px;display:flex;align-items:center;gap:8px;transition:all .15s;min-width:200px}
+#search-trigger:hover{border-color:var(--acc);color:var(--text)}
+#search-trigger kbd{font-size:10px;background:var(--bg);border:1px solid var(--bdr);border-radius:3px;padding:1px 5px;margin-left:auto;font-family:inherit}
+
+/* Content wrapper (sidebar + main) */
+.content-wrap{display:flex;flex:1;overflow:hidden}
+
+/* Typography */
+code,pre{font-family:'JetBrains Mono','Fira Code','SF Mono',monospace;font-size:13px}
+pre{background:var(--code);border:1px solid var(--bdr);border-radius:6px;padding:14px 18px;overflow-x:auto;margin:12px 0;line-height:1.5}
+code{background:var(--code);padding:2px 6px;border-radius:4px;font-size:12px;color:var(--acc)}pre code{background:none;padding:0;color:var(--text);font-size:13px}
+/* Syntax highlighting (server-side spans from Highlight.highlight) */
+.tok-kw{color:var(--hl-kw)}.tok-str{color:var(--hl-str)}.tok-num{color:var(--hl-num)}
+.tok-com{color:var(--hl-com);font-style:italic}.tok-ty{color:var(--hl-ty)}
+h1{font-family:'Lora',Georgia,serif;font-size:2.1rem;color:var(--bright);margin-bottom:12px;font-weight:600;letter-spacing:-.02em}
+h2{font-family:'JetBrains Mono','Fira Code',monospace;font-size:.72rem;color:var(--acc);margin:38px 0 14px;padding-bottom:8px;border-bottom:1px solid var(--bdr);font-weight:500;text-transform:uppercase;letter-spacing:.12em}
+p{margin:8px 0}
+
+/* Sidebar */
+#sb{width:248px;min-width:208px;background:var(--sb);border-right:1px solid var(--bdr);padding:8px 10px 28px;position:sticky;top:60px;height:calc(100vh - 60px);overflow-y:auto;flex-shrink:0}
+#sb::-webkit-scrollbar{width:5px}#sb::-webkit-scrollbar-thumb{background:var(--bdr);border-radius:3px}#sb::-webkit-scrollbar-thumb:hover{background:var(--dim)}
+.sb-section{padding:0}
+.sb-heading{font-family:'JetBrains Mono','Fira Code',monospace;font-size:10px;font-weight:500;color:var(--faint);text-transform:uppercase;letter-spacing:.16em;padding:20px 10px 8px;user-select:none}
+
+/* Generic nav link (top-level + sub-items) */
+.sl{display:block;padding:5px 10px;border-radius:6px;font-size:13px;line-height:1.45;color:var(--dim);transition:color .12s,background .12s}
+.sl:hover{background:color-mix(in oklab,var(--acc) 9%,transparent);color:var(--text);text-decoration:none}
+.sl.active{color:var(--acc);font-weight:500}
+.sb-section>.sl.active,.sb-sub .sl.active{background:color-mix(in oklab,var(--acc) 12%,transparent);box-shadow:inset 2px 0 0 var(--acc)}
+
+/* Hierarchical sidebar groups */
+.sb-group{margin:1px 0}
+.sb-group-hdr{display:flex;align-items:center;border-radius:6px;cursor:pointer;user-select:none;transition:background .12s}
+.sb-group-hdr:hover{background:color-mix(in oklab,var(--acc) 9%,transparent)}
+.sb-group-hdr:hover .sl,.sb-group-hdr:hover .sb-chevron{color:var(--text)}
+.sb-group-hdr:has(.sl.active){background:color-mix(in oklab,var(--acc) 12%,transparent);box-shadow:inset 2px 0 0 var(--acc)}
+.sb-group-hdr .sl{flex:1;padding-left:1px}
+.sb-chevron{font-size:9px;transition:transform .15s,color .12s;width:20px;align-self:stretch;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:var(--faint)}
+.sb-group.open>.sb-group-hdr .sb-chevron{transform:rotate(90deg);color:var(--acc)}
+.sb-sub{display:none;margin:1px 0 6px 19px;padding-left:8px;border-left:1px solid var(--bdr)}
+.sb-group.open .sb-sub{display:block}
+.sb-sub .sl{font-size:12px;padding:3px 8px;color:var(--dim)}
+.sb-sub .sl:hover{color:var(--text)}
+.sb-kind{display:inline-block;width:12px;font-family:'JetBrains Mono',monospace;font-size:8px;font-weight:700;letter-spacing:.03em;margin-right:8px;text-transform:uppercase;text-align:center}
+
+/* Main content */
+#main{flex:1;padding:40px max(52px,calc(50% - 574px));min-width:0;overflow-y:auto;height:calc(100vh - 60px)}
+
+/* Breadcrumb */
+.breadcrumb{font-size:12px;color:var(--dim);margin-bottom:16px;display:flex;align-items:center;gap:6px}
+.breadcrumb a{color:var(--dim);font-size:12px}.breadcrumb a:hover{color:var(--acc)}
+.breadcrumb .sep{color:var(--bdr)}
+
+/* Module doc card */
+.mdoc{background:var(--card);border:1px solid var(--bdr);border-radius:8px;padding:20px 24px;margin-bottom:24px;color:var(--dim);font-size:14px;line-height:1.7}
+
+/* Items */
+.item{border:1px solid var(--bdr);border-radius:8px;margin-bottom:12px;overflow:hidden;transition:border-color .15s}
+.item:hover{border-color:color-mix(in srgb,var(--acc) 40%,var(--bdr))}
+.ih{display:flex;align-items:baseline;gap:10px;padding:12px 16px;background:var(--card);cursor:pointer;user-select:none;transition:background .1s}
+.ih:hover{background:color-mix(in srgb,var(--card) 80%,var(--acc) 20%)}
+
+/* Badges */
+.badge{font-family:'JetBrains Mono',monospace;font-size:9px;font-weight:500;letter-spacing:.08em;padding:2px 9px;border-radius:100px;text-transform:uppercase;flex-shrink:0;border:1px solid transparent}
+.bfn{background:color-mix(in oklab,var(--fn) 13%,transparent);color:var(--fn);border-color:color-mix(in oklab,var(--fn) 24%,transparent)}
+.bpfn{background:color-mix(in oklab,var(--prv) 18%,transparent);color:var(--prv);border-color:color-mix(in oklab,var(--prv) 30%,transparent)}
+.bty{background:color-mix(in oklab,var(--ty) 12%,transparent);color:var(--ty);border-color:color-mix(in oklab,var(--ty) 24%,transparent)}
+.bpt{background:color-mix(in oklab,var(--prv) 15%,transparent);color:var(--prv);border-color:color-mix(in oklab,var(--prv) 26%,transparent)}
+.bif{background:color-mix(in oklab,var(--if) 12%,transparent);color:var(--if);border-color:color-mix(in oklab,var(--if) 24%,transparent)}
+
+/* Item content */
+.name{font-family:'JetBrains Mono','Fira Code',monospace;font-size:13px;color:var(--bright);font-weight:600}
+.sig{font-family:'JetBrains Mono','Fira Code',monospace;font-size:12px;color:var(--dim);flex:1;margin-left:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.laws h4{margin:12px 0 4px;font-size:13px;color:var(--dim)}.laws ul{margin:0;padding-left:18px}.law-by{color:var(--dim);font-size:12px}.law-st{font-size:11px;padding:1px 6px;border-radius:8px;border:1px solid var(--bdr);color:var(--dim)}.law-ok{color:var(--acc)}
+.ib{padding:18px 20px;border-top:1px solid var(--bdr);display:none;font-size:14px;color:var(--text);line-height:1.7}
+.ib.open{display:block}
+
+/* Source + anchor links */
+.src-link{font-size:10px;color:var(--dim);background:var(--bg);border:1px solid var(--bdr);border-radius:4px;padding:1px 6px;margin-left:auto;opacity:0;transition:all .15s;text-decoration:none;flex-shrink:0}
+.ih:hover .src-link{opacity:1}.src-link:hover{color:var(--acc);border-color:var(--acc);text-decoration:none}
+.anchor-link{color:var(--bdr);font-size:14px;margin-left:6px;opacity:0;transition:opacity .15s;text-decoration:none}
+.ih:hover .anchor-link{opacity:1}.anchor-link:hover{color:var(--acc);text-decoration:none}
+
+/* Module cards (index page) */
+.mc{border:1px solid var(--bdr);border-radius:8px;padding:16px 20px;margin-bottom:12px;background:var(--card);transition:all .15s}
+.mc:hover{border-color:var(--acc);transform:translateY(-1px)}
+.mc h3{font-family:'Lora',Georgia,serif;color:var(--acc);font-size:1.05rem;font-weight:600;letter-spacing:-.01em}
+.mc p{font-size:13px;color:var(--dim);margin-top:6px}
+.st{font-size:12px;color:var(--dim);margin-top:8px;display:flex;gap:16px}
+.st span{display:flex;align-items:center;gap:4px}
+
+/* Copy button */
+.pre-wrap{position:relative}
+.copy-btn{position:absolute;top:8px;right:10px;background:var(--card);color:var(--dim);border:1px solid var(--bdr);border-radius:5px;padding:3px 10px;font-size:11px;font-family:-apple-system,sans-serif;cursor:pointer;opacity:0;transition:all .15s}
+.pre-wrap:hover .copy-btn{opacity:1}
+.copy-btn:hover{color:var(--text);border-color:var(--acc)}
+.copy-btn.copied{color:var(--fn);border-color:var(--fn);opacity:1}
+
+/* Search overlay (Cmd+K) */
+#search-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:200;align-items:flex-start;justify-content:center;padding-top:min(20vh,160px)}
+#search-overlay.open{display:flex}
+#search-modal{background:var(--sb);border:1px solid var(--bdr);border-radius:12px;width:560px;max-width:90vw;max-height:70vh;display:flex;flex-direction:column;box-shadow:0 16px 48px rgba(0,0,0,.4)}
+#search-input{width:100%;background:transparent;border:none;border-bottom:1px solid var(--bdr);color:var(--text);padding:16px 20px;font-size:15px;outline:none;font-family:inherit}
+#search-input::placeholder{color:var(--dim)}
+#sr{max-height:50vh;overflow-y:auto;padding:8px}
+#sr:empty{display:none}
+.sr-item{display:flex;align-items:baseline;gap:8px;padding:8px 12px;border-radius:6px;cursor:pointer;text-decoration:none;color:var(--text);font-size:13px;transition:background .1s}
+.sr-item:hover{background:var(--card);text-decoration:none}
+.sr-kind{font-size:9px;font-weight:700;letter-spacing:.06em;padding:2px 6px;border-radius:4px;text-transform:uppercase;flex-shrink:0;min-width:32px;text-align:center}
+.sr-fn{background:color-mix(in oklab,var(--fn) 13%,transparent);color:var(--fn)}.sr-type{background:color-mix(in oklab,var(--ty) 12%,transparent);color:var(--ty)}
+.sr-interface{background:color-mix(in oklab,var(--if) 12%,transparent);color:var(--if)}.sr-module{background:color-mix(in oklab,var(--acc) 13%,transparent);color:var(--acc)}
+.sr-pfn{background:color-mix(in oklab,var(--prv) 18%,transparent);color:var(--prv)}.sr-ptype{background:color-mix(in oklab,var(--prv) 15%,transparent);color:var(--prv)}
+.sr-name{color:var(--bright);font-family:monospace;font-weight:600;white-space:nowrap}
+.sr-mod{color:var(--dim);font-size:11px;margin-left:auto;flex-shrink:0}
+.sr-doc{color:var(--dim);font-size:11px;padding:0 12px 6px 48px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sr-sep{border-top:1px solid var(--bdr);margin:2px 8px}
+
+/* Admonitions */
+.admonition{border-left:3px solid var(--acc);background:var(--card);border-radius:0 6px 6px 0;padding:12px 16px;margin:12px 0;font-size:14px;color:var(--text)}
+.admonition.warning{border-left-color:var(--ty)}
+.admonition.note{border-left-color:var(--acc2)}
+
+/* Lists */
+ul,ol{margin:8px 0;padding-left:24px}li{margin:4px 0;line-height:1.6}
+
+/* Guide body */
+.guide-body{line-height:1.8;font-size:15px}
+.guide-body h3{font-family:'Lora',Georgia,serif;font-size:1.4rem;margin:30px 0 12px;color:var(--bright);font-weight:600;letter-spacing:-.01em}
+.guide-body h4{font-family:'Lora',Georgia,serif;font-size:1.1rem;margin:24px 0 10px;color:var(--bright);font-weight:600}
+
+/* Code blocks follow theme tokens (light code surface in light mode, like the main page) */
+
+/* Responsive */
+@media(max-width:768px){#sb{display:none}#main{padding:24px 16px}#search-trigger{min-width:auto}}
+</style></head><body><header id="topbar"><div class="brand"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg> March Docs</div><div class="actions"><button id="search-trigger" onclick="openSearch()"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg> Search&hellip;<kbd>&#8984;K</kbd></button><button id="theme-toggle" onclick="toggleTheme()"><svg id="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg><svg id="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="display:none"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg></button></div></header><div id="search-overlay" onclick="closeSearch()"><div id="search-modal" onclick="event.stopPropagation()"><input id="search-input" type="text" placeholder="Search modules, functions, types&hellip;" autocomplete="off"><div id="sr"></div></div></div><div class="content-wrap"><nav id="sb"><div class="sb-section"><a href="index.html" class="sl">Overview</a><div class="sb-heading">Modules</div><div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.html"><span class="sb-chevron">&#9656;</span><a class="sl" href="Conduit.html">Conduit</a></div><div class="sb-sub"><a class="sl" href="Conduit.html#type-ConduitError"><span class="sb-kind" style="color:var(--ty)">T</span>ConduitError</a>
+<a class="sl" href="Conduit.html#type-Schema"><span class="sb-kind" style="color:var(--ty)">T</span>Schema</a>
+<a class="sl" href="Conduit.html#type-Backoff"><span class="sb-kind" style="color:var(--ty)">T</span>Backoff</a>
+<a class="sl" href="Conduit.html#type-UniqueScope"><span class="sb-kind" style="color:var(--ty)">T</span>UniqueScope</a>
+<a class="sl" href="Conduit.html#type-UniqueConstraint"><span class="sb-kind" style="color:var(--ty)">T</span>UniqueConstraint</a>
+<a class="sl" href="Conduit.html#type-UniqueConflict"><span class="sb-kind" style="color:var(--ty)">T</span>UniqueConflict</a>
+<a class="sl" href="Conduit.html#type-PerKeyRateLimit"><span class="sb-kind" style="color:var(--ty)">T</span>PerKeyRateLimit</a>
+<a class="sl" href="Conduit.html#type-RateLimiterBackend"><span class="sb-kind" style="color:var(--ty)">T</span>RateLimiterBackend</a>
+<a class="sl" href="Conduit.html#type-RateLimit"><span class="sb-kind" style="color:var(--ty)">T</span>RateLimit</a>
+<a class="sl" href="Conduit.html#type-JobConfig"><span class="sb-kind" style="color:var(--ty)">T</span>JobConfig</a>
+<a class="sl" href="Conduit.html#type-JobInfo"><span class="sb-kind" style="color:var(--ty)">T</span>JobInfo</a>
+<a class="sl" href="Conduit.html#type-RetentionConfig"><span class="sb-kind" style="color:var(--ty)">T</span>RetentionConfig</a>
+<a class="sl" href="Conduit.html#type-Config"><span class="sb-kind" style="color:var(--ty)">T</span>Config</a>
+<a class="sl" href="Conduit.html#type-CronOverlap"><span class="sb-kind" style="color:var(--ty)">T</span>CronOverlap</a>
+<a class="sl" href="Conduit.html#type-CronConfig"><span class="sb-kind" style="color:var(--ty)">T</span>CronConfig</a>
+<a class="sl" href="Conduit.html#type-CronSchedule"><span class="sb-kind" style="color:var(--ty)">T</span>CronSchedule</a>
+<a class="sl" href="Conduit.html#type-JobRow"><span class="sb-kind" style="color:var(--ty)">T</span>JobRow</a>
+<a class="sl" href="Conduit.html#type-DeadLetter"><span class="sb-kind" style="color:var(--ty)">T</span>DeadLetter</a>
+<a class="sl" href="Conduit.html#type-NodeInfo"><span class="sb-kind" style="color:var(--ty)">T</span>NodeInfo</a>
+<a class="sl" href="Conduit.html#type-WorkflowError"><span class="sb-kind" style="color:var(--ty)">T</span>WorkflowError</a>
+<a class="sl" href="Conduit.html#type-ExecutionMode"><span class="sb-kind" style="color:var(--ty)">T</span>ExecutionMode</a>
+<a class="sl" href="Conduit.html#type-WorkflowConfig"><span class="sb-kind" style="color:var(--ty)">T</span>WorkflowConfig</a>
+<a class="sl" href="Conduit.html#type-WorkflowHandle"><span class="sb-kind" style="color:var(--ty)">T</span>WorkflowHandle</a>
+<a class="sl" href="Conduit.html#type-WorkflowRow"><span class="sb-kind" style="color:var(--ty)">T</span>WorkflowRow</a>
+<a class="sl" href="Conduit.html#type-WorkflowCheckpoint"><span class="sb-kind" style="color:var(--ty)">T</span>WorkflowCheckpoint</a>
+<a class="sl" href="Conduit.html#type-WorkflowSignal"><span class="sb-kind" style="color:var(--ty)">T</span>WorkflowSignal</a>
+<a class="sl" href="Conduit.html#type-WorkflowContext"><span class="sb-kind" style="color:var(--ty)">T</span>WorkflowContext</a>
+<a class="sl" href="Conduit.html#type-WorkflowEvent"><span class="sb-kind" style="color:var(--ty)">T</span>WorkflowEvent</a>
+<a class="sl" href="Conduit.html#type-Auth"><span class="sb-kind" style="color:var(--ty)">T</span>Auth</a>
+<a class="sl" href="Conduit.html#iface-Storage"><span class="sb-kind" style="color:var(--if)">I</span>Storage</a>
+<a class="sl" href="Conduit.html#fn-cancel_cron"><span class="sb-kind" style="color:var(--fn)">F</span>cancel_cron</a>
+<a class="sl" href="Conduit.html#fn-cancel_workflow"><span class="sb-kind" style="color:var(--fn)">F</span>cancel_workflow</a>
+<a class="sl" href="Conduit.html#fn-cluster_leader"><span class="sb-kind" style="color:var(--fn)">F</span>cluster_leader</a>
+<a class="sl" href="Conduit.html#fn-enqueue_all"><span class="sb-kind" style="color:var(--fn)">F</span>enqueue_all</a>
+<a class="sl" href="Conduit.html#fn-pause_cron"><span class="sb-kind" style="color:var(--fn)">F</span>pause_cron</a>
+<a class="sl" href="Conduit.html#fn-pause_queue"><span class="sb-kind" style="color:var(--fn)">F</span>pause_queue</a>
+<a class="sl" href="Conduit.html#fn-resume_cron"><span class="sb-kind" style="color:var(--fn)">F</span>resume_cron</a>
+<a class="sl" href="Conduit.html#fn-resume_queue"><span class="sb-kind" style="color:var(--fn)">F</span>resume_queue</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.API.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.API.html">Conduit.API</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Backoff.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Backoff.html">Conduit.Backoff</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Config.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Config.html">Conduit.Config</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.CronConfig.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.CronConfig.html">Conduit.CronConfig</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.CronParser.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.CronParser.html">Conduit.CronParser</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.CronRegistry.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.CronRegistry.html">Conduit.CronRegistry</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.CronScheduler.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.CronScheduler.html">Conduit.CronScheduler</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Dashboard.html">Conduit.Dashboard</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Actions.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Dashboard.Actions.html">Conduit.Dashboard.Actions</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Assets.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Dashboard.Assets.html">Conduit.Dashboard.Assets</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Auth.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Dashboard.Auth.html">Conduit.Dashboard.Auth</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Html.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Dashboard.Html.html">Conduit.Dashboard.Html</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Pages.Crons.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Dashboard.Pages.Crons.html">Conduit.Dashboard.Pages.Crons</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Pages.DeadLetters.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Dashboard.Pages.DeadLetters.html">Conduit.Dashboard.Pages.DeadLetters</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Pages.Jobs.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Dashboard.Pages.Jobs.html">Conduit.Dashboard.Pages.Jobs</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Pages.Nodes.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Dashboard.Pages.Nodes.html">Conduit.Dashboard.Pages.Nodes</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Pages.Overview.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Dashboard.Pages.Overview.html">Conduit.Dashboard.Pages.Overview</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Pages.Queues.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Dashboard.Pages.Queues.html">Conduit.Dashboard.Pages.Queues</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Pages.Workflows.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Dashboard.Pages.Workflows.html">Conduit.Dashboard.Pages.Workflows</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Queries.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Dashboard.Queries.html">Conduit.Dashboard.Queries</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Dashboard.Router.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Dashboard.Router.html">Conduit.Dashboard.Router</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.DeadLetter.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.DeadLetter.html">Conduit.DeadLetter</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.EventStore.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.EventStore.html">Conduit.EventStore</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.JobConfig.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.JobConfig.html">Conduit.JobConfig</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Middleware.Chain.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Middleware.Chain.html">Conduit.Middleware.Chain</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Node.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Node.html">Conduit.Node</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Pruner.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Pruner.html">Conduit.Pruner</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Queue.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Queue.html">Conduit.Queue</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.QueueControl.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.QueueControl.html">Conduit.QueueControl</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.RateLimiter.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.RateLimiter.html">Conduit.RateLimiter</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.RetentionConfig.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.RetentionConfig.html">Conduit.RetentionConfig</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Schema.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Schema.html">Conduit.Schema</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Shutdown.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Shutdown.html">Conduit.Shutdown</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Sleep.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Sleep.html">Conduit.Sleep</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Storage.Postgres.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Storage.Postgres.html">Conduit.Storage.Postgres</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Telemetry.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Telemetry.html">Conduit.Telemetry</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Time.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Time.html">Conduit.Time</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Unique.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Unique.html">Conduit.Unique</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.Worker.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.Worker.html">Conduit.Worker</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.WorkflowConfig.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.WorkflowConfig.html">Conduit.WorkflowConfig</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.WorkflowContext.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.WorkflowContext.html">Conduit.WorkflowContext</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.WorkflowRegistry.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.WorkflowRegistry.html">Conduit.WorkflowRegistry</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Conduit.WorkflowRunner.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Conduit.WorkflowRunner.html">Conduit.WorkflowRunner</a></div></div>
+<div class="sb-group"><div class="sb-group-hdr" data-href="Forge.CmdConduit.html"><span class="sb-chevron" style="visibility:hidden">&#9656;</span><a class="sl" href="Forge.CmdConduit.html">Forge.CmdConduit</a></div></div></div></nav><main id="main"><nav class="breadcrumb"><a href="index.html">March Docs</a><span class="sep">&rsaquo;</span><span>Conduit</span></nav><h1>Conduit</h1><div class="mdoc"><p>Conduit — job queue and durable workflow engine for March.</p><p>This module is the top-level namespace. It re-exports the types shared across all subsystems (errors, config, job metadata, workflow types, etc.) and provides thin forwarding wrappers so callers can write <code>Conduit.pause_cron(...)</code> instead of the fully-qualified <code>Conduit.API.pause_cron(...)</code>.</p><p>Typical startup sequence:</p><ol><li>Register performers:    Conduit.API.register(job_type, performer, config)</li><li>Register crons:         Conduit.API.register_cron(cron_type, cron_config, performer)</li><li>Register workflows:     Conduit.API.register_workflow(wf_type, runner, wf_config)</li><li>Start the engine:       Conduit.API.start(config, storage)</li></ol><p>All types below are intentionally kept in this file so that library consumers have a single import point for the entire Conduit type vocabulary.</p></div><h2>Types</h2><div class="item" id="type-ConduitError"><div class="ih"><span class="badge bty">type</span><span class="name">ConduitError</span><span class="sig"><a href="#type-ConduitError">ConduitError</a> = Retry(String) | Discard(String) | Snooze(Int) | WorkerError(String)</span><a class="anchor-link" href="#type-ConduitError" title="Link">#</a></div><div class="ib"><p><code>ConduitError</code> is returned by performer functions to control what the worker does after a job finishes unsuccessfully.</p><pre><code><span class="tok-ty">Retry</span>(msg)       — transient failure; reschedule using the job's backoff
+                   strategy.  `msg` is appended to the job's error list.
+<span class="tok-ty">Discard</span>(msg)     — permanent failure; <span class="tok-kw">do</span> not retry.  <span class="tok-ty">Routes</span> to the
+                   dead-letter queue <span class="tok-kw">if</span> one is configured, otherwise marks
+                   the job dead <span class="tok-kw">in</span>-place.
+<span class="tok-ty">Snooze</span>(ms)       — postpone: reschedule the job to run after `ms`
+                   milliseconds without consuming a retry attempt.  <span class="tok-ty">Used</span>
+                   internally by the rate-limiter and available to
+                   performers that need to wait <span class="tok-kw">for</span> an external <span class="tok-kw">resource</span>.
+<span class="tok-ty">WorkerError</span>(msg) — unexpected infrastructure error (caught exception,
+                   storage failure).  <span class="tok-ty">Treated</span> the same <span class="tok-kw">as</span> <span class="tok-ty">Retry</span>; the
+                   distinction lets callers identify system vs. domain
+                   failures <span class="tok-kw">in</span> logs.</code></pre></div></div>
+<div class="item" id="type-Schema"><div class="ih"><span class="badge bty">type</span><span class="name">Schema</span><span class="sig"><a href="#type-Schema">Schema</a>(a) = { validator : Option(a -&gt; Result((), String)) }</span><a class="anchor-link" href="#type-Schema" title="Link">#</a></div><div class="ib"><p>Optional argument validator attached to a job or cron.  When <code>validator</code> is <code>Some(f)</code>, <code>Conduit.Schema.validate</code> calls <code>f</code> on the decoded arguments and propagates any <code>Err</code> back to the caller before the job is enqueued.  Use <code>Conduit.Schema.none()</code> to skip validation.</p></div></div>
+<div class="item" id="type-Backoff"><div class="ih"><span class="badge bty">type</span><span class="name">Backoff</span><span class="sig"><a href="#type-Backoff">Backoff</a> =</span><a class="anchor-link" href="#type-Backoff" title="Link">#</a></div><div class="ib"><p>Controls the delay between retry attempts.  The worker calls <code>Conduit.Backoff.delay(strategy, attempt)</code> and adds a random jitter (0–1 s) before scheduling the next attempt.</p><pre><code><span class="tok-ty">Linear</span>         — delay = <span class="tok-num">5</span> s × attempt  (<span class="tok-num">5</span> s, <span class="tok-num">10</span> s, <span class="tok-num">15</span> s, …)
+<span class="tok-ty">Exponential</span>    — delay = <span class="tok-num">2</span>^(attempt-<span class="tok-num">1</span>) s  (<span class="tok-num">1</span> s, <span class="tok-num">2</span> s, <span class="tok-num">4</span> s, <span class="tok-num">8</span> s, …)
+<span class="tok-ty">Fibonacci</span>      — delay = fib(attempt) s   (<span class="tok-num">1</span> s, <span class="tok-num">1</span> s, <span class="tok-num">2</span> s, <span class="tok-num">3</span> s, <span class="tok-num">5</span> s, …)
+<span class="tok-ty">Custom</span>(f)      — delay = f(attempt) ms, fully user-controlled.
+                 `f` receives the <span class="tok-num">1</span>-based attempt number and must return
+                 a non-negative integer of milliseconds.</code></pre><p>Internal constructor names are unique (prefixed with Conduit) so they do not clash with the stdlib Backoff / QuantileMethod types that were added in newer march releases.  The public API is exposed via let constants and a fn Custom helper in lib/conduit/backoff.march.</p></div></div>
+<div class="item" id="type-UniqueScope"><div class="ih"><span class="badge bty">type</span><span class="name">UniqueScope</span><span class="sig"><a href="#type-UniqueScope">UniqueScope</a> = PerQueue | Global</span><a class="anchor-link" href="#type-UniqueScope" title="Link">#</a></div><div class="ib"><p><code>UniqueScope</code> controls the boundary of uniqueness:</p><pre><code><span class="tok-ty">PerQueue</span>  (default) — one active job per (queue, job_type, fingerprint).
+                      <span class="tok-ty">The</span> same job <span class="tok-kw">type</span> can still be unique-per-queue <span class="tok-kw">in</span>
+                      different queues simultaneously.
+<span class="tok-ty">Global</span>              — one active job per (job_type, fingerprint) across
+                      all queues.</code></pre></div></div>
+<div class="item" id="type-UniqueConstraint"><div class="ih"><span class="badge bty">type</span><span class="name">UniqueConstraint</span><span class="sig"><a href="#type-UniqueConstraint">UniqueConstraint</a> = {</span><a class="anchor-link" href="#type-UniqueConstraint" title="Link">#</a></div><div class="ib"><p><code>UniqueConstraint</code> is set via <code>JobConfig.unique_for</code>.</p><pre><code>duration  — how long (ms) the unique lock is held after the job
+            completes.  <span class="tok-ty">Set</span> to <span class="tok-num">0</span> to release immediately <span class="tok-kw">on</span> completion.
+fields    — <span class="tok-ty">JSON</span> field names to include <span class="tok-kw">in</span> the fingerprint.  <span class="tok-ty">An</span> empty
+            list includes the entire raw payload string.
+scope     — see <span class="tok-ty">UniqueScope</span> above.</code></pre></div></div>
+<div class="item" id="type-UniqueConflict"><div class="ih"><span class="badge bty">type</span><span class="name">UniqueConflict</span><span class="sig"><a href="#type-UniqueConflict">UniqueConflict</a> = Ignore | Replace | Raise</span><a class="anchor-link" href="#type-UniqueConflict" title="Link">#</a></div><div class="ib"><p><code>UniqueConflict</code> controls what happens when a unique constraint fires:</p><pre><code><span class="tok-ty">Ignore</span>   (default) — silently return the id of the existing job <span class="tok-kw">as</span> <span class="tok-kw">if</span>
+                     enqueue succeeded.  <span class="tok-ty">The</span> new job is dropped.
+<span class="tok-ty">Raise</span>              — return `<span class="tok-ty">Err</span>(<span class="tok-str">&quot;unique constraint violated …&quot;</span>)` to the
+                     caller.  <span class="tok-ty">Nothing</span> is inserted.
+<span class="tok-ty">Replace</span>            — cancel the existing job and insert the new one.</code></pre></div></div>
+<div class="item" id="type-PerKeyRateLimit"><div class="ih"><span class="badge bty">type</span><span class="name">PerKeyRateLimit</span><span class="sig"><a href="#type-PerKeyRateLimit">PerKeyRateLimit</a> = {</span><a class="anchor-link" href="#type-PerKeyRateLimit" title="Link">#</a></div><div class="ib"><p><code>PerKeyRateLimit</code> adds a secondary per-entity bucket on top of the global per-job-type bucket.</p><pre><code>key_fn  — extracts a discriminator from the job payload string.
+          e.g. `<span class="tok-kw">fn</span> payload -&gt; <span class="tok-ty">Json</span>.get_string(payload, <span class="tok-str">&quot;user_id&quot;</span>)`
+limit   — tokens/second <span class="tok-kw">for</span> this entity bucket.</code></pre></div></div>
+<div class="item" id="type-RateLimiterBackend"><div class="ih"><span class="badge bty">type</span><span class="name">RateLimiterBackend</span><span class="sig"><a href="#type-RateLimiterBackend">RateLimiterBackend</a> =</span><a class="anchor-link" href="#type-RateLimiterBackend" title="Link">#</a></div><div class="ib"><p><code>RateLimiterBackend</code> selects the token-bucket implementation:</p><pre><code><span class="tok-ty">StorageBacked</span>       — <span class="tok-ty">Postgres</span> token bucket via the storage <span class="tok-kw">interface</span>.
+                      <span class="tok-ty">Correct</span> under multi-node deployments; recommended
+                      default.
+<span class="tok-ty">Custom</span>(f)           — user-supplied function `f(key, rate) -&gt;
+                      <span class="tok-ty">Result</span>(<span class="tok-ty">Bool</span>, <span class="tok-ty">String</span>)`.  <span class="tok-ty">Return</span> `<span class="tok-ty">Ok</span>(<span class="tok-kw">true</span>)` to allow,
+                      `<span class="tok-ty">Ok</span>(<span class="tok-kw">false</span>)` to deny (snooze), `<span class="tok-ty">Err</span>(e)` <span class="tok-kw">on</span> storage
+                      failure (worker will proceed anyway to avoid
+                      blocking the queue).  <span class="tok-ty">Use</span> <span class="tok-kw">for</span> <span class="tok-ty">Redis</span>, <span class="tok-kw">in</span>-process
+                      sliding windows, or any other backend.</code></pre></div></div>
+<div class="item" id="type-RateLimit"><div class="ih"><span class="badge bty">type</span><span class="name">RateLimit</span><span class="sig"><a href="#type-RateLimit">RateLimit</a> = {</span><a class="anchor-link" href="#type-RateLimit" title="Link">#</a></div><div class="ib"><p><code>RateLimit</code> is set via <code>JobConfig.rate_limit</code>.</p><pre><code>max_per_second  — global token allowance across all instances of this job
+                  <span class="tok-kw">type</span>; <span class="tok-num">0</span> means unlimited.
+per_key         — optional secondary per-entity bucket (see <span class="tok-ty">PerKeyRateLimit</span>).
+backend         — token-bucket implementation (see <span class="tok-ty">RateLimiterBackend</span>).</code></pre></div></div>
+<div class="item" id="type-JobConfig"><div class="ih"><span class="badge bty">type</span><span class="name">JobConfig</span><span class="sig"><a href="#type-JobConfig">JobConfig</a> = {</span><a class="anchor-link" href="#type-JobConfig" title="Link">#</a></div><div class="ib"><p><code>JobConfig</code> is set once per job type, typically via <code>fn config()</code> on the job module, and passed to <code>Conduit.API.register</code>.  At runtime the worker reads it from the in-process registry to control retry, timeout, and routing.</p><pre><code>queue             — name of the queue this job is enqueued into.
+                    <span class="tok-ty">Defaults</span> to <span class="tok-str">&quot;default&quot;</span>.
+max_attempts      — maximum number of executions before dead-lettering.
+                    <span class="tok-ty">Attempt</span> <span class="tok-num">1</span> is the first try; retries start at attempt <span class="tok-num">2.</span>
+                    <span class="tok-ty">Defaults</span> to <span class="tok-num">3.</span>
+timeout           — milliseconds before the worker considers the job hung.
+                    <span class="tok-ty">The</span> heartbeat interval is derived <span class="tok-kw">as</span> timeout / <span class="tok-num">3</span>
+                    (minimum <span class="tok-num">5</span> s).  <span class="tok-ty">Defaults</span> to <span class="tok-num">30</span> <span class="tok-num">000</span> (<span class="tok-num">30</span> s).
+backoff           — delay strategy between retries (see <span class="tok-ty">Backoff</span>).
+                    <span class="tok-ty">Defaults</span> to <span class="tok-ty">Exponential</span>.
+dead_letter_queue — optional queue name <span class="tok-kw">for</span> the <span class="tok-ty">DLQ</span>.  <span class="tok-ty">When</span> set, exhausted
+                    and discarded jobs are written to conduit_dead_letters
+                    and a `conduit_queue_&lt;dlq&gt;` <span class="tok-ty">NOTIFY</span> is fired.  <span class="tok-ty">When</span>
+                    <span class="tok-ty">None</span> the job is marked dead <span class="tok-kw">in</span>-place without a <span class="tok-ty">DLQ</span> row.
+unique_for        — optional uniqueness constraint (see <span class="tok-ty">UniqueConstraint</span>).
+on_conflict       — behaviour <span class="tok-kw">when</span> a unique constraint fires (see
+                    <span class="tok-ty">UniqueConflict</span>).  <span class="tok-ty">Defaults</span> to <span class="tok-ty">Ignore</span>.
+rate_limit        — optional token-bucket rate limit (see <span class="tok-ty">RateLimit</span>).
+on_dead_letter    — optional callback fired synchronously after a job is
+                    moved to the dead-letter table.  <span class="tok-ty">Receives</span> a <span class="tok-ty">JobInfo</span>
+                    snapshot of the failed job.  <span class="tok-ty">Must</span> not block or panic.
+priority          — scheduling priority.  <span class="tok-ty">Higher</span> values are polled first.
+                    <span class="tok-ty">Defaults</span> to <span class="tok-num">0.</span>
+tags              — arbitrary string labels stored <span class="tok-kw">on</span> the job row and
+                    queryable from the dashboard.
+discard_after     — optional age limit <span class="tok-kw">in</span> milliseconds.  <span class="tok-ty">Jobs</span> older than
+                    this are discarded without retry.  <span class="tok-ty">Not</span> yet enforced by
+                    the worker (<span class="tok-ty">Phase</span> <span class="tok-num">6</span>).</code></pre></div></div>
+<div class="item" id="type-JobInfo"><div class="ih"><span class="badge bty">type</span><span class="name">JobInfo</span><span class="sig"><a href="#type-JobInfo">JobInfo</a> = {</span><a class="anchor-link" href="#type-JobInfo" title="Link">#</a></div><div class="ib"><p><code>JobInfo</code> is a read-only snapshot passed to the <code>on_dead_letter</code> callback and available to performers that have been injected their own metadata. It does not include all fields of JobRow; only the information useful to application-level dead-letter handlers.</p><pre><code>id           — <span class="tok-ty">UUID</span> of the job row.
+queue        — queue it was enqueued <span class="tok-kw">in</span>.
+job_type     — string name of the performer module.
+attempt      — the attempt number that just failed (<span class="tok-num">1</span>-based).
+max_attempts — the configured maximum (same <span class="tok-kw">as</span> <span class="tok-ty">JobConfig</span>.max_attempts).
+tags         — tags from the original <span class="tok-ty">JobConfig</span>.
+inserted_at  — <span class="tok-kw">when</span> the job was first enqueued.
+errors       — all error messages accumulated across all attempts.</code></pre></div></div>
+<div class="item" id="type-RetentionConfig"><div class="ih"><span class="badge bty">type</span><span class="name">RetentionConfig</span><span class="sig"><a href="#type-RetentionConfig">RetentionConfig</a> = {</span><a class="anchor-link" href="#type-RetentionConfig" title="Link">#</a></div><div class="ib"><p><code>RetentionConfig</code> controls how long terminal rows are kept before the leader-only background pruner deletes them in batches.  Set <code>Config.retention = Some(RetentionConfig.default())</code> to enable pruning.</p><pre><code>completed_after_ms  — delete completed jobs older than this.
+                      <span class="tok-ty">Defaults</span> to <span class="tok-num">86</span> <span class="tok-num">400</span> <span class="tok-num">000</span> (<span class="tok-num">24</span> h).
+dead_after_ms       — delete dead/discarded job rows <span class="tok-ty">AND</span> their dead-letter
+                      records older than this.  <span class="tok-ty">Defaults</span> to <span class="tok-num">604</span> <span class="tok-num">800</span> <span class="tok-num">000</span> (<span class="tok-num">7</span> d).
+workflow_after_ms   — delete completed/failed/cancelled/timed-out workflows,
+                      their checkpoints, signals, and events older than this.
+                      <span class="tok-ty">Defaults</span> to <span class="tok-num">604</span> <span class="tok-num">800</span> <span class="tok-num">000</span> (<span class="tok-num">7</span> d).
+prune_batch_size    — max rows per <span class="tok-ty">DELETE</span> statement.  <span class="tok-ty">Keeps</span> transactions short
+                      and avoids long table locks.  <span class="tok-ty">Defaults</span> to <span class="tok-num">1</span> <span class="tok-num">000.</span>
+prune_interval_ms   — how often the pruner runs (<span class="tok-kw">on</span> the leader).
+                      <span class="tok-ty">Defaults</span> to <span class="tok-num">300</span> <span class="tok-num">000</span> (<span class="tok-num">5</span> min).</code></pre></div></div>
+<div class="item" id="type-Config"><div class="ih"><span class="badge bty">type</span><span class="name">Config</span><span class="sig"><a href="#type-Config">Config</a> = {</span><a class="anchor-link" href="#type-Config" title="Link">#</a></div><div class="ib"><p><code>Config</code> is passed to <code>Conduit.API.start</code> and governs worker pool sizing, polling cadence, and cluster membership.  See <code>Conduit.Config.default()</code> for production-ready starting values.</p><pre><code>queues                  — list of queue names this node polls.  <span class="tok-ty">Each</span> queue
+                          gets `workers_per_queue` worker tasks.
+workers_per_queue       — concurrent workers per queue.  <span class="tok-ty">Defaults</span> to <span class="tok-num">5.</span>
+poll_interval_ms        — sleep between <span class="tok-ty">DB</span> polls <span class="tok-kw">when</span> the queue is empty.
+                          <span class="tok-ty">Defaults</span> to <span class="tok-num">1</span> <span class="tok-num">000</span> ms.  <span class="tok-ty">Reduce</span> <span class="tok-kw">for</span> lower latency
+                          at the cost of more <span class="tok-ty">DB</span> traffic <span class="tok-kw">when</span> idle.
+cron_tick_interval_ms   — how often the cron scheduler checks <span class="tok-kw">for</span> due
+                          schedules.  <span class="tok-ty">Defaults</span> to <span class="tok-num">30</span> <span class="tok-num">000</span> ms.  <span class="tok-ty">Must</span> be ≤ the
+                          smallest cron interval you <span class="tok-kw">use</span> (typically <span class="tok-num">60</span> s).
+node_id                 — unique identifier <span class="tok-kw">for</span> this process <span class="tok-kw">in</span> the cluster.
+                          <span class="tok-ty">Defaults</span> to a random <span class="tok-ty">UUID</span>; override <span class="tok-kw">with</span> a stable
+                          name <span class="tok-kw">for</span> easier debugging.
+heartbeat_interval_ms   — how often each node updates `last_seen_at` <span class="tok-kw">in</span> the
+                          cluster registry.  <span class="tok-ty">Defaults</span> to <span class="tok-num">15</span> <span class="tok-num">000</span> ms.
+stale_node_threshold_ms — a node not seen within this window is considered
+                          crashed; its <span class="tok-kw">in</span>-flight jobs are reclaimed.
+                          <span class="tok-ty">Defaults</span> to <span class="tok-num">60</span> <span class="tok-num">000</span> ms (must be &gt; heartbeat_interval_ms).
+drain_timeout_ms        — how long `<span class="tok-ty">Conduit</span>.<span class="tok-ty">API</span>.stop` waits <span class="tok-kw">for</span> <span class="tok-kw">in</span>-flight jobs
+                          to finish before deregistering the node.  <span class="tok-ty">Workers</span>
+                          stop polling new jobs immediately <span class="tok-kw">when</span> drain begins.
+                          <span class="tok-ty">Defaults</span> to <span class="tok-num">15</span> <span class="tok-num">000</span> ms.
+retention               — optional pruning config.  <span class="tok-ty">None</span> disables the pruner
+                          (default).  <span class="tok-ty">Set</span> to <span class="tok-ty">Some</span>(<span class="tok-ty">RetentionConfig</span>.default())
+                          to enable automatic table pruning <span class="tok-kw">on</span> the leader.</code></pre></div></div>
+<div class="item" id="type-CronOverlap"><div class="ih"><span class="badge bty">type</span><span class="name">CronOverlap</span><span class="sig"><a href="#type-CronOverlap">CronOverlap</a> = Skip | Allow | Replace</span><a class="anchor-link" href="#type-CronOverlap" title="Link">#</a></div><div class="ib"><p><code>CronOverlap</code> controls what happens when a cron tick fires while the previous job is still running.</p><pre><code><span class="tok-ty">Skip</span>    (default) — <span class="tok-kw">do</span> not fire; wait <span class="tok-kw">for</span> the next tick.
+<span class="tok-ty">Allow</span>             — fire regardless; multiple jobs may run concurrently.
+<span class="tok-ty">Replace</span>           — cancel the <span class="tok-kw">in</span>-flight job and enqueue a fresh one.</code></pre></div></div>
+<div class="item" id="type-CronConfig"><div class="ih"><span class="badge bty">type</span><span class="name">CronConfig</span><span class="sig"><a href="#type-CronConfig">CronConfig</a> = {</span><a class="anchor-link" href="#type-CronConfig" title="Link">#</a></div><div class="ib"><p><code>CronConfig</code> is passed to <code>Conduit.API.register_cron</code>.  Fields:</p><pre><code>schedule  — standard <span class="tok-num">5</span>-field cron expression (<span class="tok-str">&quot;min hr dom mon dow&quot;</span>).
+            <span class="tok-ty">Examples</span>: <span class="tok-str">&quot;0 * * * *&quot;</span> (hourly), <span class="tok-str">&quot;*/15 * * * *&quot;</span> (every <span class="tok-num">15</span> min).
+timezone  — <span class="tok-ty">UTC</span> offset string <span class="tok-kw">for</span> schedule evaluation.  <span class="tok-ty">Defaults</span> to <span class="tok-str">&quot;UTC&quot;</span>.
+            <span class="tok-ty">Supported</span> forms: <span class="tok-str">&quot;UTC&quot;</span>, <span class="tok-str">&quot;UTC+N&quot;</span>, <span class="tok-str">&quot;UTC-N&quot;</span>, <span class="tok-str">&quot;UTC+N:MM&quot;</span>, <span class="tok-str">&quot;UTC-N:MM&quot;</span>.
+            <span class="tok-ty">Examples</span>: <span class="tok-str">&quot;UTC+5:30&quot;</span> (<span class="tok-ty">India</span>), <span class="tok-str">&quot;UTC-8&quot;</span> (<span class="tok-ty">US</span> <span class="tok-ty">Pacific</span> standard time).
+queue     — queue to enqueue fired jobs into.  <span class="tok-ty">Defaults</span> to <span class="tok-str">&quot;default&quot;</span>.
+overlap   — what to <span class="tok-kw">do</span> <span class="tok-kw">when</span> the previous firing is still running
+            (see <span class="tok-ty">CronOverlap</span>).  <span class="tok-ty">Defaults</span> to <span class="tok-ty">Skip</span>.
+tags      — labels forwarded to the job row <span class="tok-kw">on</span> each firing.
+jitter_ms — optional random delay (<span class="tok-num">0..</span>jitter_ms ms) added to each fired
+            job's run_at.  <span class="tok-ty">Prevents</span> thundering-herd <span class="tok-kw">when</span> many crons fire
+            at the same second.  <span class="tok-ty">Defaults</span> to <span class="tok-ty">None</span> (no jitter).</code></pre></div></div>
+<div class="item" id="type-CronSchedule"><div class="ih"><span class="badge bty">type</span><span class="name">CronSchedule</span><span class="sig"><a href="#type-CronSchedule">CronSchedule</a> = {</span><a class="anchor-link" href="#type-CronSchedule" title="Link">#</a></div><div class="ib"><p><code>CronSchedule</code> is the DB row stored in <code>conduit_cron_schedules</code>.  Static crons are upserted from their <code>CronConfig</code> each time <code>Conduit.API.start</code> runs; dynamic crons are managed via <code>Conduit.API.schedule_cron</code>.</p><pre><code>id          — unique identifier; <span class="tok-kw">for</span> static crons this is the `cron_type`
+              string.  <span class="tok-ty">For</span> dynamic crons <span class="tok-kw">use</span> a <span class="tok-ty">UUID</span>.
+job_type    — the performer registered under this name handles execution.
+schedule    — raw cron expression string.
+timezone    — <span class="tok-ty">UTC</span> offset string (see <span class="tok-ty">CronConfig</span>.timezone).
+queue       — queue <span class="tok-kw">for</span> fired jobs.
+payload     — <span class="tok-ty">JSON</span> payload forwarded to the performer <span class="tok-kw">on</span> each firing.
+              <span class="tok-ty">Defaults</span> to <span class="tok-str">&quot;{}&quot;</span>.
+overlap     — serialised <span class="tok-ty">CronOverlap</span> (<span class="tok-str">&quot;skip&quot;</span> | <span class="tok-str">&quot;allow&quot;</span> | <span class="tok-str">&quot;replace&quot;</span>).
+enabled     — <span class="tok-kw">when</span> <span class="tok-kw">false</span> the scheduler skips this row entirely.
+last_run_at — timestamp of the most recent successful firing.
+last_job_id — job id produced by the most recent firing (used <span class="tok-kw">for</span> <span class="tok-ty">Skip</span>
+              overlap check).
+next_run_at — pre-computed next fire time (set after each firing).
+tags        — forwarded to each fired job row.
+jitter_ms   — optional per-firing random delay <span class="tok-kw">in</span> ms (see <span class="tok-ty">CronConfig</span>.jitter_ms).</code></pre></div></div>
+<div class="item" id="type-JobRow"><div class="ih"><span class="badge bty">type</span><span class="name">JobRow</span><span class="sig"><a href="#type-JobRow">JobRow</a> = {</span><a class="anchor-link" href="#type-JobRow" title="Link">#</a></div><div class="ib"><p><code>JobRow</code> mirrors the <code>conduit_jobs</code> DB schema.  Workers fetch this struct from storage, execute the performer, and update the row through the storage interface.  Application code typically does not construct JobRow directly; use <code>Conduit.API.enqueue</code> instead.</p><pre><code>id                — <span class="tok-ty">UUID</span> primary key, generated at enqueue time.
+queue             — queue name.
+job_type          — string key into the performer registry.
+payload           — <span class="tok-kw">opaque</span> <span class="tok-ty">JSON</span> string forwarded verbatim to the performer.
+status            — lifecycle state: <span class="tok-str">&quot;pending&quot;</span> | <span class="tok-str">&quot;running&quot;</span> | <span class="tok-str">&quot;completed&quot;</span> |
+                    <span class="tok-str">&quot;failed&quot;</span> | <span class="tok-str">&quot;dead&quot;</span> | <span class="tok-str">&quot;snoozed&quot;</span>.
+attempt           — number of completed execution attempts (<span class="tok-num">0</span> = not yet run).
+max_attempts      — copy of <span class="tok-ty">JobConfig</span>.max_attempts at enqueue time.
+priority          — scheduling order; higher = polled first.
+backoff           — serialised strategy name (<span class="tok-str">&quot;linear&quot;</span> | <span class="tok-str">&quot;exponential&quot;</span> |
+                    <span class="tok-str">&quot;fibonacci&quot;</span> | <span class="tok-str">&quot;custom&quot;</span>).  <span class="tok-ty">Custom</span> functions cannot be
+                    round-tripped; <span class="tok-str">&quot;custom&quot;</span> falls back to <span class="tok-ty">Exponential</span> <span class="tok-kw">on</span>
+                    retry.
+dead_letter_queue — copy of <span class="tok-ty">JobConfig</span>.dead_letter_queue at enqueue time.
+inserted_at       — <span class="tok-kw">when</span> the job was first enqueued.
+scheduled_at      — <span class="tok-kw">when</span> enqueue was called (same <span class="tok-kw">as</span> inserted_at <span class="tok-kw">for</span>
+                    immediate jobs; earlier <span class="tok-kw">for</span> delayed jobs).
+run_at            — earliest time the job may be picked up.  <span class="tok-ty">Workers</span> skip
+                    rows where run_at &gt; <span class="tok-ty">NOW</span>().
+started_at        — set by mark_running <span class="tok-kw">when</span> a worker claims the job.
+completed_at      — set by mark_completed <span class="tok-kw">on</span> success.
+heartbeat_at      — updated every heartbeat_interval_ms while running.
+                    <span class="tok-ty">Jobs</span> <span class="tok-kw">with</span> a stale heartbeat_at are candidates <span class="tok-kw">for</span>
+                    rescue_stale reclaim.
+worker_id         — <span class="tok-ty">UUID</span> identifying the worker task that claimed the job.
+unique_key        — <span class="tok-ty">SHA</span>-<span class="tok-num">256</span> fingerprint <span class="tok-kw">when</span> unique_for is set; <span class="tok-ty">NULL</span>
+                    otherwise.  <span class="tok-ty">Protected</span> by a partial unique index.
+errors            — chronological list of error messages from each attempt.
+tags              — copy of <span class="tok-ty">JobConfig</span>.tags at enqueue time.</code></pre></div></div>
+<div class="item" id="type-DeadLetter"><div class="ih"><span class="badge bty">type</span><span class="name">DeadLetter</span><span class="sig"><a href="#type-DeadLetter">DeadLetter</a> = {</span><a class="anchor-link" href="#type-DeadLetter" title="Link">#</a></div><div class="ib"><p><code>DeadLetter</code> mirrors the <code>conduit_dead_letters</code> DB schema.  A row is written here when a job exhausts all retry attempts or is explicitly discarded with a dead-letter queue configured.</p><pre><code>id                 — <span class="tok-ty">UUID</span> of the dead-letter row (different from job_id).
+job_id             — <span class="tok-ty">UUID</span> of the originating job row.
+queue / job_type / payload — copied from the originating <span class="tok-ty">JobRow</span>.
+errors             — full error list including the final failure message.
+attempts           — total number of execution attempts made.
+first_attempted_at — started_at of the very first attempt.
+last_attempted_at  — time of the final failed attempt.
+discarded_at       — time the dead-letter row was inserted.
+reviewed           — set to <span class="tok-kw">true</span> by a human operator after triage.
+reviewed_by        — identifier of the operator who reviewed.
+reviewed_at        — time of review.
+retry_count        — number of times this dead-letter has been re-enqueued
+                     via the dashboard <span class="tok-str">&quot;Retry&quot;</span> action.</code></pre></div></div>
+<div class="item" id="type-NodeInfo"><div class="ih"><span class="badge bty">type</span><span class="name">NodeInfo</span><span class="sig"><a href="#type-NodeInfo">NodeInfo</a> = {</span><a class="anchor-link" href="#type-NodeInfo" title="Link">#</a></div><div class="ib"><p><code>NodeInfo</code> mirrors the <code>conduit_workers</code> DB schema.  Each process that calls <code>Conduit.API.start</code> registers a row here and refreshes it via heartbeat.</p><pre><code>id           — stable node identifier (from <span class="tok-ty">Config</span>.node_id).
+hostname     — <span class="tok-ty">OS</span> hostname of the node's machine.
+pid          — <span class="tok-ty">OS</span> process <span class="tok-ty">ID</span>.
+queues       — list of queues this node is polling.
+pool_size    — workers_per_queue value (total pool = pool_size × |queues|).
+started_at   — time <span class="tok-ty">Conduit</span>.<span class="tok-ty">API</span>.start was called <span class="tok-kw">on</span> this node.
+last_seen_at — updated every heartbeat_interval_ms; used to detect crashes.
+status       — <span class="tok-str">&quot;running&quot;</span> | <span class="tok-str">&quot;stopped&quot;</span> | <span class="tok-str">&quot;stale&quot;</span>.</code></pre></div></div>
+<div class="item" id="type-WorkflowError"><div class="ih"><span class="badge bty">type</span><span class="name">WorkflowError</span><span class="sig"><a href="#type-WorkflowError">WorkflowError</a> =</span><a class="anchor-link" href="#type-WorkflowError" title="Link">#</a></div><div class="ib"><p><code>WorkflowError</code> is returned by workflow runner functions to signal how execution ended.</p><pre><code><span class="tok-ty">Failed</span>(msg)       — the workflow function returned an error; the job is
+                    marked <span class="tok-str">&quot;failed&quot;</span> and not retried.
+<span class="tok-ty">Cancelled</span>(msg)    — the workflow was cancelled via `cancel_workflow`; the
+                    job completes cleanly (no retry).
+<span class="tok-ty">TimedOut</span>          — `<span class="tok-ty">WorkflowConfig</span>.timeout` elapsed; the row is marked
+                    <span class="tok-str">&quot;timed_out&quot;</span>.
+<span class="tok-ty">StorageError</span>(msg) — a checkpoint or storage call failed transiently; the
+                    workflow job is retried via the normal backoff path.</code></pre></div></div>
+<div class="item" id="type-ExecutionMode"><div class="ih"><span class="badge bty">type</span><span class="name">ExecutionMode</span><span class="sig"><a href="#type-ExecutionMode">ExecutionMode</a> = Checkpoint | DeterministicReplay</span><a class="anchor-link" href="#type-ExecutionMode" title="Link">#</a></div><div class="ib"><p><code>ExecutionMode</code> selects the checkpoint durability strategy:</p><pre><code><span class="tok-ty">Checkpoint</span>          (default) — each `checkpoint` call writes directly to
+                                `conduit_checkpoints`.  <span class="tok-ty">On</span> resume, completed
+                                checkpoints are loaded from the <span class="tok-ty">DB</span> and their
+                                functions are skipped.
+<span class="tok-ty">DeterministicReplay</span>           — each `checkpoint` call appends to the event
+                                store (`conduit_workflow_events`).  <span class="tok-ty">On</span> resume
+                                the full event log is replayed <span class="tok-kw">in</span> order,
+                                making the execution deterministic.  <span class="tok-ty">Use</span> this
+                                <span class="tok-kw">when</span> you need full audit history or
+                                point-<span class="tok-kw">in</span>-time replay.</code></pre></div></div>
+<div class="item" id="type-WorkflowConfig"><div class="ih"><span class="badge bty">type</span><span class="name">WorkflowConfig</span><span class="sig"><a href="#type-WorkflowConfig">WorkflowConfig</a> = {</span><a class="anchor-link" href="#type-WorkflowConfig" title="Link">#</a></div><div class="ib"><p><code>WorkflowConfig</code> is passed to <code>Conduit.API.register_workflow</code>.</p><pre><code>execution_mode  — checkpoint durability strategy (see <span class="tok-ty">ExecutionMode</span>).
+timeout         — optional maximum wall-clock duration (ms) <span class="tok-kw">for</span> the whole
+                  workflow.  <span class="tok-ty">When</span> elapsed the workflow runner marks the row
+                  <span class="tok-str">&quot;timed_out&quot;</span> and stops retrying.  <span class="tok-ty">None</span> = no timeout.
+tags            — labels forwarded to the workflow runner job row.</code></pre></div></div>
+<div class="item" id="type-WorkflowHandle"><div class="ih"><span class="badge bty">type</span><span class="name">WorkflowHandle</span><span class="sig"><a href="#type-WorkflowHandle">WorkflowHandle</a> = {</span><a class="anchor-link" href="#type-WorkflowHandle" title="Link">#</a></div><div class="ib"><p><code>WorkflowHandle</code> is returned by <code>Conduit.API.start_workflow</code>.  It carries the minimum information needed to poll status or send signals.</p><pre><code>id             — <span class="tok-ty">UUID</span> of the workflow row.
+workflow_type  — the registered <span class="tok-kw">type</span> name.
+started_at     — time the row was inserted.</code></pre></div></div>
+<div class="item" id="type-WorkflowRow"><div class="ih"><span class="badge bty">type</span><span class="name">WorkflowRow</span><span class="sig"><a href="#type-WorkflowRow">WorkflowRow</a> = {</span><a class="anchor-link" href="#type-WorkflowRow" title="Link">#</a></div><div class="ib"><p><code>WorkflowRow</code> mirrors the <code>conduit_workflows</code> DB schema.</p><pre><code>id            — <span class="tok-ty">UUID</span> primary key.
+workflow_type — registered <span class="tok-kw">type</span> name (key into the workflow registry).
+parent_id     — <span class="tok-ty">UUID</span> of the parent workflow, <span class="tok-kw">when</span> this was spawned <span class="tok-kw">as</span> a
+                sub-workflow.  <span class="tok-ty">None</span> <span class="tok-kw">for</span> top-level workflows.
+input         — <span class="tok-ty">JSON</span>-encoded input passed to the runner function.
+output        — <span class="tok-ty">JSON</span>-encoded output <span class="tok-kw">on</span> <span class="tok-str">&quot;completed&quot;</span>; <span class="tok-ty">None</span> otherwise.
+status        — <span class="tok-str">&quot;running&quot;</span> | <span class="tok-str">&quot;completed&quot;</span> | <span class="tok-str">&quot;failed&quot;</span> | <span class="tok-str">&quot;cancelled&quot;</span> |
+                <span class="tok-str">&quot;timed_out&quot;</span>.
+started_at    — row insertion time.
+completed_at  — set <span class="tok-kw">when</span> status transitions to any terminal state.
+timeout_at    — absolute deadline derived from <span class="tok-ty">WorkflowConfig</span>.timeout.
+error         — error message <span class="tok-kw">for</span> <span class="tok-str">&quot;failed&quot;</span> / <span class="tok-str">&quot;cancelled&quot;</span> / <span class="tok-str">&quot;timed_out&quot;</span>.
+error_at      — <span class="tok-kw">when</span> the error was recorded.
+tags          — copy of <span class="tok-ty">WorkflowConfig</span>.tags.
+meta          — arbitrary <span class="tok-ty">JSON</span> string <span class="tok-kw">for</span> application-defined annotations.</code></pre></div></div>
+<div class="item" id="type-WorkflowCheckpoint"><div class="ih"><span class="badge bty">type</span><span class="name">WorkflowCheckpoint</span><span class="sig"><a href="#type-WorkflowCheckpoint">WorkflowCheckpoint</a> = {</span><a class="anchor-link" href="#type-WorkflowCheckpoint" title="Link">#</a></div><div class="ib"><p><code>WorkflowCheckpoint</code> mirrors a row in <code>conduit_checkpoints</code>.</p><pre><code>id           — auto-increment integer primary key.
+workflow_id  — foreign key to conduit_workflows.id.
+name         — fully-qualified checkpoint name (namespace ++ local name).
+value        — <span class="tok-ty">JSON</span>-encoded return value of the checkpoint function.
+created_at   — <span class="tok-kw">when</span> the checkpoint was first written.
+duration_ms  — wall-clock time the checkpoint function took to execute;
+               <span class="tok-ty">None</span> <span class="tok-kw">if</span> not measured.</code></pre></div></div>
+<div class="item" id="type-WorkflowSignal"><div class="ih"><span class="badge bty">type</span><span class="name">WorkflowSignal</span><span class="sig"><a href="#type-WorkflowSignal">WorkflowSignal</a> = {</span><a class="anchor-link" href="#type-WorkflowSignal" title="Link">#</a></div><div class="ib"><p><code>WorkflowSignal</code> mirrors a row in <code>conduit_workflow_signals</code>.</p><pre><code>id           — auto-increment integer primary key.
+workflow_id  — foreign key to conduit_workflows.id.
+signal_type  — string that the workflow is `wait_for_signal`-ing <span class="tok-kw">on</span>.
+payload      — <span class="tok-ty">JSON</span> payload carried <span class="tok-kw">with</span> the signal.
+status       — <span class="tok-str">&quot;pending&quot;</span> | <span class="tok-str">&quot;delivered&quot;</span>.
+sent_at      — <span class="tok-kw">when</span> the signal was inserted.
+delivered_at — <span class="tok-kw">when</span> the workflow consumed the signal.
+expires_at   — optional <span class="tok-ty">TTL</span>; undelivered signals past this time are ignored.
+sent_by      — optional identifier of the sender (<span class="tok-kw">for</span> audit purposes).</code></pre></div></div>
+<div class="item" id="type-WorkflowContext"><div class="ih"><span class="badge bty">type</span><span class="name">WorkflowContext</span><span class="sig"><a href="#type-WorkflowContext">WorkflowContext</a> = {</span><a class="anchor-link" href="#type-WorkflowContext" title="Link">#</a></div><div class="ib"><p><code>WorkflowContext</code> is threaded through every workflow function and passed to <code>checkpoint</code>, <code>parallel</code>, and <code>wait_for_signal</code>.  Application code should treat it as opaque; create one via <code>WorkflowContext.new</code> (done automatically by the workflow runner).</p><pre><code>workflow_id     — <span class="tok-ty">UUID</span> of the running workflow.
+parent_id       — <span class="tok-ty">UUID</span> of the parent workflow (<span class="tok-ty">None</span> <span class="tok-kw">for</span> root).
+namespace       — dot-separated prefix <span class="tok-kw">for</span> checkpoint names within parallel
+                  branches; empty <span class="tok-kw">for</span> the root context.
+checkpoint_key  — <span class="tok-ty">Vault</span> table key used <span class="tok-kw">as</span> the <span class="tok-kw">in</span>-process checkpoint cache.</code></pre></div></div>
+<div class="item" id="type-WorkflowEvent"><div class="ih"><span class="badge bty">type</span><span class="name">WorkflowEvent</span><span class="sig"><a href="#type-WorkflowEvent">WorkflowEvent</a> = {</span><a class="anchor-link" href="#type-WorkflowEvent" title="Link">#</a></div><div class="ib"><p><code>WorkflowEvent</code> mirrors a row in <code>conduit_workflow_events</code>.  Events are append-only and form the source-of-truth for DeterministicReplay mode.</p><pre><code>id          — auto-increment integer primary key.
+workflow_id — foreign key to conduit_workflows.id.
+sequence    — <span class="tok-num">0</span>-based monotonically increasing index within the workflow.
+event_type  — <span class="tok-str">&quot;checkpoint&quot;</span> (only <span class="tok-kw">type</span> <span class="tok-kw">in</span> <span class="tok-ty">Phase</span> <span class="tok-num">3</span>; more planned).
+payload     — <span class="tok-ty">JSON</span>: {<span class="tok-str">&quot;name&quot;</span>:<span class="tok-str">&quot;…&quot;</span>,<span class="tok-str">&quot;value&quot;</span>:…,<span class="tok-str">&quot;duration_ms&quot;</span>:<span class="tok-ty">N</span>}.
+recorded_at — wall-clock time the event was appended.</code></pre></div></div>
+<div class="item" id="type-Auth"><div class="ih"><span class="badge bty">type</span><span class="name">Auth</span><span class="sig"><a href="#type-Auth">Auth</a> =</span><a class="anchor-link" href="#type-Auth" title="Link">#</a></div><div class="ib"><p><code>Auth</code> controls access to the web dashboard.  Pass it when mounting the dashboard router.</p><pre><code><span class="tok-ty">None</span>      — no authentication; the dashboard is publicly accessible.
+            <span class="tok-ty">Only</span> <span class="tok-kw">use</span> <span class="tok-kw">on</span> internal-only networks.
+<span class="tok-ty">Token</span>(t)  — require the <span class="tok-ty">HTTP</span> `<span class="tok-ty">Authorization</span>: <span class="tok-ty">Bearer</span> &lt;t&gt;` header.
+            <span class="tok-ty">Comparison</span> is <span class="tok-ty">NOT</span> constant-time <span class="tok-kw">in</span> the current implementation;
+            <span class="tok-kw">use</span> `<span class="tok-ty">Fn</span>` <span class="tok-kw">with</span> `<span class="tok-ty">Crypto</span>.secure_compare` <span class="tok-kw">for</span> production.
+<span class="tok-ty">Fn</span>(f)     — call `f(authorization_header_value)` <span class="tok-kw">on</span> each request.
+            <span class="tok-ty">Return</span> <span class="tok-kw">true</span> to allow.  <span class="tok-ty">The</span> full header value is passed,
+            including the <span class="tok-str">&quot;Bearer &quot;</span> prefix <span class="tok-kw">if</span> present.</code></pre></div></div><h2>Interfaces</h2><div class="item" id="iface-Storage"><div class="ih"><span class="badge bif">interface</span><span class="name">Storage</span><span class="sig"><a href="#iface-Storage">Storage</a>(s)</span><a class="anchor-link" href="#iface-Storage" title="Link">#</a></div><div class="ib"><p>Pluggable storage backend interface.  Implement it for your preferred database to make Conduit work with that backend.  The Postgres implementation lives in <code>lib/conduit/storage/postgres.march</code>.</p></div></div><h2>Functions</h2><div class="item" id="fn-cancel_cron"><div class="ih"><span class="badge bfn">fn</span><span class="name">cancel_cron</span><span class="sig">cancel_cron(storage : s, cron_id : String) : Result((), String)</span><a class="anchor-link" href="#fn-cancel_cron" title="Link">#</a></div><div class="ib"><p>Permanently delete a cron schedule by id.  See <code>Conduit.API.cancel_cron</code>.</p></div></div>
+<div class="item" id="fn-cancel_workflow"><div class="ih"><span class="badge bfn">fn</span><span class="name">cancel_workflow</span><span class="sig">cancel_workflow(workflow_id : String, reason : String, storage : s) : Result((), String)</span><a class="anchor-link" href="#fn-cancel_workflow" title="Link">#</a></div><div class="ib"><p>Cancel a running workflow with a human-readable reason.  See <code>Conduit.API.cancel_workflow</code>.</p></div></div>
+<div class="item" id="fn-cluster_leader"><div class="ih"><span class="badge bfn">fn</span><span class="name">cluster_leader</span><span class="sig">cluster_leader() : Option(String)</span><a class="anchor-link" href="#fn-cluster_leader" title="Link">#</a></div><div class="ib"><p>Return the node_id of the current leader from this node's in-process view.</p><p>Updated by the background leader-election task each heartbeat cycle.  Returns None if this node has not yet completed its first election tick.</p></div></div>
+<div class="item" id="fn-enqueue_all"><div class="ih"><span class="badge bfn">fn</span><span class="name">enqueue_all</span><span class="sig">enqueue_all(items : List((String, String, <a href="#type-JobConfig">JobConfig</a>)), storage : s) : List(Result(String, String))</span><a class="anchor-link" href="#fn-enqueue_all" title="Link">#</a></div><div class="ib"><p>Enqueue multiple jobs in one call.  See <code>Conduit.API.enqueue_all</code>.</p></div></div>
+<div class="item" id="fn-pause_cron"><div class="ih"><span class="badge bfn">fn</span><span class="name">pause_cron</span><span class="sig">pause_cron(storage : s, cron_id : String) : Result((), String)</span><a class="anchor-link" href="#fn-pause_cron" title="Link">#</a></div><div class="ib"><p>Disable a cron schedule by id.  See <code>Conduit.API.pause_cron</code>.</p></div></div>
+<div class="item" id="fn-pause_queue"><div class="ih"><span class="badge bfn">fn</span><span class="name">pause_queue</span><span class="sig">pause_queue(queue : String) : ()</span><a class="anchor-link" href="#fn-pause_queue" title="Link">#</a></div><div class="ib"><p>Pause all workers polling <code>queue</code> on this node.  See <code>Conduit.API.pause_queue</code>.</p></div></div>
+<div class="item" id="fn-resume_cron"><div class="ih"><span class="badge bfn">fn</span><span class="name">resume_cron</span><span class="sig">resume_cron(storage : s, cron_id : String) : Result((), String)</span><a class="anchor-link" href="#fn-resume_cron" title="Link">#</a></div><div class="ib"><p>Re-enable a paused cron schedule by id.  See <code>Conduit.API.resume_cron</code>.</p></div></div>
+<div class="item" id="fn-resume_queue"><div class="ih"><span class="badge bfn">fn</span><span class="name">resume_queue</span><span class="sig">resume_queue(queue : String) : ()</span><a class="anchor-link" href="#fn-resume_queue" title="Link">#</a></div><div class="ib"><p>Resume all workers polling <code>queue</code> on this node.  See <code>Conduit.API.resume_queue</code>.</p></div></div></main></div><script>
+/* Theme toggle */
+/* localStorage throws in sandboxed (opaque-origin) pages, e.g. registry-hosted docs */
+function lsGet(k){try{return localStorage.getItem(k);}catch(e){return null;}}
+function lsSet(k,v){try{localStorage.setItem(k,v);}catch(e){}}
+function getTheme(){var t=lsGet('march-doc-theme');
+if(t)return t;return window.matchMedia('(prefers-color-scheme:light)').matches?'light':'dark';}
+function applyTheme(t){document.documentElement.setAttribute('data-theme',t);
+var moon=document.getElementById('icon-moon'),sun=document.getElementById('icon-sun');
+if(moon&&sun){moon.style.display=t==='dark'?'block':'none';sun.style.display=t==='light'?'block':'none';}}
+function toggleTheme(){var t=getTheme()==='dark'?'light':'dark';lsSet('march-doc-theme',t);applyTheme(t);}
+applyTheme(getTheme());
+
+/* Search overlay */
+function openSearch(){loadSI();document.getElementById('search-overlay').classList.add('open');
+var inp=document.getElementById('search-input');if(inp){inp.value='';inp.focus();}}
+function closeSearch(){document.getElementById('search-overlay').classList.remove('open');
+var sr=document.getElementById('sr');if(sr)sr.innerHTML='';}
+
+/* DOMContentLoaded */
+document.addEventListener('DOMContentLoaded',function(){
+
+/* Collapsible items */
+document.querySelectorAll('.ih').forEach(function(h){h.addEventListener('click',function(e){
+if(e.target.classList.contains('anchor-link'))return;
+var b=this.nextElementSibling;if(b)b.classList.toggle('open');});});
+
+/* Active sidebar link + auto-expand current module group */
+var path=window.location.pathname;
+document.querySelectorAll('.sl').forEach(function(a){var h=a.getAttribute('href');if(h&&path.endsWith(h)){a.classList.add('active');var g=a.closest('.sb-group');if(g)g.classList.add('open');}});
+
+/* Sidebar group toggle (chevron click expands/collapses) */
+document.querySelectorAll('.sb-group-hdr').forEach(function(hdr){hdr.addEventListener('click',function(e){
+if(e.target.tagName==='A')return;e.preventDefault();this.parentElement.classList.toggle('open');});});
+
+/* Copy buttons on pre blocks */
+document.querySelectorAll('.ib pre').forEach(function(pre){
+var wrap=document.createElement('div');wrap.className='pre-wrap';
+pre.parentNode.insertBefore(wrap,pre);wrap.appendChild(pre);
+var btn=document.createElement('button');btn.className='copy-btn';btn.textContent='Copy';
+btn.addEventListener('click',function(e){e.stopPropagation();
+var code=pre.querySelector('code');var text=code?code.textContent:pre.textContent;
+navigator.clipboard.writeText(text).then(function(){
+btn.textContent='Copied!';btn.classList.add('copied');
+setTimeout(function(){btn.textContent='Copy';btn.classList.remove('copied');},2000);
+}).catch(function(){btn.textContent='!';setTimeout(function(){btn.textContent='Copy';},1500);});});
+wrap.appendChild(btn);});
+
+/* Open anchor from URL hash */
+if(window.location.hash){var el=document.querySelector(window.location.hash);if(el){var ib=el.querySelector('.ib');if(ib)ib.classList.add('open');el.scrollIntoView({behavior:'smooth',block:'start'});}}
+
+/* Cmd+K search shortcut */
+document.addEventListener('keydown',function(e){
+if((e.metaKey||e.ctrlKey)&&e.key==='k'){e.preventDefault();openSearch();}
+if(e.key==='Escape')closeSearch();});
+
+});
+
+/* Cross-module search: loads search-index.json, fuzzy matches, renders results */
+/* The index covers every module (~400 KB for the stdlib), so it is fetched the
+   first time search is opened (or the search button is hovered), not with every
+   page. A query typed before it arrives is re-run when it lands. */
+var SI=null,SIloading=false;
+function loadSI(){if(SI||SIloading)return;SIloading=true;
+fetch('search-index.json').then(function(r){return r.json();}).then(function(d){SI=d;
+var q=document.getElementById('search-input');if(q&&q.value.trim())q.dispatchEvent(new Event('input'));})
+.catch(function(){SIloading=false;});}
+var STR=document.getElementById('search-trigger');if(STR)STR.addEventListener('mouseenter',loadSI);
+
+/* Levenshtein distance */
+function ld(a,b){
+if(!a.length)return b.length;if(!b.length)return a.length;
+var m=[];for(var i=0;i<=b.length;i++)m[i]=[i];
+for(var j=0;j<=a.length;j++)m[0][j]=j;
+for(i=1;i<=b.length;i++)for(j=1;j<=a.length;j++){
+m[i][j]=b[i-1]===a[j-1]?m[i-1][j-1]:Math.min(m[i-1][j-1]+1,m[i][j-1]+1,m[i-1][j]+1);
+}return m[b.length][a.length];}
+
+/* Fuzzy scoring: returns 0 if no match */
+function fs(q,t){
+if(!t)return 0;var ql=q.toLowerCase(),tl=t.toLowerCase();
+/* Exact match */
+if(tl===ql)return 10000;
+/* Starts with */
+if(tl.indexOf(ql)===0)return 5000-tl.length;
+/* Substring */
+var idx=tl.indexOf(ql);if(idx>0)return 3000-idx;
+/* Word boundary match (camelCase, snake_case) */
+var words=tl.replace(/([a-z])([A-Z])/g,'$1 $2').replace(/_/g,' ').split(' ');
+for(var w=0;w<words.length;w++){if(words[w].indexOf(ql)===0)return 2000-w*100;}
+/* Levenshtein for short queries */
+if(ql.length<=8&&tl.length<=40){var d=ld(ql,tl.substring(0,Math.max(ql.length+2,8)));
+if(d<=Math.ceil(ql.length*0.35))return 1000-d*100;}
+return 0;}
+
+/* Score an entry against a query */
+function scoreEntry(q,e){
+return Math.max(
+fs(q,e.n)*4, /* name match (highest weight) */
+fs(q,e.s)*2, /* signature match */
+fs(q,e.m)*2, /* module name match */
+fs(q,e.d) /* doc string match (lowest weight) */
+);}
+
+/* Render search results */
+function renderSR(results){
+var el=document.getElementById('sr');if(!el)return;
+if(!results.length){el.className='';el.innerHTML='';return;}
+el.className='open';var h='';
+for(var i=0;i<results.length;i++){
+var e=results[i].entry,k=e.k,href=e.m+'.html';
+if(k==='fn'||k==='pfn')href+='#fn-'+encodeURIComponent(e.n);
+else if(k==='type'||k==='ptype')href+='#type-'+encodeURIComponent(e.n);
+else if(k==='interface')href+='#iface-'+encodeURIComponent(e.n);
+var kc='sr-'+k;
+h+='<a class="sr-item" href="'+href+'">'+
+'<span class="sr-kind '+kc+'">'+k+'</span>'+
+'<span class="sr-name">'+esc(e.n)+'</span>'+
+'<span class="sr-mod">'+esc(e.m)+'</span></a>';
+if(e.d)h+='<div class="sr-doc">'+esc(e.d.substring(0,100))+'</div>';
+if(i<results.length-1)h+='<div class="sr-sep"></div>';
+}el.innerHTML=h;}
+
+/* HTML escape helper */
+function esc(s){var d=document.createElement('div');d.textContent=s;return d.innerHTML;}
+
+/* Search handler — uses the modal search input */
+var si=document.getElementById('search-input');
+if(si)si.addEventListener('input',function(){
+var q=this.value.trim();
+if(!q||!SI){renderSR([]);return;}
+var results=[];
+for(var i=0;i<SI.length;i++){
+var sc=scoreEntry(q,SI[i]);
+if(sc>0)results.push({entry:SI[i],score:sc});
+}
+results.sort(function(a,b){return b.score-a.score;});
+renderSR(results.slice(0,25));
+});
+</script></body></html>
